@@ -246,6 +246,31 @@ async def test_an_always_on_floor_is_the_lowest_effort_accepted():
 
 
 @pytest.mark.asyncio
+async def test_the_floor_is_tried_from_the_deployments_declared_levels():
+    """The console passes the levels its picker offers: the floor is the lowest of them that is
+    accepted, so it is always a level the admin also sees. Only the lowest two are tried."""
+    refuse = lambda b: "not supported" if "thinking" in b or b.get("reasoning_effort") == "low" else None
+    gw = _Gateway(reject=refuse, floor=True)
+    report = await mc.probe_model("opus", gw, floor_candidates=["low", "medium", "high"])
+    assert report.capabilities[mc.THINKING_FLOOR] == "medium"
+    tried = [b["reasoning_effort"] for b in gw.bodies if b.get("reasoning_effort") not in ("none", "high", None)]
+    assert "minimal" not in tried  # not a declared level, so never tried
+
+    refuse_all = lambda b: "not supported" if "thinking" in b or b.get("reasoning_effort") in ("low", "medium") else None
+    gw = _Gateway(reject=refuse_all, floor=True)
+    report = await mc.probe_model("opus", gw, floor_candidates=["low", "medium", "high"])
+    assert mc.THINKING_FLOOR not in report.capabilities
+    assert not any(b.get("reasoning_effort") == "high" and b.get("max_tokens") == 1024 for b in gw.bodies)
+
+
+@pytest.mark.asyncio
+async def test_no_declared_levels_falls_back_to_the_fixed_pair():
+    gw = _Gateway(reject=_GEMINI_3, floor=True)
+    report = await mc.probe_model("gemini", gw, floor_candidates=[])
+    assert report.capabilities[mc.THINKING_FLOOR] == "minimal"
+
+
+@pytest.mark.asyncio
 async def test_an_always_on_model_that_refuses_every_level_records_no_floor():
     """A deployment the gateway's model map does not translate (a Bedrock ARN: every effort
     becomes a `budget_tokens` the model rejects) has no floor to send; it is a limitation the

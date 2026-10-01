@@ -559,7 +559,13 @@ class ModelGatewayService:
             shapes = planned_shapes(supports_reasoning=supports_reasoning)
             on_progress({"type": "plan", "shapes": [{"shape": sh, "label": SHAPE_LABELS[sh]} for sh in shapes]})
         report = await probe_model(
-            model_name, self._probe_call, supports_reasoning=supports_reasoning, on_progress=on_progress
+            model_name,
+            self._probe_call,
+            supports_reasoning=supports_reasoning,
+            # The floor of an always-on model is tried from the levels the picker offers for it,
+            # so it is always one of them (nannos#330).
+            floor_candidates=thinking_levels_for(info),
+            on_progress=on_progress,
         )
         if report.rejected:
             reasons = "; ".join(f"{r.shape}: {r.error}" for r in report.rejected)

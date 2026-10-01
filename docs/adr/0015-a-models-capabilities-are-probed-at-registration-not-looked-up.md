@@ -98,8 +98,11 @@ around failing is **recorded, not refused**; the record is what lets the harness
   the sub-agent form — as display only: a stored "off" is kept, the gateway sends it as the model's
   floor, and it stays right if a later probe finds a way to turn thinking off.
 - The floor of an `always_on` deployment is measured too (`thinking_floor`): the probe sends the
-  thinking-off question at `minimal`, then `low`, and records the first effort accepted; the hook
-  sends a thinking-off request as that effort. `none` alone is not a floor everywhere: on Claude,
+  thinking-off question at the two lowest levels the console's picker offers for the deployment
+  (`thinking_levels_for`, from the gateway's `supports_<effort>_reasoning_effort` flags) —
+  `minimal`, then `low`, when it declares none — and records the first effort accepted, so the
+  floor is always a level the admin also sees; the hook sends a thinking-off request as that
+  effort. `none` alone is not a floor everywhere: on Claude,
   LiteLLM turns it into no thinking parameter and no effort, so Opus 5.5 ran at its default effort
   with its thinking text omitted and nothing streamed (nannos#330); a real effort comes back as
   adaptive thinking with a readable summary. A deployment whose model map does not translate an

@@ -421,6 +421,31 @@ async def test_chat_test_records_the_probe_on_the_deployment_and_returns_the_rep
 
 
 @pytest.mark.asyncio
+async def test_an_always_on_floor_is_tried_from_the_levels_the_picker_offers(svc, monkeypatch):
+    """nannos#330: the floor is one of the levels `thinking_levels_for` offers for the deployment
+    (here low/medium/high — no `minimal` flag), not the SDK's fixed pair."""
+    from ringier_a2a_sdk.model_capabilities import ProbeCallError
+
+    calls = _probe_gateway(svc, monkeypatch, deployment=_chat_deployment(supports_reasoning=True))
+
+    async def _always_on(body):
+        calls["probe_bodies"].append(body)
+        if "thinking" in body:
+            raise ProbeCallError("thinking.type is not supported for this model", status=400)
+        if body.get("stream"):
+            return 'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\ndata: [DONE]\n'
+        usage = {"completion_tokens_details": {"reasoning_tokens": 120}} if body.get("reasoning_effort") else {}
+        return {"choices": [{"message": {"role": "assistant", "content": "ok"}}], "usage": usage}
+
+    monkeypatch.setattr(svc, "_probe_call", _always_on)
+    await svc.test_model("m")
+    caps = calls["patched"][0][1]["model_info"]["nannos_capabilities"]
+    assert caps["thinking_off"] == "always_on"
+    assert caps["thinking_floor"] == "low"
+    assert not any(b.get("reasoning_effort") == "minimal" for b in calls["probe_bodies"])
+
+
+@pytest.mark.asyncio
 async def test_all_chains_are_declared_in_one_config_write(svc, monkeypatch):
     """Not LiteLLM's per-entry /fallback endpoints: they read-modify-write the row holding
     every chain through a 60 s cache they never invalidate, so a quick second edit worked on

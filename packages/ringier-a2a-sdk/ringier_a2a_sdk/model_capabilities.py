@@ -40,7 +40,7 @@ from __future__ import annotations
 import inspect
 import json
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -93,8 +93,11 @@ SHAPE_KEYS: dict[str, str] = {
     "thinking_replay": THINKING_REPLAY,
 }
 
-#: The efforts tried as the floor of an always-on deployment, lowest first.
+#: The efforts tried as the floor of an always-on deployment, lowest first, when the deployment
+#: declares no levels of its own (see ``probe_model``'s ``floor_candidates``).
 THINKING_FLOOR_CANDIDATES: tuple[str, ...] = ("minimal", "low")
+#: How many of a deployment's declared levels, lowest first, are tried as its floor.
+FLOOR_CANDIDATE_COUNT = 2
 
 THINKING_OFF_DISABLED = "disabled"
 THINKING_OFF_BETWEEN_TOOLS = "between_tools"
@@ -127,7 +130,10 @@ STEP_LABELS: dict[str, str] = {
     "thinking_off:between_tools": "trying thinking: between_tools",
     "thinking_off:effort_only": "trying reasoning_effort: none alone",
     "thinking_off:control": "control turn with thinking on",
-    **{f"thinking_floor:{effort}": f"trying reasoning_effort: {effort}" for effort in THINKING_FLOOR_CANDIDATES},
+    **{
+        f"thinking_floor:{effort}": f"trying reasoning_effort: {effort}"
+        for effort in ("minimal", "low", "medium", "high", "xhigh", "max")
+    },
     "thinking_replay:turn": "thinking turn",
     "thinking_replay:replay": "replaying the signed thinking block",
 }
@@ -623,6 +629,7 @@ async def probe_model(
     call: ProbeCall,
     *,
     supports_reasoning: bool = False,
+    floor_candidates: Sequence[str] | None = None,
     budget_seconds: float = DEFAULT_BUDGET_SECONDS,
     on_progress: ProbeProgress | None = None,
 ) -> ProbeReport:
@@ -632,6 +639,9 @@ async def probe_model(
     sees the whole picture in one go. ``supports_reasoning`` (the admin's declaration on the
     deployment) gates the thinking shapes: a model registered without thinking never gets a
     thinking request from the harness, so there is nothing to learn.
+    ``floor_candidates`` are the levels the deployment declares (lowest first) — the console
+    passes the ones its picker offers; the first ``FLOOR_CANDIDATE_COUNT`` are tried as the
+    always-on floor, and ``THINKING_FLOOR_CANDIDATES`` when none are given.
 
     A verdict is either a definite provider rejection (a 4xx other than 408/429) or, for a
     routable shape, a reply that shows the shape was not honoured — a 200 alone proves only that
@@ -794,7 +804,10 @@ async def probe_model(
     else:
         refused: list[str] = []
         floor_inconclusive = ""
-        for effort in THINKING_FLOOR_CANDIDATES:
+        # The deployment's own declared levels when it has any — the ones the console's picker
+        # offers, so the floor is always a level the admin also sees — else the fixed pair.
+        candidates = tuple(floor_candidates or ())[:FLOOR_CANDIDATE_COUNT] or THINKING_FLOOR_CANDIDATES
+        for effort in candidates:
             ok, _, err, transient = await attempt(shape_thinking_floor(model, effort), f"thinking_floor:{effort}")
             if ok:
                 report.capabilities[THINKING_FLOOR] = effort
