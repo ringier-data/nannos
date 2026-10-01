@@ -348,7 +348,7 @@ class ModelGatewayService:
         if not _same_route(stored_params, {**stored_params, **litellm_params}):
             reasons.append("re-routes it")
         if model_info.get("base_model") and model_info.get("base_model") != stored_info.get("base_model"):
-            reasons.append("changes its base model")  # the cost-map entry flags are derived from
+            reasons.append("changes its base model")  # it picks the cost-map entry flags come from
         if model_info.get("mode", "chat") != stored_info.get("mode", "chat"):
             reasons.append("changes its mode")
         if reasons:
