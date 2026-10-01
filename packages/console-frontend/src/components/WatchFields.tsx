@@ -222,6 +222,9 @@ export function WatchFields({
   const conditionMode = value.condition_mode;
   const messageMode = value.message_mode;
   const hasMessage = Boolean(value.notification_message.trim());
+  // The backend's `find_placeholder`: fixed text is sent as written, so these would arrive
+  // as the literal characters. The save refuses them; this says why before it does.
+  const placeholder = /\{\{[^{}]*\}\}|\$\{[^{}]*\}|\{[A-Za-z_][\w.]*\}/.exec(value.notification_message)?.[0];
 
   function toggleArgsMode() {
     if (value.args_mode === 'fields') {
@@ -648,10 +651,18 @@ export function WatchFields({
                           patch({ notification_message: e.target.value });
                         }}
                       />
-                      {!hasMessage && (
-                        <p className="text-muted-foreground text-xs">
-                          Left empty, a message is written from what matched instead.
-                        </p>
+                      {placeholder ? (
+                        <FieldError>
+                          Fixed text is sent exactly as written, so {placeholder} would arrive as
+                          is. To put what matched into the message, choose “Written from what
+                          matched” and describe it there.
+                        </FieldError>
+                      ) : (
+                        !hasMessage && (
+                          <p className="text-muted-foreground text-xs">
+                            Left empty, a message is written from what matched instead.
+                          </p>
+                        )
                       )}
                     </div>
                   )}

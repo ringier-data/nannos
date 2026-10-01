@@ -40,6 +40,7 @@ from ..models.scheduled_job import (
     SuspendJobRequest,
     ValidateConditionRequest,
     ValidateConditionResponse,
+    find_placeholder,
 )
 from ..models.sub_agent import SubAgent
 from ..models.user import User
@@ -339,6 +340,44 @@ def _build_draft(generated: dict[str, Any]) -> ScheduledJobDraft:
             continue
         accepted[key] = value
     return ScheduledJobDraft(**accepted)
+
+
+def _placeholders_to_brief(
+    result: dict[str, Any],
+    current: ScheduledJobDraft | None,  # type: ignore[valid-type]
+) -> dict[str, Any]:
+    """A fixed text written as a template, turned into the brief it was meant as.
+
+    Told otherwise, the model still reaches for `{{title}}` when the request wants a
+    field of the matched items in the message, and the text would be delivered with the
+    braces in it. What it meant is a message written from the items, which is what the
+    brief does: the template becomes the brief's instruction, and the fixed text goes.
+
+    The brief lives in `prompt`, which on a job with a sub-agent is the agent's
+    instruction; there the text is only dropped. So is it when a brief is already given.
+    """
+    message = result.get("notification_message")
+    if not isinstance(message, str) or not find_placeholder(message):
+        return result
+    result = dict(result)
+    # On an edit an explicit null removes the job's fixed text; left out, it would be kept.
+    if current is not None:
+        result["notification_message"] = None
+    else:
+        result.pop("notification_message")
+    has_agent = result.get("sub_agent_id") is not None or (
+        current is not None and current.sub_agent_id is not None and "sub_agent_id" not in result
+    )
+    has_brief = bool((result.get("prompt") or "").strip()) or (
+        current is not None and bool((current.prompt or "").strip()) and "prompt" not in result
+    )
+    if not has_agent and not has_brief:
+        result["prompt"] = (
+            f"Write it in this shape: {message.strip()} — each placeholder filled in from "
+            "the matched item's field of that name, one line per item."
+        )
+    logger.info("Generated notification_message %r is a template; moved to the brief", message)
+    return result
 
 
 def _get_scheduler_service(request: Request) -> SchedulerService:
@@ -642,9 +681,12 @@ async def generate_job_draft(
         "5. `llm_condition`: only when part of the condition is genuinely semantic; it "
         "judges what cel_expr returned. Omit it otherwise.\n"
         "6. `notification_message`: for a plain notification, a concise fixed text sent "
-        "verbatim when the condition is met (e.g., 'Pull request #123 has been merged'). "
-        "Leave it out when a brief in `prompt` says how the message is to be written from "
-        "the matched items — give one of the two, never both.\n\n"
+        "verbatim when the condition is met (e.g., 'The deploy window is open'). It is "
+        "never rendered: it cannot name anything from the result, and a placeholder such "
+        "as {{title}} would be delivered as those characters. When the message should "
+        "carry anything from the matched items (a title, an id, a link), leave this out "
+        "and put the brief in `prompt` instead (e.g. 'New bug report: its title, then its "
+        "id in parentheses') — give one of the two, never both.\n\n"
         f"Available tools:\n{tools_summary}\n\n"
         f"Available sub-agents:\n{json.dumps(agent_choices, indent=2)}\n\n"
         f"Available delivery channels:\n{json.dumps(channel_choices, indent=2)}\n\n"
@@ -760,6 +802,8 @@ async def generate_job_draft(
                 result["check_args_exprs"] = kept
             else:
                 result.pop("check_args_exprs", None)
+
+        result = _placeholders_to_brief(result, current)
 
         # Fields the model is never allowed to set: an inline sub-agent would be created for
         # real, a voice call places an outbound phone call and is left for the person to tick
