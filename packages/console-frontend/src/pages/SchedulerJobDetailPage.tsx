@@ -723,11 +723,21 @@ function EditForm({
   // it. Once, and only on an untouched form — never under someone typing.
   const modeChosen = useRef(false);
   useEffect(() => {
-    // Deferred, not dropped, while the form is being edited: it runs once it is clean again.
+    // Deferred, not dropped, while the form is being edited: it runs once it is clean
+    // again. Mode and text are derived together from the form as it is — after a save
+    // `job` can still be the pre-save prop, and a mode without its text would put the
+    // old arguments back on the next save.
     if (modeChosen.current || !mcpToolsData || dirty) return;
     modeChosen.current = true;
-    setWatch((w) => ({ ...w, args_mode: watchValueFromJob(job, mcpToolsData.tools ?? []).args_mode }));
-  }, [mcpToolsData, dirty, job]);
+    setWatch((w) => ({
+      ...w,
+      ...argsView(
+        w.check_args,
+        w.check_args_exprs,
+        (mcpToolsData.tools ?? []).find((t) => t.name === w.check_tool),
+      ),
+    }));
+  }, [mcpToolsData, dirty]);
 
   // A picker: it must offer every channel, so no page size is passed.
   const { data: channelPage } = useQuery({

@@ -261,7 +261,8 @@ class SchedulerService:
         if key == "trigger_policy":
             return current is not None and current.value == value
         # The console sends these trimmed; a row written through the API need not be.
-        if key in ("notification_message", "prompt") and isinstance(current, str) and isinstance(value, str):
+        trimmed = ("notification_message", "prompt", "cel_expr", "llm_condition")
+        if key in trimmed and isinstance(current, str) and isinstance(value, str):
             return current.strip() == value.strip()
         return current == value
 
