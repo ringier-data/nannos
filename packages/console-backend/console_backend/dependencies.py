@@ -252,14 +252,16 @@ def require_active_user(request: Request) -> User:
         async def create_sub_agent(user: User = Depends(require_active_user)):
             return {"created_by": user.email}
     """
-    user = require_auth(request)
+    return _ensure_active(require_auth(request))
 
+
+def _ensure_active(user: User) -> User:
+    """Raise 403 unless the user's account is active (not suspended or deleted)."""
     if user.status != UserStatus.ACTIVE:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"User account is {user.status.value}",
         )
-
     return user
 
 
@@ -292,6 +294,7 @@ def require_admin(request: Request) -> User:
         user = request.state.original_user
     else:
         user = require_auth(request)
+    _ensure_active(user)
 
     admin_mode = get_admin_mode(request)
 
@@ -363,6 +366,7 @@ async def require_admin_or_orchestrator(request: Request, db: DbSession) -> User
         user = request.state.original_user
     else:
         user = await require_auth_or_bearer_token(request, db)
+    _ensure_active(user)
 
     admin_mode = get_admin_mode(request)
 
@@ -414,7 +418,7 @@ def is_admin_mode(request: Request, user: User) -> bool:
             detail="Privilege escalation attempt: admin mode not allowed for non-administrators",
         )
 
-    return effective_user.is_administrator and admin_mode
+    return effective_user.is_administrator and admin_mode and effective_user.status == UserStatus.ACTIVE
 
 
 def has_capability(user: User, resource_type: str, action: str) -> bool:
@@ -478,6 +482,7 @@ def require_approver(request: Request) -> User:
         user = request.state.original_user
     else:
         user = require_auth(request)
+    _ensure_active(user)
 
     admin_mode = get_admin_mode(request)
 

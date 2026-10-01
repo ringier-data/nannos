@@ -99,43 +99,50 @@ class UserService:
             user_id: The user's ID (sub from OIDC)
 
         Returns:
-            The user or None if not found
+            The user, or None if not found or the lookup failed
         """
         try:
-            query = text("""
-                SELECT id, sub, email, first_name, last_name, company_name,
-                       is_administrator, is_service_account, role, status, phone_number_idp,
-                       scim_attributes, deleted_at, created_at, updated_at
-                FROM users
-                WHERE id = :user_id
-            """)
-            result = await db.execute(query, {"user_id": user_id})
-            row = result.mappings().first()
-
-            if row is None:
-                logger.debug(f"User not found: {user_id}")
-                return None
-
-            return User(
-                id=row["id"],
-                sub=row["sub"],
-                email=row["email"],
-                first_name=row["first_name"],
-                last_name=row["last_name"],
-                company_name=row["company_name"],
-                is_administrator=row["is_administrator"],
-                is_service_account=row["is_service_account"],
-                role=row["role"],
-                status=UserStatus(row["status"]),
-                phone_number_idp=row["phone_number_idp"],
-                scim_attributes=row["scim_attributes"],
-                deleted_at=row["deleted_at"],
-                created_at=row["created_at"],
-                updated_at=row["updated_at"],
-            )
+            return await self.fetch_user(db, user_id)
         except Exception as e:
             logger.error(f"Failed to get user: {e}")
             return None
+
+    async def fetch_user(self, db: AsyncSession, user_id: str) -> User | None:
+        """Like get_user, but a failed lookup raises instead of reading as "not found".
+
+        Use it where "not found" and "could not look up" must lead to different outcomes.
+        """
+        query = text("""
+            SELECT id, sub, email, first_name, last_name, company_name,
+                   is_administrator, is_service_account, role, status, phone_number_idp,
+                   scim_attributes, deleted_at, created_at, updated_at
+            FROM users
+            WHERE id = :user_id
+        """)
+        result = await db.execute(query, {"user_id": user_id})
+        row = result.mappings().first()
+
+        if row is None:
+            logger.debug(f"User not found: {user_id}")
+            return None
+
+        return User(
+            id=row["id"],
+            sub=row["sub"],
+            email=row["email"],
+            first_name=row["first_name"],
+            last_name=row["last_name"],
+            company_name=row["company_name"],
+            is_administrator=row["is_administrator"],
+            is_service_account=row["is_service_account"],
+            role=row["role"],
+            status=UserStatus(row["status"]),
+            phone_number_idp=row["phone_number_idp"],
+            scim_attributes=row["scim_attributes"],
+            deleted_at=row["deleted_at"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
 
     async def get_user_by_sub(self, db: AsyncSession, sub: str) -> User | None:
         """Retrieve a user by OIDC subject (sub).

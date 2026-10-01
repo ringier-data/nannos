@@ -1,5 +1,6 @@
 """Tests for authentication dependencies."""
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -11,6 +12,7 @@ from console_backend.dependencies import (
     get_admin_mode,
     is_admin_mode,
     require_admin,
+    require_approver,
     require_auth,
     require_auth_or_bearer_token,
 )
@@ -380,6 +382,7 @@ class TestIsAdminMode:
     def test_is_admin_mode_admin_with_header_enabled(self, test_admin_user):
         """Test is_admin_mode returns True for admin with header enabled."""
         request = MagicMock()
+        request.state = MagicMock(spec_set=[])  # Not impersonating
         request.headers = MagicMock()
         request.headers.get = MagicMock(return_value="true")
 
@@ -413,3 +416,48 @@ class TestIsAdminMode:
 
         assert exc_info.value.status_code == 403
         assert "privilege escalation" in exc_info.value.detail.lower()
+
+
+class TestInactiveAdminLosesElevation:
+    """A suspended or deleted admin keeps their session but none of the admin gates."""
+
+    @pytest.mark.parametrize("inactive", [UserStatus.SUSPENDED, UserStatus.DELETED])
+    def test_require_admin_refuses_inactive_admin(self, test_admin_user: User, inactive: UserStatus):
+        request = MagicMock()
+        request.state = SimpleNamespace(user=test_admin_user.model_copy(update={"status": inactive}))
+        request.headers = {ADMIN_MODE_HEADER: "true"}
+
+        with pytest.raises(HTTPException) as exc_info:
+            require_admin(request)
+
+        assert exc_info.value.status_code == 403
+
+    def test_require_admin_refuses_inactive_admin_while_impersonating(self, test_admin_user: User, test_user: User):
+        request = MagicMock()
+        request.state = SimpleNamespace(
+            user=test_user,
+            original_user=test_admin_user.model_copy(update={"status": UserStatus.SUSPENDED}),
+        )
+        request.headers = {ADMIN_MODE_HEADER: "true"}
+
+        with pytest.raises(HTTPException) as exc_info:
+            require_admin(request)
+
+        assert exc_info.value.status_code == 403
+
+    def test_require_approver_refuses_inactive_admin(self, test_admin_user: User):
+        request = MagicMock()
+        request.state = SimpleNamespace(user=test_admin_user.model_copy(update={"status": UserStatus.SUSPENDED}))
+        request.headers = {ADMIN_MODE_HEADER: "true"}
+
+        with pytest.raises(HTTPException) as exc_info:
+            require_approver(request)
+
+        assert exc_info.value.status_code == 403
+
+    def test_is_admin_mode_false_for_inactive_admin(self, test_admin_user: User):
+        request = MagicMock()
+        request.state = SimpleNamespace()
+        request.headers = {ADMIN_MODE_HEADER: "true"}
+
+        assert is_admin_mode(request, test_admin_user.model_copy(update={"status": UserStatus.SUSPENDED})) is False

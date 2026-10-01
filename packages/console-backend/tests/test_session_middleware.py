@@ -18,9 +18,13 @@ from console_backend.config import config
 from console_backend.dependencies import ADMIN_MODE_HEADER, IMPERSONATE_USER_HEADER
 from console_backend.middleware import session_middleware
 from console_backend.middleware.session_middleware import SessionMiddleware
+from console_backend.models.user import UserStatus
 
-ADMIN = SimpleNamespace(id="admin-id", email="admin@example.com", is_administrator=True)
-TARGET = SimpleNamespace(id="target-id", email="target@example.com", is_administrator=False)
+ADMIN = SimpleNamespace(id="admin-id", email="admin@example.com", is_administrator=True, status=UserStatus.ACTIVE)
+TARGET = SimpleNamespace(id="target-id", email="target@example.com", is_administrator=False, status=UserStatus.ACTIVE)
+SUSPENDED_ADMIN = SimpleNamespace(
+    id="suspended-admin-id", email="suspended@example.com", is_administrator=True, status=UserStatus.SUSPENDED
+)
 
 
 class _TrackedSession:
@@ -38,12 +42,18 @@ class _TrackedSession:
 
 
 class _UserService:
-    def __init__(self) -> None:
+    def __init__(self, fail_fetch: bool = False) -> None:
         self.lookups: list[tuple[str, bool]] = []
+        self.fail_fetch = fail_fetch
 
     async def get_user(self, db, user_id):
         self.lookups.append((user_id, db.open))
-        return {u.id: u for u in (ADMIN, TARGET)}.get(user_id)
+        return {u.id: u for u in (ADMIN, TARGET, SUSPENDED_ADMIN)}.get(user_id)
+
+    async def fetch_user(self, db, user_id):
+        if self.fail_fetch:
+            raise ConnectionError("pool exhausted")
+        return await self.get_user(db, user_id)
 
 
 class _SessionService:
@@ -74,6 +84,21 @@ def _app(user_service: _UserService, session_user_id: str) -> FastAPI:
     return app
 
 
+async def _impersonate(user_service: _UserService, session_user: SimpleNamespace, admin_mode: str) -> httpx.Response:
+    with (
+        patch.object(session_middleware, "get_async_session_factory", return_value=_TrackedSession),
+        patch.object(session_middleware, "verify_cookie", return_value="sid"),
+    ):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=_app(user_service, session_user.id)), base_url="http://test"
+        ) as client:
+            client.cookies.set(config.cookie_name, "signed")
+            return await client.get(
+                "/whoami",
+                headers={IMPERSONATE_USER_HEADER: TARGET.id, ADMIN_MODE_HEADER: admin_mode},
+            )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("session_user", "admin_mode", "expected_user", "expected_original", "expected_lookups"),
@@ -84,6 +109,8 @@ def _app(user_service: _UserService, session_user_id: str) -> FastAPI:
         (ADMIN, "false", ADMIN, None, [(ADMIN.id, True)]),
         # Non-admin claiming admin mode: refused.
         (TARGET, "true", TARGET, None, [(TARGET.id, True)]),
+        # Suspended admin: refused.
+        (SUSPENDED_ADMIN, "true", SUSPENDED_ADMIN, None, [(SUSPENDED_ADMIN.id, True)]),
     ],
 )
 async def test_impersonation_lookups_run_on_open_session(
@@ -91,18 +118,7 @@ async def test_impersonation_lookups_run_on_open_session(
 ):
     caplog.set_level(logging.DEBUG, logger=session_middleware.logger.name)
     user_service = _UserService()
-    with (
-        patch.object(session_middleware, "get_async_session_factory", return_value=_TrackedSession),
-        patch.object(session_middleware, "verify_cookie", return_value="sid"),
-    ):
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=_app(user_service, session_user.id)), base_url="http://test"
-        ) as client:
-            client.cookies.set(config.cookie_name, "signed")
-            response = await client.get(
-                "/whoami",
-                headers={IMPERSONATE_USER_HEADER: TARGET.id, ADMIN_MODE_HEADER: admin_mode},
-            )
+    response = await _impersonate(user_service, session_user, admin_mode)
 
     assert response.status_code == 200
     assert response.json() == {
@@ -114,3 +130,11 @@ async def test_impersonation_lookups_run_on_open_session(
     assert caplog.records
     assert ADMIN.email not in caplog.text
     assert TARGET.email not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_failed_target_lookup_fails_closed():
+    """A DB error on the target lookup must not run the request as the admin."""
+    response = await _impersonate(_UserService(fail_fetch=True), ADMIN, "true")
+
+    assert response.status_code == 503
