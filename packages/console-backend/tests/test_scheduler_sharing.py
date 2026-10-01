@@ -368,6 +368,22 @@ class TestOneUpdatePathRoutesEachField:
         assert saved is not None and saved.enabled is False
 
     @pytest.mark.asyncio
+    async def test_an_empty_text_echoed_as_null_is_no_edit(self, world):
+        # The create default for the message is "", and the console sends an empty one
+        # as null.
+        svc, db, u = world["service"], world["db"], world["users"]
+        job = await svc.create_job(db, _watch_create(), u["owner"])
+        await svc.update_permissions(
+            db, job.definition_id, [{"user_group_id": world["group"], "permissions": ["read"]}], u["owner"]
+        )
+        mine = await svc.subscribe(db, job.definition_id, u["member"])
+
+        saved = await svc.update_job(
+            db, mine.id, ScheduledJobUpdate(enabled=False), u["member"], notification_message=None
+        )
+        assert saved is not None and saved.enabled is False
+
+    @pytest.mark.asyncio
     async def test_a_condition_echo_is_judged_on_the_trimmed_text(self, world):
         svc, db, u = world["service"], world["db"], world["users"]
         job = await svc.create_job(db, _watch_create(cel_expr="result != null\n"), u["owner"])

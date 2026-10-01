@@ -260,10 +260,11 @@ class SchedulerService:
             return json.loads(value) == current
         if key == "trigger_policy":
             return current is not None and current.value == value
-        # The console sends these trimmed; a row written through the API need not be.
+        # The console sends these trimmed, and an empty one as null; a row written through
+        # the API need not be either (the create default for the message is "").
         trimmed = ("notification_message", "prompt", "cel_expr", "llm_condition")
-        if key in trimmed and isinstance(current, str) and isinstance(value, str):
-            return current.strip() == value.strip()
+        if key in trimmed and isinstance(current, str | None) and isinstance(value, str | None):
+            return (current or "").strip() == (value or "").strip()
         return current == value
 
     @staticmethod

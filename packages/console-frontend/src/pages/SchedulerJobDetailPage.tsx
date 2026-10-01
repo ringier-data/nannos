@@ -588,22 +588,23 @@ function JobHeader({
  * does not state outright: whether the condition is a rule or a judgement, and whether the
  * outcome is a notification or an agent run.
  */
-function watchValueFromJob(job: ScheduledJob, tools: McpTool[]): WatchFieldsValue {
+function watchValueFromJob(job: ScheduledJob, tools: McpTool[] | undefined): WatchFieldsValue {
   const agent = job.sub_agent_id != null;
   const args = (job.check_args ?? {}) as Record<string, unknown>;
   const exprs = (job.check_args_exprs ?? {}) as Record<string, string>;
-  // Until the tools have loaded nothing is known about the schema, and judging the mode
-  // without one would open every job in the JSON editor: fields until then.
+  // Until the tools have loaded (`undefined`) nothing is known about the schema, and
+  // judging the mode without one would open every job in the JSON editor: fields until
+  // then. A loaded but empty list is an answer — no schema — and is judged like any other.
   const view = argsView(
     args,
     exprs,
-    tools.find((t) => t.name === job.check_tool),
+    tools?.find((t) => t.name === job.check_tool),
   );
   return {
     check_tool: job.check_tool ?? '',
     check_args: args,
     check_args_text: view.check_args_text,
-    args_mode: tools.length > 0 ? view.args_mode : 'fields',
+    args_mode: tools ? view.args_mode : 'fields',
     check_args_exprs: (job.check_args_exprs ?? {}) as Record<string, string>,
     cel_expr: job.cel_expr ?? '',
     llm_condition: job.llm_condition ?? '',
@@ -666,7 +667,7 @@ function EditForm({
   const [voiceCall, setVoiceCall] = useState(job.voice_call ?? false);
   const [dirty, setDirty] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [watch, setWatch] = useState<WatchFieldsValue>(() => watchValueFromJob(job, []));
+  const [watch, setWatch] = useState<WatchFieldsValue>(() => watchValueFromJob(job, undefined));
   const [aiQuery, setAiQuery] = useState('');
   const [aiOpen, setAiOpen] = useState(false);
   /** The call the saved job makes — what `last_check_result` is a response to. */
@@ -729,14 +730,16 @@ function EditForm({
     // old arguments back on the next save.
     if (modeChosen.current || !mcpToolsData || dirty) return;
     modeChosen.current = true;
-    setWatch((w) => ({
-      ...w,
-      ...argsView(
+    setWatch((w) => {
+      const view = argsView(
         w.check_args,
         w.check_args_exprs,
         (mcpToolsData.tools ?? []).find((t) => t.name === w.check_tool),
-      ),
-    }));
+      );
+      // The text only follows a mode change: in the same mode it is already what is
+      // shown, and rewriting it would only reformat what the person wrote.
+      return view.args_mode === w.args_mode ? w : { ...w, ...view };
+    });
   }, [mcpToolsData, dirty]);
 
   // A picker: it must offer every channel, so no page size is passed.
@@ -769,7 +772,7 @@ function EditForm({
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     setDeliveryChannel((job as any).delivery_channel_id != null ? String((job as any).delivery_channel_id) : '');
     setVoiceCall(job.voice_call ?? false);
-    setWatch(watchValueFromJob(job, mcpTools));
+    setWatch(watchValueFromJob(job, mcpToolsData ? (mcpToolsData.tools ?? []) : undefined));
     setAiFilled(new Set());
     setDirty(false);
     setError(null);
