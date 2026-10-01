@@ -249,6 +249,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // request that sends it. The stop call below only records the audit event.
     clearImpersonatedUserId();
     setImpersonatedUserIdState(null);
+    // Drop the target's cached data in the same moment, so nothing on screen still shows
+    // the target while requests already go out as the admin; /auth/me refetches without
+    // waiting on the audit call.
+    const reset = queryClient.resetQueries();
 
     try {
       // Call backend to stop impersonation (logs audit)
@@ -269,9 +273,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       console.error('Failed to stop impersonation:', error);
       throw error;
     } finally {
-      // Force refetch all queries without impersonation header
-      // Use resetQueries to clear cache and force immediate refetch
-      await queryClient.resetQueries();
+      await reset;
     }
   }, [queryClient]);
 
