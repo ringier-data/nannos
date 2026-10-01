@@ -281,7 +281,7 @@ export const toggleAdminModeApiV1AuthAdminModePost = <ThrowOnError extends boole
  *
  * Raises:
  * 401 Unauthorized: If the user is not authenticated.
- * 403 Forbidden: If the user is not an administrator or admin mode is not enabled.
+ * 403 Forbidden: If the user is not an active administrator or admin mode is not enabled.
  * 404 Not Found: If the target user does not exist.
  */
 export const startImpersonationApiV1AuthImpersonateStartPost = <ThrowOnError extends boolean = false>(options: Options<StartImpersonationApiV1AuthImpersonateStartPostData, ThrowOnError>) => (options.client ?? client).post<StartImpersonationApiV1AuthImpersonateStartPostResponses, StartImpersonationApiV1AuthImpersonateStartPostErrors, ThrowOnError>({
@@ -1946,10 +1946,12 @@ export const bedrockModelRegionsApiV1AdminModelGatewayBedrockRegionsGet = <Throw
  *
  * Seed the rate-card form (best-effort).
  *
- * Prefers the model's stored rate card so EDITING a model starts from its real, previously-saved
- * rates (they live in the rate card, not the gateway's model_info). Falls back to the gateway's
- * known cost for models we don't bill yet (fresh registration). Empty when neither knows the
- * model — the admin then enters rates manually.
+ * ``auto`` (opening the edit dialog) prefers the model's stored rate card so EDITING a model starts
+ * from its real, previously-saved rates (they live in the rate card, not the gateway's model_info),
+ * and falls back to the gateway's known cost for models we don't bill yet (fresh registration).
+ * ``gateway`` (the "Pre-fill from gateway" button) skips the stored card: the dialog already shows
+ * it, so returning it again would leave a card missing units (e.g. cache rates) unrepairable.
+ * Empty when the source doesn't know the model — the admin then enters rates manually.
  */
 export const costPrefillApiV1AdminModelGatewayModelsModelNameCostPrefillGet = <ThrowOnError extends boolean = false>(options: Options<CostPrefillApiV1AdminModelGatewayModelsModelNameCostPrefillGetData, ThrowOnError>) => (options.client ?? client).get<CostPrefillApiV1AdminModelGatewayModelsModelNameCostPrefillGetResponses, CostPrefillApiV1AdminModelGatewayModelsModelNameCostPrefillGetErrors, ThrowOnError>({ url: '/api/v1/admin/model-gateway/models/{model_name}/cost-prefill', ...options });
 

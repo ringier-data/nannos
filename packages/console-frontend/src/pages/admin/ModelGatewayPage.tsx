@@ -29,6 +29,7 @@ import {
   setGatewayModelDefault,
   getCostPrefill,
   type CatalogModel,
+  type CostPrefill,
   type DefaultRole,
   type GatewayModel,
   type ModelRegistrationRequest,
@@ -339,6 +340,10 @@ export function ModelGatewayPage() {
     }
   };
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
+  // Units the last "Pre-fill from gateway" changed: the value before and the gateway's value. A
+  // field shows its "was" hint only while it still holds the gateway's value, so editing it by hand
+  // (or re-seeding from a base model) drops the hint without any extra bookkeeping.
+  const [prefillDiff, setPrefillDiff] = useState<Record<string, { was: string; now: string }>>({});
   const [pickerOpen, setPickerOpen] = useState(false);
   const [basePickerOpen, setBasePickerOpen] = useState(false);
   // The base-model list filters only on text typed since the field was focused: a value already
@@ -536,12 +541,14 @@ export function ModelGatewayPage() {
     setDialogOpen(false);
     setEditingId(null);
     setForm(EMPTY_FORM);
+    setPrefillDiff({});
     setRegionError(null);
   };
 
   const openCreate = () => {
     setEditingId(null);
     setForm(EMPTY_FORM);
+    setPrefillDiff({});
     setCredsOpen(false);
     setAliasEdited(false);
     setDialogOpen(true);
@@ -549,6 +556,7 @@ export function ModelGatewayPage() {
 
   const openEdit = async (m: GatewayModel) => {
     setEditingId(m.model_id ?? null);
+    setPrefillDiff({});
     const awsRegion = m.aws_region_name ?? '';
     const vertexLocation = m.vertex_location ?? '';
     const vertexProject = m.vertex_project ?? '';
@@ -790,17 +798,45 @@ export function ModelGatewayPage() {
     onError: (e: unknown) => toast.error(`Set default failed: ${errMsg(e)}`),
   });
 
+  // Always the gateway's cost, never the stored rate card: the dialog already loaded that on open,
+  // so this is how a card missing units (e.g. cache rates) or holding a stale price gets corrected.
+  // Only units the gateway knows are overwritten; nothing is saved until "Save changes".
   const prefill = async () => {
     if (!form.model_name) return;
+    let pricing: CostPrefill['pricing'];
     try {
-      const { pricing } = await getCostPrefill(form.model_name);
-      const prices: Record<string, string> = {};
-      for (const [unit, entry] of Object.entries(pricing ?? {})) prices[unit] = String(entry.price_per_million);
-      setForm((f) => ({ ...f, prices: { ...f.prices, ...prices } }));
-      toast.success('Pre-filled cost from the gateway');
+      ({ pricing } = await getCostPrefill(form.model_name, 'gateway'));
     } catch {
-      toast.info('Gateway has no cost for this model yet — enter rates manually');
+      pricing = {};
     }
+    const prices: Record<string, string> = {};
+    for (const [unit, entry] of Object.entries(pricing ?? {})) prices[unit] = String(Number(entry.price_per_million));
+    if (Object.keys(prices).length === 0) {
+      toast.info('Gateway has no cost for this model yet — enter rates manually');
+      return;
+    }
+    const diff: Record<string, { was: string; now: string }> = {};
+    for (const [unit, now] of Object.entries(prices)) {
+      const was = form.prices[unit] ?? '';
+      if (was === '' || Number(was) !== Number(now)) diff[unit] = { was, now };
+    }
+    setForm((f) => ({ ...f, prices: { ...f.prices, ...prices } }));
+    setPrefillDiff(diff);
+    const label = (unit: string) =>
+      (PRICING_UNITS.find((u) => u.unit === unit)?.label ?? unit).replace(/ \(.*\)$/, '').toLowerCase();
+    const filled = Object.keys(diff)
+      .filter((u) => diff[u].was === '')
+      .map(label);
+    const updated = Object.keys(diff)
+      .filter((u) => diff[u].was !== '')
+      .map(label);
+    if (!filled.length && !updated.length) toast.success('Rates already match the gateway');
+    else
+      toast.success(
+        [filled.length && `Filled ${filled.join(', ')}`, updated.length && `Updated ${updated.join(', ')}`]
+          .filter(Boolean)
+          .join(' · ') + ' from the gateway — review, then save',
+      );
   };
 
   const submit = () => {
@@ -1398,17 +1434,26 @@ export function ModelGatewayPage() {
                 </Button>
               </div>
               <div className="grid grid-cols-2 gap-2">
-                {visiblePricingUnits(form.mode, form.prices, form.supports_web_search).map(({ unit, label }) => (
-                  <div key={unit} className="grid gap-1">
-                    <Label className="text-xs text-muted-foreground">{label}</Label>
-                    <Input
-                      type="number"
-                      step="0.0001"
-                      value={form.prices[unit] ?? ''}
-                      onChange={(e) => setForm({ ...form, prices: { ...form.prices, [unit]: e.target.value } })}
-                    />
-                  </div>
-                ))}
+                {visiblePricingUnits(form.mode, form.prices, form.supports_web_search).map(({ unit, label }) => {
+                  const changed = prefillDiff[unit]?.now === form.prices[unit] ? prefillDiff[unit] : undefined;
+                  return (
+                    <div key={unit} className="grid gap-1">
+                      <Label className="text-xs text-muted-foreground">{label}</Label>
+                      <Input
+                        type="number"
+                        step="0.0001"
+                        className={changed ? 'border-amber-500 focus-visible:ring-amber-500' : undefined}
+                        value={form.prices[unit] ?? ''}
+                        onChange={(e) => setForm({ ...form, prices: { ...form.prices, [unit]: e.target.value } })}
+                      />
+                      {changed && (
+                        <p className="text-xs text-amber-700 dark:text-amber-400">
+                          {changed.was === '' ? 'was empty' : `was ${Number(changed.was)}`}
+                        </p>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </div>
           </div>
