@@ -742,7 +742,8 @@ async def probe_model(
             continue
         if _reasoned(response):
             if switch is None:
-                # Nothing is rewritten here: the effort alone is the model's own floor.
+                # Nothing turns it off. The hook sends a thinking-off request as the floor: the
+                # effort alone where LiteLLM maps it there (Gemini 3), `low` on Claude (#330).
                 tried.append(f"{label}: {still_reasoned(response)}")
                 off_way = THINKING_OFF_ALWAYS_ON
                 off_error = "thinking cannot be turned off — " + "; ".join(tried)

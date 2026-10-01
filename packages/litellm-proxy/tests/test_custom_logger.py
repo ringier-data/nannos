@@ -984,6 +984,31 @@ def test_thinking_off_recorded_as_always_on_sends_the_effort_alone():
     assert "thinking" not in kwargs and kwargs["reasoning_effort"] == "none"
 
 
+@pytest.mark.parametrize(
+    "model, model_info",
+    [
+        ("bedrock/eu.anthropic.claude-opus-5-5", {}),
+        ("anthropic/claude-opus-5-5", {}),
+        # A deployment that names its model only through an ARN, recognised by base_model.
+        ("bedrock/arn:aws:bedrock:eu-central-1:000000000000:application-inference-profile/x", {"base_model": "claude-opus-5-5"}),
+    ],
+)
+def test_thinking_off_recorded_as_always_on_on_claude_sends_the_lowest_effort(model, model_info):
+    # nannos#330: on Claude, LiteLLM turns "none" into no thinking parameter AND no effort, so
+    # Opus 5.5 ran at its default effort (medium) with display "omitted" — empty thinking blocks,
+    # nothing streamed. `low` is the floor, and LiteLLM sends it with display "summarized".
+    kwargs = _probed(model, {"thinking_off": "always_on"}, reasoning_effort="none", thinking={"type": "disabled"})
+    kwargs["model_info"].update(model_info)
+    assert _run_deployment_hook(kwargs) is not None
+    assert "thinking" not in kwargs and kwargs["reasoning_effort"] == "low"
+
+
+def test_always_on_claude_leaves_a_real_effort_alone():
+    kwargs = _probed("bedrock/eu.anthropic.claude-opus-5-5", {"thinking_off": "always_on"}, reasoning_effort="high")
+    assert _run_deployment_hook(kwargs) is None
+    assert kwargs["reasoning_effort"] == "high"
+
+
 def test_thinking_off_recorded_as_unsupported_strips_the_refused_effort():
     # The probe saw every off request refused, the effort alone included (gpt-5 / o-series on
     # OpenAI direct): forwarding reasoning_effort "none" would be that same 400 on every turn.
@@ -1011,17 +1036,35 @@ def test_the_claude_version_is_read_from_the_model_id(model, version):
     "model, switch",
     [
         ("bedrock/global.anthropic.claude-sonnet-5-5", "between_tools"),
-        ("bedrock/eu.anthropic.claude-opus-5-5", "between_tools"),
         ("bedrock/eu.anthropic.claude-sonnet-5", "disabled"),
+        ("bedrock/eu.anthropic.claude-opus-5", "disabled"),
         ("bedrock/eu.anthropic.claude-sonnet-4-6", "disabled"),
     ],
 )
 def test_an_unprobed_claude_gets_the_switch_its_version_accepts(model, switch):
     """No record — a failover to an unprobed chain member, or an unprobed twin of a probed alias
-    (review round 8). Claude 5.5+ 400 on `disabled`; earlier Claude 5 needs it (#272)."""
+    (review round 8). Sonnet 5.5+ 400 on `disabled`; earlier Claude 5 needs it (#272)."""
     kwargs = {"model": model, "messages": [{"role": "user", "content": "hi"}], "reasoning_effort": "none", "model_info": {}}
     _run_deployment_hook(kwargs)
     assert kwargs["thinking"] == {"type": switch}
+
+
+@pytest.mark.parametrize(
+    "model",
+    ["bedrock/eu.anthropic.claude-opus-5-5", "anthropic/claude-fable-5-1", "anthropic/claude-mythos-5", "claude-fable-5"],
+)
+def test_an_unprobed_always_thinking_claude_gets_the_floor(model):
+    # nannos#330: Opus 5.5 400s on `between_tools` as well as `disabled` (seen live); Fable and
+    # Mythos take no off switch at any version. Each gets its lowest effort instead.
+    kwargs = {
+        "model": model,
+        "messages": [{"role": "user", "content": "hi"}],
+        "reasoning_effort": "none",
+        "thinking": {"type": "disabled"},
+        "model_info": {},
+    }
+    assert _run_deployment_hook(kwargs) is not None
+    assert "thinking" not in kwargs and kwargs["reasoning_effort"] == "low"
 
 
 def test_thinking_off_record_is_read_per_attempt():

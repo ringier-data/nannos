@@ -95,7 +95,10 @@ around failing is **recorded, not refused**; the record is what lets the harness
   maps `none` to its floor, `thinkingLevel: low`), and the record says `always_on`. The console then
   offers no "off" for that model: the Extended Thinking toggle is locked on in the user settings and
   the sub-agent form — as display only: a stored "off" is kept, the gateway sends it as the model's
-  floor, and it stays right if a later probe finds a way to turn thinking off. Gemini 3.5 Flash is
+  floor, and it stays right if a later probe finds a way to turn thinking off. On Claude the effort
+  alone is not the floor: LiteLLM turns `none` into no thinking parameter and no effort, so Claude
+  Opus 5.5 ran at its default effort with its thinking text omitted; the hook sends `low` instead
+  (nannos#330). Gemini 3.5 Flash is
   *not* always-on: its floor, `minimal`, measured as no reasoning, so its "off" is real. When every
   off request is refused outright, the effort alone included (OpenAI-direct gpt-5 and the o-series
   400 on `none`), the record says `unsupported`: the hook strips the effort and the switch, so a
