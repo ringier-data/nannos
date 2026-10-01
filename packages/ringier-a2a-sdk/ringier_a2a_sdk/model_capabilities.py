@@ -73,8 +73,9 @@ THINKING_OFF = "thinking_off"
 #: (``"minimal"`` or ``"low"``). The gateway sends a thinking-off request as this effort.
 #: ``reasoning_effort: none`` alone is not a floor everywhere: on Claude, LiteLLM turns it into
 #: no thinking parameter and no effort, so the model runs at its DEFAULT effort with its thinking
-#: text omitted (nannos#330). Absent when no level was accepted (or never measured): the gateway
-#: then sends ``none`` alone, as before the key existed.
+#: text omitted (nannos#330). ``None`` when no level was accepted, or thinking turns off (absent:
+#: never measured); either way the gateway then sends ``none`` alone, as before the key existed.
+#: A definite refusal always writes ``None``, so a stale stored floor cannot survive a re-test.
 THINKING_FLOOR = "thinking_floor"
 #: bool | None — a signed thinking block from the model can be replayed with its tool result.
 #: ``None`` when the model returned no thinking block to replay (nothing to record).
@@ -800,6 +801,8 @@ async def probe_model(
         # Only an always-on deployment has a floor, and that was not established.
         await add(ShapeResult("thinking_floor", False, off_error, inconclusive=True))
     elif off_way != THINKING_OFF_ALWAYS_ON:
+        # Written as "no floor" rather than left out, so no earlier floor survives a merge.
+        report.capabilities[THINKING_FLOOR] = None
         await add(ShapeResult("thinking_floor", True, note="not needed: thinking can be turned off"))
     else:
         refused: list[str] = []
@@ -818,6 +821,7 @@ async def probe_model(
                 break
             refused.append(f"{effort}: {err}")
         else:
+            report.capabilities[THINKING_FLOOR] = None
             await add(
                 ShapeResult(
                     "thinking_floor",
@@ -827,6 +831,11 @@ async def probe_model(
                 )
             )
         if floor_inconclusive:
+            if refused:
+                # A level was refused outright before the failure: a stored floor may be that
+                # level, and keeping it would 400 every thinking-off request. "No floor" (the
+                # effort alone) is the safe record until a re-test measures the rest.
+                report.capabilities[THINKING_FLOOR] = None
             await add(ShapeResult("thinking_floor", False, floor_inconclusive, inconclusive=True))
 
     # Thinking replay: only for models declared to think ---------------------------------

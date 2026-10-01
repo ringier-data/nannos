@@ -97,6 +97,7 @@ async def test_a_permissive_model_records_every_capability_and_rejects_nothing()
         mc.FORCED_TOOL_CHOICE: True,
         mc.RESPONSE_FORMAT: True,
         mc.THINKING_OFF: mc.THINKING_OFF_DISABLED,
+        mc.THINKING_FLOOR: None,
         mc.THINKING_REPLAY: True,
     }
 
@@ -259,7 +260,7 @@ async def test_the_floor_is_tried_from_the_deployments_declared_levels():
     refuse_all = lambda b: "not supported" if "thinking" in b or b.get("reasoning_effort") in ("low", "medium") else None
     gw = _Gateway(reject=refuse_all, floor=True)
     report = await mc.probe_model("opus", gw, floor_candidates=["low", "medium", "high"])
-    assert mc.THINKING_FLOOR not in report.capabilities
+    assert report.capabilities[mc.THINKING_FLOOR] is None
     assert not any(b.get("reasoning_effort") == "high" and b.get("max_tokens") == 1024 for b in gw.bodies)
 
 
@@ -279,7 +280,8 @@ async def test_an_always_on_model_that_refuses_every_level_records_no_floor():
         "budget_tokens is not supported" if "thinking" in b or b.get("reasoning_effort") in ("minimal", "low") else None
     )
     report = await mc.probe_model("arn", _Gateway(reject=refuse, floor=True))
-    assert mc.THINKING_FLOOR not in report.capabilities
+    # Written as None, not left out: a stored floor must not survive the merge (round 2).
+    assert report.capabilities[mc.THINKING_FLOOR] is None
     floor = next(r for r in report.results if r.shape == "thinking_floor")
     assert not floor.ok and not floor.inconclusive and "no thinking level is accepted" in floor.error
     assert floor in report.limitations
@@ -300,10 +302,26 @@ async def test_a_transient_floor_attempt_keeps_the_stored_floor():
 
 
 @pytest.mark.asyncio
+async def test_a_refusal_before_a_transient_failure_clears_the_stored_floor():
+    """Round 2: `minimal` refused outright, then `low` throttled. A stored `minimal` must not be
+    kept as inconclusive — it would 400 every thinking-off request."""
+    gw = _Gateway(reject=lambda b: "not supported" if "thinking" in b or b.get("reasoning_effort") == "minimal" else None, floor=True)
+
+    async def call(body):
+        if body.get("reasoning_effort") == "low":
+            raise mc.ProbeCallError("throttled", status=429)
+        return await gw(body)
+
+    report = await mc.probe_model("opus", call)
+    assert report.capabilities[mc.THINKING_FLOOR] is None
+    assert mc.THINKING_FLOOR in report.inconclusive_keys  # the row is still shown as unmeasured
+
+
+@pytest.mark.asyncio
 async def test_no_floor_is_measured_where_thinking_turns_off():
     gw = _Gateway()
     report = await mc.probe_model("m", gw)
-    assert mc.THINKING_FLOOR not in report.capabilities
+    assert report.capabilities[mc.THINKING_FLOOR] is None
     floor = next(r for r in report.results if r.shape == "thinking_floor")
     assert floor.ok and "not needed" in floor.note
     assert not any(b.get("reasoning_effort") in mc.THINKING_FLOOR_CANDIDATES for b in gw.bodies if not b.get("thinking"))
