@@ -87,14 +87,16 @@ async def list_risk_scores(
     _user: User = Depends(require_auth_or_bearer_token),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
+    search: str | None = Query(default=None, max_length=200, description="Search by tool name or server slug"),
 ) -> PaginatedRiskScoresResponse:
     """Get paginated tool risk scores sorted by updated_at desc.
 
-    Used by the orchestrator's ToolRiskCache periodic refresh.
+    Used by the orchestrator's ToolRiskCache periodic refresh (unfiltered) and by the
+    console's admin page (with `search`). `total` counts the matches, not the table.
     """
     service = get_tool_risk_service(request)
-    items = await service.get_scores_paginated(db, limit=limit, offset=offset)
-    total = await service.get_count(db)
+    items = await service.get_scores_paginated(db, limit=limit, offset=offset, search=search)
+    total = await service.get_count(db, search=search)
 
     return PaginatedRiskScoresResponse(
         items=[_row_to_response(item) for item in items],

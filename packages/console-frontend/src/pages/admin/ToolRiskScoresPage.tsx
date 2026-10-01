@@ -1,6 +1,6 @@
 import { useState } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { ShieldAlert, Trash2, Loader2, RefreshCw, Plus, Pencil } from 'lucide-react';
+import { keepPreviousData, useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { ShieldAlert, Trash2, Loader2, RefreshCw, Plus, Pencil, Search } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -21,6 +21,8 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { Pagination } from '@/components/admin/Pagination';
 import { client } from '@/api/generated/client.gen';
+import { listRiskScoresApiMcpToolsRiskScoresGet } from '@/api/generated/sdk.gen';
+import { useDebouncedValue } from '@/hooks/use-debounced-value';
 
 interface RiskFactor {
   risky_values: Record<string, number>;
@@ -46,13 +48,18 @@ interface UpsertPayload {
   allowed_actions: string[];
 }
 
-/** Fetch paginated risk scores. */
-async function fetchRiskScores(limit = 100, offset = 0): Promise<{ items: ToolRiskScore[]; total: number }> {
-  const res = await client.get({
-    url: '/api/mcp/tools/risk-scores',
-    query: { limit, offset },
+/** Fetch paginated risk scores, narrowed server-side by `search` on tool name or server slug. */
+async function fetchRiskScores(
+  limit = 100,
+  offset = 0,
+  search?: string,
+): Promise<{ items: ToolRiskScore[]; total: number }> {
+  // Throw so a failed request surfaces as an error, not as an empty (or "no match") result.
+  const { data } = await listRiskScoresApiMcpToolsRiskScoresGet({
+    query: { limit, offset, search },
+    throwOnError: true,
   });
-  return res.data as { items: ToolRiskScore[]; total: number };
+  return data as { items: ToolRiskScore[]; total: number };
 }
 
 /** Upsert a risk score. */
@@ -119,10 +126,13 @@ export function ToolRiskScoresPage() {
   const [form, setForm] = useState<FormState>(emptyForm());
   const [jsonError, setJsonError] = useState<string | null>(null);
   const [page, setPage] = useState(1);
+  const [search, setSearch] = useState('');
+  const debouncedSearch = useDebouncedValue(search.trim());
 
-  const { data, isLoading, isRefetching } = useQuery({
-    queryKey: ['adminToolRiskScores', page],
-    queryFn: () => fetchRiskScores(PAGE_SIZE, (page - 1) * PAGE_SIZE),
+  const { data, isLoading, isFetching, isPlaceholderData, isError } = useQuery({
+    queryKey: ['adminToolRiskScores', page, debouncedSearch],
+    queryFn: () => fetchRiskScores(PAGE_SIZE, (page - 1) * PAGE_SIZE, debouncedSearch || undefined),
+    placeholderData: keepPreviousData,
   });
 
   const deleteMutation = useMutation({
@@ -206,6 +216,10 @@ export function ToolRiskScoresPage() {
 
   const scores = data?.items ?? [];
   const total = data?.total ?? 0;
+  // With keepPreviousData, `data` belongs to the previous page/term until the new one lands:
+  // dim it, and keep the Refresh button for real refetches rather than every key change.
+  const isStale = isFetching && !isLoading;
+  const isRefreshing = isStale && !isPlaceholderData;
 
   return (
     <div className="flex flex-col gap-6 p-4 pb-8">
@@ -225,9 +239,9 @@ export function ToolRiskScoresPage() {
             variant="outline"
             size="sm"
             onClick={() => queryClient.invalidateQueries({ queryKey: ['adminToolRiskScores'] })}
-            disabled={isRefetching}
+            disabled={isRefreshing}
           >
-            {isRefetching ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : <RefreshCw className="h-4 w-4 mr-1" />}
+            {isRefreshing ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : <RefreshCw className="h-4 w-4 mr-1" />}
             Refresh
           </Button>
           <Button size="sm" onClick={openAddDialog}>
@@ -237,17 +251,40 @@ export function ToolRiskScoresPage() {
         </div>
       </div>
 
+      <div className="relative max-w-sm">
+        <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+        <Input
+          placeholder="Search tool name or server..."
+          maxLength={200}
+          value={search}
+          onChange={(e) => {
+            setSearch(e.target.value);
+            setPage(1);
+          }}
+          className="pl-9"
+        />
+      </div>
+
       {/* Table */}
       {isLoading ? (
+        <TableSkeleton columns={6} />
+      ) : isError && !data ? (
+        <Card>
+          <CardContent className="py-8 text-center text-destructive">Failed to load tool risk scores.</CardContent>
+        </Card>
+      ) : isPlaceholderData && scores.length === 0 ? (
+        // The previous term's empty result says nothing about the term now being fetched.
         <TableSkeleton columns={6} />
       ) : scores.length === 0 ? (
         <Card>
           <CardContent className="py-8 text-center text-muted-foreground">
-            No tool risk scores found. Scores are generated automatically when tools are first used.
+            {debouncedSearch
+              ? `No tool risk scores match "${debouncedSearch}".`
+              : 'No tool risk scores found. Scores are generated automatically when tools are first used.'}
           </CardContent>
         </Card>
       ) : (
-        <div className="rounded-md border">
+        <div className={`rounded-md border transition-opacity ${isStale ? 'opacity-60' : ''}`}>
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b bg-muted/50">

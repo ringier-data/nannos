@@ -56,9 +56,10 @@ class ToolRiskService:
         db: AsyncSession,
         limit: int = 100,
         offset: int = 0,
+        search: str | None = None,
     ) -> list[dict[str, Any]]:
         """Get paginated scores sorted by updated_at desc (most recent first)."""
-        return await self.repo.get_scores_paginated(db, limit=limit, offset=offset)
+        return await self.repo.get_scores_paginated(db, limit=limit, offset=offset, search=search)
 
     async def upsert_score(
         self,
@@ -93,6 +94,6 @@ class ToolRiskService:
         """Delete a risk score (audited). Returns True if deleted."""
         return await self.repo.delete_score(db, actor=actor, tool_name=tool_name, server_slug=server_slug)
 
-    async def get_count(self, db: AsyncSession) -> int:
-        """Get total count of risk scores."""
-        return await self.repo.get_count(db)
+    async def get_count(self, db: AsyncSession, search: str | None = None) -> int:
+        """Get the count of risk scores matching `search` (all of them when omitted)."""
+        return await self.repo.get_count(db, search=search)
