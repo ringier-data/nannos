@@ -52,6 +52,30 @@ export interface ParsedToolSchema {
 const RENDERABLE = new Set(['string', 'number', 'integer', 'boolean']);
 
 /**
+ * A property spelled as Pydantic's `Optional[X]` — `anyOf: [X, {type: 'null'}]` — read
+ * as `X`, with the outer description, title and default kept (they describe the
+ * argument, not the branch). Anything else is returned as it is.
+ *
+ * Read here rather than relied on from the backend, which unwraps it for its own reasons
+ * (model providers that reject the spelling): an `Optional[Enum]` argument must stay a
+ * dropdown whether or not a schema arrives cleaned.
+ */
+function unwrapOptional(prop: Record<string, unknown>): Record<string, unknown> {
+  const variants = prop.anyOf ?? prop.oneOf;
+  if (!Array.isArray(variants)) return prop;
+  const nonNull = variants.filter(
+    (v): v is Record<string, unknown> =>
+      typeof v === 'object' && v !== null && (v as Record<string, unknown>).type !== 'null',
+  );
+  if (nonNull.length !== 1 || nonNull.length === variants.length) return prop;
+  const unwrapped: Record<string, unknown> = { ...nonNull[0] };
+  for (const key of ['description', 'title', 'default'] as const) {
+    if (prop[key] !== undefined && prop[key] !== null) unwrapped[key] = prop[key];
+  }
+  return unwrapped;
+}
+
+/**
  * Flatten a tool's input schema into renderable scalar fields.
  *
  * Anything nested is reported in `complex` rather than dropped silently, so the
@@ -74,7 +98,7 @@ export function parseToolSchema(tool: McpTool | undefined): ParsedToolSchema {
   const complex: string[] = [];
 
   for (const [key, rawProp] of Object.entries(properties)) {
-    const prop = (rawProp ?? {}) as Record<string, unknown>;
+    const prop = unwrapOptional((rawProp ?? {}) as Record<string, unknown>);
 
     // A union type (`["string", "null"]`) is renderable as long as exactly one
     // non-null member is; optional parameters are commonly spelled that way.
