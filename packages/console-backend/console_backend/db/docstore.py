@@ -49,6 +49,8 @@ async def init_docstore() -> None:
         class_=AsyncSession,
         expire_on_commit=False,
         autoflush=False,
+        # Reuse after close raises instead of leaking a pooled connection (#327).
+        close_resets_only=False,
     )
     logger.info("Docstore database connection initialized")
 

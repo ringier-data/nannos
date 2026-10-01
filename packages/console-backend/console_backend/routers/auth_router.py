@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..config import config
 from ..controllers.auth_controller import AuthController, register_oauth_provider
 from ..db.session import get_db_session
-from ..dependencies import require_auth, require_auth_or_bearer_token
+from ..dependencies import require_admin, require_auth, require_auth_or_bearer_token
 from ..models.audit import AuditAction, AuditEntityType
 from ..models.user import (
     PhoneVerificationCheckRequest,
@@ -648,7 +648,7 @@ async def start_impersonation(
     impersonate_request: ImpersonateStartRequest,
     request: Request,
     db: DbSession,
-    user: User = Depends(require_auth),
+    user: User = Depends(require_admin),
 ) -> ImpersonateResponse:
     """Start impersonating another user (admin only).
 
@@ -663,19 +663,9 @@ async def start_impersonation(
 
     Raises:
         401 Unauthorized: If the user is not authenticated.
-        403 Forbidden: If the user is not an administrator or admin mode is not enabled.
+        403 Forbidden: If the user is not an active administrator or admin mode is not enabled.
         404 Not Found: If the target user does not exist.
     """
-    from ..dependencies import get_admin_mode
-
-    # Require admin with admin mode enabled
-    admin_mode = get_admin_mode(request)
-    if not user.is_administrator or not admin_mode:
-        raise HTTPException(
-            status_code=403,
-            detail="Admin mode must be enabled to impersonate users",
-        )
-
     # Validate target user exists
     user_service = get_user_service(request)
     target_user = await user_service.get_user(db, impersonate_request.target_user_id)

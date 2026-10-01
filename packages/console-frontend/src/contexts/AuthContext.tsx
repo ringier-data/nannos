@@ -245,19 +245,35 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const error = await response.json().catch(() => ({ detail: 'Failed to stop impersonation' }));
         throw new Error(error.detail || 'Failed to stop impersonation');
       }
-
-      // Clear local state FIRST
+    } catch (error) {
+      console.error('Failed to stop impersonation:', error);
+      throw error;
+    } finally {
+      // Drop the impersonation locally even when the audit call failed: a stored id
+      // left behind silently resumes impersonating on the next request that sends it.
       clearImpersonatedUserId();
       setImpersonatedUserIdState(null);
 
       // Force refetch all queries without impersonation header
       // Use resetQueries to clear cache and force immediate refetch
       await queryClient.resetQueries();
-    } catch (error) {
-      console.error('Failed to stop impersonation:', error);
-      throw error;
     }
   }, [queryClient]);
+
+  // The backend answers 503 when it cannot look up the impersonated user. Every request
+  // carries the stored id, /auth/me included, so without this the admin would be bounced
+  // to /login on every attempt and could never reach the Stop button.
+  useEffect(() => {
+    if (
+      impersonatedUserId &&
+      error &&
+      typeof error === 'object' &&
+      'detail' in error &&
+      String((error as { detail: unknown }).detail).startsWith('Impersonation unavailable')
+    ) {
+      stopImpersonation().catch(() => {});
+    }
+  }, [error, impersonatedUserId, stopImpersonation]);
 
   return (
     <AuthContext.Provider

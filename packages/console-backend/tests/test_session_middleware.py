@@ -52,6 +52,7 @@ class _UserService:
 
     async def fetch_user(self, db, user_id):
         if self.fail_fetch:
+            self.lookups.append((user_id, db.open))
             raise ConnectionError("pool exhausted")
         return await self.get_user(db, user_id)
 
@@ -135,6 +136,8 @@ async def test_impersonation_lookups_run_on_open_session(
 @pytest.mark.asyncio
 async def test_failed_target_lookup_fails_closed():
     """A DB error on the target lookup must not run the request as the admin."""
-    response = await _impersonate(_UserService(fail_fetch=True), ADMIN, "true")
+    user_service = _UserService(fail_fetch=True)
+    response = await _impersonate(user_service, ADMIN, "true")
 
     assert response.status_code == 503
+    assert user_service.lookups == [(ADMIN.id, True), (TARGET.id, True)]

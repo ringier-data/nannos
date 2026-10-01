@@ -17,6 +17,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
 import { useAuth } from '@/contexts/AuthContext';
+import { clearImpersonatedUserId } from '@/api/apiInstanceConfig';
 import { mainNavItems, groupManagerNavItems, adminNavItems } from '@/config/navigation';
 import { NotificationInbox } from '@/components/notifications/NotificationInbox';
 import { ImpersonationBanner } from '@/components/ImpersonationBanner';
@@ -27,6 +28,8 @@ export function DashboardLayout() {
   const { user, isAdmin, isGroupManager, adminMode, toggleAdminMode } = useAuth();
 
   const handleLogout = () => {
+    // An impersonation must not outlive the admin's session and resume on the next login.
+    clearImpersonatedUserId();
     window.location.href = `/api/v1/auth/logout?redirectTo=${encodeURIComponent(window.location.origin + '/logged-out')}`;
   };
 

@@ -8,7 +8,7 @@ os.environ.setdefault("ECS_CONTAINER_METADATA_URI", "true")
 
 import pytest
 import pytest_asyncio
-from console_backend.dependencies import require_admin
+from console_backend.dependencies import require_admin, require_auth
 from console_backend.models.user import User, UserStatus
 from sqlalchemy import text
 
@@ -286,3 +286,27 @@ class TestAdminUserOnboardingFilters:
         response = await admin_client.get("/api/v1/admin/users", params={"issue": "sleepy"})
 
         assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+class TestStopImpersonation:
+    """Ending an impersonation is open to any administrator, whatever their account status."""
+
+    async def test_suspended_admin_can_stop_impersonation(self, client_with_db, inserted_user, admin_user_model):
+        suspended = admin_user_model.model_copy(update={"status": UserStatus.SUSPENDED})
+        client_with_db._transport.app.dependency_overrides[require_auth] = lambda: suspended
+        try:
+            response = await client_with_db.post("/api/v1/admin/users/impersonate/stop")
+        finally:
+            client_with_db._transport.app.dependency_overrides.pop(require_auth, None)
+
+        assert response.status_code == 200
+
+    async def test_non_admin_cannot_stop_impersonation(self, client_with_db, inserted_user, non_admin_user_model):
+        client_with_db._transport.app.dependency_overrides[require_auth] = lambda: non_admin_user_model
+        try:
+            response = await client_with_db.post("/api/v1/admin/users/impersonate/stop")
+        finally:
+            client_with_db._transport.app.dependency_overrides.pop(require_auth, None)
+
+        assert response.status_code == 403
