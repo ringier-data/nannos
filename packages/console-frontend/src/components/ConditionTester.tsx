@@ -60,9 +60,12 @@ export function ConditionTester({
 }) {
   const [source, setSource] = useState<'live' | 'mock'>('live');
   const [mockText, setMockText] = useState('');
-  const [outcome, setOutcome] = useState<ValidateConditionResponse | null>(null);
-  const [failure, setFailure] = useState<string | null>(null);
-  const [pending, setPending] = useState(false);
+  // Each answer is kept with the inputs it was asked about. Shown against anything else it
+  // lies: a re-run drops the response for the length of the call, the tester checks the
+  // expression against {} meanwhile, and that "no such member" answer was then shown
+  // against the new response until its own check came back.
+  const [outcome, setOutcome] = useState<{ key: string; res: ValidateConditionResponse } | null>(null);
+  const [failed, setFailed] = useState<{ key: string; message: string } | null>(null);
   // The verdict and the count are what is read every time; the extracted items only
   // when the count looks wrong. So they are one click away rather than always open.
   const [expanded, setExpanded] = useState(false);
@@ -112,12 +115,13 @@ export function ConditionTester({
     () => (hasPayload ? JSON.stringify(payload) : ''),
     [hasPayload, payload],
   );
+  // NUL-separated: none of the parts can contain one (JSON escapes it, expressions are typed).
+  const requestKey = `${hasPayload ? payloadKey : '-'}\0${prevKey}\0${cel}\0${judge}`;
   useEffect(() => {
     if (!hasPayload && !parseCheckOnly) return;
     if (!cel && !judge) return;
     let cancelled = false;
     const timer = setTimeout(() => {
-      setPending(true);
       validateCondition({
         result: subject,
         prev: previous,
@@ -126,31 +130,32 @@ export function ConditionTester({
       })
         .then((res) => {
           if (cancelled) return;
-          setOutcome(res);
-          setFailure(null);
+          setOutcome({ key: requestKey, res });
+          setFailed(null);
         })
         .catch((e: unknown) => {
           if (cancelled) return;
           setOutcome(null);
-          setFailure(e instanceof Error ? e.message : String(e));
-        })
-        .finally(() => {
-          if (!cancelled) setPending(false);
+          setFailed({ key: requestKey, message: e instanceof Error ? e.message : String(e) });
         });
     }, DEBOUNCE_MS);
     return () => {
       cancelled = true;
       clearTimeout(timer);
     };
-    // payloadKey stands in for payload; the rest are the condition's inputs.
-  }, [payloadKey, hasPayload, parseCheckOnly, subject, previous, cel, judge]);
+    // payloadKey (inside requestKey) stands in for payload; the rest are the condition's inputs.
+  }, [requestKey, hasPayload, parseCheckOnly, subject, previous, cel, judge]);
   // The verdict when nothing changed: what the run compares as prev is exactly what it
   // was given as result. By value, so a re-run that returns identical data counts too.
   const unchanged = prevKey !== '' && prevKey === payloadKey;
 
-  // Derived rather than cleared in the effect: with no payload there is nothing to
-  // report, and a stale outcome from a previous payload would be misleading.
-  const shown = hasPayload || parseCheckOnly ? outcome : null;
+  // Derived rather than cleared in the effect: an outcome for other inputs (or for no
+  // payload at all) would be misleading, so until this one is answered there is none.
+  const shown = (hasPayload || parseCheckOnly) && outcome?.key === requestKey ? outcome.res : null;
+  const failure = failed?.key === requestKey ? failed.message : null;
+  // Checking from the moment the inputs change, debounce included: the slot would
+  // otherwise sit empty for half a second, then spin.
+  const pending = (hasPayload || parseCheckOnly) && Boolean(cel || judge) && !shown && !failure;
   // Without a payload the check runs against {}, so only "does it parse" means anything:
   // every field is missing from {}, and reporting that as a failure called a correct
   // expression broken whenever no response was at hand.
