@@ -81,7 +81,7 @@ import { isOwnJob, subscriberCount } from '@/lib/sharedJobs';
 import { CronField } from '@/components/CronField';
 import { AgentActionFields } from '@/components/AgentActionFields';
 import { agentActionError, automatedSubAgentParameters } from '@/lib/agentAction';
-import { argsModeFor, missingRequiredArgs, resolveArgs } from '@/lib/watchArgs';
+import { argsModeFor, argsText, missingRequiredArgs, resolveArgs } from '@/lib/watchArgs';
 import { type ConditionMode, type MessageMode, conditionModeOf, resolveWatchChoices } from '@/lib/watchChoices';
 import { WatchFields } from '@/components/WatchFields';
 import { describeCron } from '@/lib/cron';
@@ -407,18 +407,22 @@ function CreateJobDialog({
           filled.add('check_tool');
         }
         if (result.check_args) {
-          const args = result.check_args as Record<string, unknown>;
-          next.check_args = args;
-          next.check_args_text = JSON.stringify(args, null, 2);
-          next.args_mode = argsModeFor(
-            args,
-            mcpTools.find((t) => t.name === result.check_tool),
-          );
+          next.check_args = result.check_args as Record<string, unknown>;
           filled.add('check_args');
         }
         if (result.check_args_exprs && Object.keys(result.check_args_exprs).length > 0) {
           next.check_args_exprs = result.check_args_exprs as Record<string, string>;
           filled.add('check_args');
+        }
+        if (filled.has('check_args')) {
+          // After both halves land: the JSON editor shows the expressions, and the field
+          // form needs a field for each of them.
+          next.check_args_text = argsText(next.check_args, next.check_args_exprs);
+          next.args_mode = argsModeFor(
+            next.check_args,
+            mcpTools.find((t) => t.name === result.check_tool),
+            next.check_args_exprs,
+          );
         }
         if (result.cel_expr) {
           next.cel_expr = result.cel_expr;

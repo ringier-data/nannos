@@ -9,7 +9,7 @@
 import type { ScheduledJobDraft } from '@/api/generated/types.gen';
 import type { WatchFieldsValue } from '@/components/WatchFields';
 import type { McpTool } from '@/api/generated/types.gen';
-import { argsModeFor, resolveArgs } from '@/lib/watchArgs';
+import { argsModeFor, argsText, resolveArgs } from '@/lib/watchArgs';
 import { conditionModeOf, messageModeOf, resolveWatchChoices } from '@/lib/watchChoices';
 
 /**
@@ -105,15 +105,22 @@ export function applyDraftEdit(
     changed.add('check_tool');
   }
   if (differs.has('check_args') || differs.has('check_tool')) {
-    const args = (edited.check_args ?? {}) as Record<string, unknown>;
-    next.check_args = args;
-    next.check_args_text = Object.keys(args).length ? JSON.stringify(args, null, 2) : '';
-    next.args_mode = argsModeFor(args, tools.find((t) => t.name === next.check_tool));
+    next.check_args = (edited.check_args ?? {}) as Record<string, unknown>;
     if (differs.has('check_args')) changed.add('check_args');
   }
   if (differs.has('check_args_exprs')) {
     next.check_args_exprs = (edited.check_args_exprs ?? {}) as Record<string, string>;
     changed.add('check_args');
+  }
+  if (differs.has('check_args') || differs.has('check_tool') || differs.has('check_args_exprs')) {
+    // After both halves land: the JSON editor shows the expressions, and the field form
+    // needs a field for each of them.
+    next.check_args_text = argsText(next.check_args, next.check_args_exprs);
+    next.args_mode = argsModeFor(
+      next.check_args,
+      tools.find((t) => t.name === next.check_tool),
+      next.check_args_exprs,
+    );
   }
 
   if (differs.has('cel_expr') || differs.has('llm_condition')) {

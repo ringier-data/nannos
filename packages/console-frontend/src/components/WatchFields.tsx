@@ -40,7 +40,14 @@ import {
   Segmented,
 } from '@/components/formChrome';
 import { toolServer, toolShortName, parseToolSchema } from '@/lib/mcpTools';
-import { type CheckCall, missingRequiredArgs, resolveArgs, sameCheckCall } from '@/lib/watchArgs';
+import {
+  type CheckCall,
+  argsText,
+  missingRequiredArgs,
+  parseArgsText,
+  resolveArgs,
+  sameCheckCall,
+} from '@/lib/watchArgs';
 import { jsonPathToCel } from '@/lib/watchCondition';
 import { cn } from '@/lib/utils';
 import { type ConditionMode, type MessageMode, type WatchChoices } from '@/lib/watchChoices';
@@ -218,10 +225,7 @@ export function WatchFields({
 
   function toggleArgsMode() {
     if (value.args_mode === 'fields') {
-      const text = Object.keys(value.check_args).length
-        ? JSON.stringify(value.check_args, null, 2)
-        : '';
-      patch({ args_mode: 'json', check_args_text: text });
+      patch({ args_mode: 'json', check_args_text: argsText(value.check_args, value.check_args_exprs) });
       return;
     }
     const { args, error } = resolveArgs(value);
@@ -376,7 +380,14 @@ export function WatchFields({
                       text={value.check_args_text}
                       error={errors.check_args}
                       onChange={(text) => {
-                        patch({ check_args_text: text });
+                        // The text holds the expressions too, as `"= …"` values. Mid-edit
+                        // JSON keeps the last good set; it cannot be saved until it parses.
+                        const parsed = parseArgsText(text);
+                        patch(
+                          parsed.error
+                            ? { check_args_text: text }
+                            : { check_args_text: text, check_args_exprs: parsed.exprs },
+                        );
                       }}
                     />
                   )}

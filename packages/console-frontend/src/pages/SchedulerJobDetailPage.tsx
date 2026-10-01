@@ -49,7 +49,7 @@ import { SubAgentSelect } from '@/components/SubAgentSelect';
 import { WatchFields, type WatchFieldsValue } from '@/components/WatchFields';
 import { AiComposer, HintTip } from '@/components/formChrome';
 import { LastCheckPanel } from '@/components/LastCheckPanel';
-import { resolveArgs } from '@/lib/watchArgs';
+import { argsText, resolveArgs } from '@/lib/watchArgs';
 import { conditionModeOf, messageModeOf, resolveWatchChoices } from '@/lib/watchChoices';
 import { applyDraftEdit, draftOfWatch } from '@/lib/watchDraft';
 import { agentActionError, automatedSubAgentParameters } from '@/lib/agentAction';
@@ -592,7 +592,10 @@ function watchValueFromJob(job: ScheduledJob): WatchFieldsValue {
   return {
     check_tool: job.check_tool ?? '',
     check_args: (job.check_args ?? {}) as Record<string, unknown>,
-    check_args_text: job.check_args ? JSON.stringify(job.check_args, null, 2) : '',
+    check_args_text: argsText(
+      (job.check_args ?? {}) as Record<string, unknown>,
+      (job.check_args_exprs ?? {}) as Record<string, string>,
+    ),
     args_mode: 'fields',
     check_args_exprs: (job.check_args_exprs ?? {}) as Record<string, string>,
     cel_expr: job.cel_expr ?? '',
