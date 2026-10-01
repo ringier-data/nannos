@@ -384,7 +384,15 @@ def _placeholders_to_brief(
 
     # The model's reply is not schema-checked: a prompt can arrive as a list.
     proposed_prompt = result.get("prompt")
-    if isinstance(proposed_prompt, str) and proposed_prompt.strip():
+    # Models echo the fields around their edit: the instruction of an agent this edit
+    # removes, restated, is still that agent's instruction and no brief.
+    echoed_instruction = (
+        current is not None
+        and current_agent is not None
+        and isinstance(proposed_prompt, str)
+        and proposed_prompt.strip() == (current.prompt or "").strip()
+    )
+    if isinstance(proposed_prompt, str) and proposed_prompt.strip() and not echoed_instruction:
         return result
     # The job's own prompt is a brief only if it was one — not an agent's instruction.
     if current is not None and current_agent is None and "prompt" not in result and (current.prompt or "").strip():

@@ -723,9 +723,10 @@ function EditForm({
   // it. Once, and only on an untouched form — never under someone typing.
   const modeChosen = useRef(false);
   useEffect(() => {
-    if (modeChosen.current || !mcpToolsData) return;
+    // Deferred, not dropped, while the form is being edited: it runs once it is clean again.
+    if (modeChosen.current || !mcpToolsData || dirty) return;
     modeChosen.current = true;
-    if (!dirty) setWatch((w) => ({ ...w, args_mode: watchValueFromJob(job, mcpToolsData.tools ?? []).args_mode }));
+    setWatch((w) => ({ ...w, args_mode: watchValueFromJob(job, mcpToolsData.tools ?? []).args_mode }));
   }, [mcpToolsData, dirty, job]);
 
   // A picker: it must offer every channel, so no page size is passed.
@@ -919,8 +920,12 @@ function EditForm({
       }),
       ...(job.job_type === 'watch' && {
         check_tool: watch.check_tool || undefined,
-        check_args: resolvedArgs.args ?? null,
-        check_args_exprs: Object.keys(resolvedArgs.exprs).length > 0 ? resolvedArgs.exprs : null,
+        // A reader cannot change the call, so it is not sent: re-deriving it from the
+        // editor's text could only ever read as a change they are refused.
+        ...(canWrite && {
+          check_args: resolvedArgs.args ?? null,
+          check_args_exprs: Object.keys(resolvedArgs.exprs).length > 0 ? resolvedArgs.exprs : null,
+        }),
         // The two halves of one condition: the expression gates deterministically,
         // the judgement is the semantic stage on what it returned. Cleared halves are
         // sent as null so a stale one cannot silently keep deciding the job.

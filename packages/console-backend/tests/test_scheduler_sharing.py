@@ -352,6 +352,22 @@ class TestOneUpdatePathRoutesEachField:
             await svc.update_job(db, job.id, ScheduledJobUpdate(), u["owner"], notification_message="New bug: {{id}}")
 
     @pytest.mark.asyncio
+    async def test_an_echo_is_judged_on_the_trimmed_text(self, world):
+        # The console sends the text trimmed; a row written through the API need not be.
+        svc, db, u = world["service"], world["db"], world["users"]
+        stored = "New bug: {{title}}\n"
+        job = await svc.create_job(db, _watch_create().model_copy(update={"notification_message": stored}), u["owner"])
+        await svc.update_permissions(
+            db, job.definition_id, [{"user_group_id": world["group"], "permissions": ["read"]}], u["owner"]
+        )
+        mine = await svc.subscribe(db, job.definition_id, u["member"])
+
+        saved = await svc.update_job(
+            db, mine.id, ScheduledJobUpdate(enabled=False), u["member"], notification_message=stored.strip()
+        )
+        assert saved is not None and saved.enabled is False
+
+    @pytest.mark.asyncio
     async def test_fixed_binds_the_sole_subscriber_too(self, world):
         svc, db, u = world["service"], world["db"], world["users"]
         job = await svc.create_job(db, _watch_create(trigger_policy=TriggerPolicy.FIXED), u["owner"])

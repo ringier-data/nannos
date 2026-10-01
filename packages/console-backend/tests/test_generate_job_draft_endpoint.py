@@ -606,6 +606,24 @@ class TestATemplatedFixedTextBecomesABrief:
         assert "sub_agent_id" not in body
         assert self.TEMPLATE in body["prompt"]
 
+    def test_an_echoed_instruction_of_a_removed_agent_is_no_brief(self, draft_client, gateway, catalogue):
+        # Models restate the fields around their edit; the removed agent's instruction,
+        # echoed, must not become the notification's brief.
+        draft_client.app.state.scheduler_service.schedulable_sub_agents = AsyncMock(
+            return_value=[SimpleNamespace(id=3, name="research", config_version=None)]
+        )
+        current = {**CURRENT, "sub_agent_id": 3, "prompt": "Research the reporter"}
+        gateway.return_value = {
+            "sub_agent_id": None,
+            "prompt": "Research the reporter",
+            "notification_message": self.TEMPLATE,
+        }
+
+        body = _filled(draft_client.post(URL, json={"query": "just tell me the title", "current": current}))
+
+        assert "sub_agent_id" not in body
+        assert self.TEMPLATE in body["prompt"]
+
     def test_a_non_string_prompt_is_not_a_500(self, draft_client, gateway, catalogue):
         gateway.return_value = {
             "job_type": "watch",

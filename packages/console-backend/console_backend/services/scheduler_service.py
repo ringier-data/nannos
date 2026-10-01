@@ -260,6 +260,9 @@ class SchedulerService:
             return json.loads(value) == current
         if key == "trigger_policy":
             return current is not None and current.value == value
+        # The console sends these trimmed; a row written through the API need not be.
+        if key in ("notification_message", "prompt") and isinstance(current, str) and isinstance(value, str):
+            return current.strip() == value.strip()
         return current == value
 
     @staticmethod

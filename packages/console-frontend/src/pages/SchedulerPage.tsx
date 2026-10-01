@@ -408,6 +408,8 @@ function CreateJobDialog({
           // hand: what an earlier draft gave the old tool must not ride along.
           next.check_args = {};
           next.check_args_exprs = {};
+          // So is its condition: it was written against the old tool's response.
+          next.cel_expr = '';
           filled.add('check_tool');
         }
         if (result.check_args) {

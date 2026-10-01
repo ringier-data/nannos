@@ -398,7 +398,11 @@ export function WatchFields({
                         patch(
                           parsed.error
                             ? { check_args_text: text }
-                            : { check_args_text: text, check_args_exprs: parsed.exprs },
+                            : {
+                                check_args_text: text,
+                                check_args: parsed.args ?? {},
+                                check_args_exprs: parsed.exprs,
+                              },
                         );
                       }}
                     />
