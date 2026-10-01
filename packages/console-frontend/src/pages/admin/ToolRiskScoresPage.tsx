@@ -21,6 +21,7 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { Pagination } from '@/components/admin/Pagination';
 import { client } from '@/api/generated/client.gen';
+import { listRiskScoresApiMcpToolsRiskScoresGet } from '@/api/generated/sdk.gen';
 import { useDebouncedValue } from '@/hooks/use-debounced-value';
 
 interface RiskFactor {
@@ -53,11 +54,12 @@ async function fetchRiskScores(
   offset = 0,
   search?: string,
 ): Promise<{ items: ToolRiskScore[]; total: number }> {
-  const res = await client.get({
-    url: '/api/mcp/tools/risk-scores',
+  // Throw so a failed request surfaces as an error, not as an empty (or "no match") result.
+  const { data } = await listRiskScoresApiMcpToolsRiskScoresGet({
     query: { limit, offset, search },
+    throwOnError: true,
   });
-  return res.data as { items: ToolRiskScore[]; total: number };
+  return data as { items: ToolRiskScore[]; total: number };
 }
 
 /** Upsert a risk score. */
@@ -127,7 +129,7 @@ export function ToolRiskScoresPage() {
   const [search, setSearch] = useState('');
   const debouncedSearch = useDebouncedValue(search.trim());
 
-  const { data, isLoading, isFetching, isRefetching } = useQuery({
+  const { data, isLoading, isFetching, isPlaceholderData, isError } = useQuery({
     queryKey: ['adminToolRiskScores', page, debouncedSearch],
     queryFn: () => fetchRiskScores(PAGE_SIZE, (page - 1) * PAGE_SIZE, debouncedSearch || undefined),
     placeholderData: keepPreviousData,
@@ -214,6 +216,10 @@ export function ToolRiskScoresPage() {
 
   const scores = data?.items ?? [];
   const total = data?.total ?? 0;
+  // With keepPreviousData, `data` belongs to the previous page/term until the new one lands:
+  // dim it, and keep the Refresh button for real refetches rather than every key change.
+  const isStale = isFetching && !isLoading;
+  const isRefreshing = isStale && !isPlaceholderData;
 
   return (
     <div className="flex flex-col gap-6 p-4 pb-8">
@@ -233,9 +239,9 @@ export function ToolRiskScoresPage() {
             variant="outline"
             size="sm"
             onClick={() => queryClient.invalidateQueries({ queryKey: ['adminToolRiskScores'] })}
-            disabled={isRefetching}
+            disabled={isRefreshing}
           >
-            {isRefetching ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : <RefreshCw className="h-4 w-4 mr-1" />}
+            {isRefreshing ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : <RefreshCw className="h-4 w-4 mr-1" />}
             Refresh
           </Button>
           <Button size="sm" onClick={openAddDialog}>
@@ -261,6 +267,13 @@ export function ToolRiskScoresPage() {
       {/* Table */}
       {isLoading ? (
         <TableSkeleton columns={6} />
+      ) : isError && !data ? (
+        <Card>
+          <CardContent className="py-8 text-center text-destructive">Failed to load tool risk scores.</CardContent>
+        </Card>
+      ) : isPlaceholderData && scores.length === 0 ? (
+        // The previous term's empty result says nothing about the term now being fetched.
+        <TableSkeleton columns={6} />
       ) : scores.length === 0 ? (
         <Card>
           <CardContent className="py-8 text-center text-muted-foreground">
@@ -270,7 +283,7 @@ export function ToolRiskScoresPage() {
           </CardContent>
         </Card>
       ) : (
-        <div className={`rounded-md border transition-opacity ${isFetching && !isLoading ? 'opacity-60' : ''}`}>
+        <div className={`rounded-md border transition-opacity ${isStale ? 'opacity-60' : ''}`}>
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b bg-muted/50">

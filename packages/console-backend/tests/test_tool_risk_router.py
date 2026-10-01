@@ -192,6 +192,11 @@ class TestListRiskScores:
         response = await client_with_db.get("/api/mcp/tools/risk-scores?limit=501")
         assert response.status_code == 422
 
+    async def test_validates_search_length(self, client_with_db: AsyncClient):
+        """Search terms are bounded like the console's other search params."""
+        response = await client_with_db.get("/api/mcp/tools/risk-scores?search=" + "x" * 201)
+        assert response.status_code == 422
+
     async def test_validates_offset_non_negative(self, client_with_db: AsyncClient):
         """Offset must be >= 0."""
         response = await client_with_db.get("/api/mcp/tools/risk-scores?offset=-1")

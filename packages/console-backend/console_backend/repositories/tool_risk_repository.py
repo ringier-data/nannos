@@ -78,8 +78,9 @@ class ToolRiskRepository(AuditedRepository):
     ) -> list[dict[str, Any]]:
         """Get paginated scores sorted by updated_at desc, optionally narrowed by `search`."""
         where_clause, params = _search_filter(search)
-        # The key breaks ties: scores written in the same clock tick would otherwise be
-        # ordered arbitrarily, and a paging caller could see one twice or not at all.
+        # The key breaks ties, so rows written in the same clock tick page deterministically.
+        # (A row upserted mid-pagination still moves to the front and can be missed by an
+        # OFFSET pager until its next pass — the tiebreaker doesn't fix that.)
         result = await db.execute(
             text(f"""
                 SELECT tool_name, server_slug, schema_hash, base_score,
