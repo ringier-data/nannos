@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 
 import httpx
 
-from ringier_a2a_sdk.model_capabilities import CAPABILITIES_KEY, capabilities_of
+from ringier_a2a_sdk.model_capabilities import CAPABILITIES_KEY, THINKING_OFF, THINKING_OFF_ALWAYS_ON, capabilities_of
 
 from ..config import config
 
@@ -119,6 +119,32 @@ def thinking_levels_for(info: dict) -> list[str]:
     # An empty list reads as "no thinking" to the sub-agent write guard, which would switch thinking
     # off on the next save; a model that says it reasons keeps the portable tiers instead.
     return levels or [e for e in _EFFORT_ORDER if e in _PORTABLE_EFFORTS]
+
+
+def litellm_flags_for(info: dict) -> dict:
+    """The LiteLLM-native flags a deployment's model_info must carry for LiteLLM's own request
+    translation to match what the console offers and the probe measured (nannos#330). Only
+    flags LiteLLM registers from a deployment's model_info, and only these two:
+
+    * ``supports_low_reasoning_effort: True`` for a model the picker offers ``low`` on, unless the
+      admin set the flag. LiteLLM keeps ``output_config.effort`` for a model its own map does not
+      list (Claude Opus 5.5 on v1.103) only when some ``supports_<level>_reasoning_effort`` flag is
+      True; without one, under ``drop_params``, every effort — a user's pick and the always-on
+      floor alike — reaches the model as its default. ``low`` is the one portable tier LiteLLM
+      has a flag for, and setting it True changes nothing ``thinking_levels_for`` offers.
+    * ``thinking_always_on`` mirrors the probe's measured ``thinking_off`` (True for
+      ``always_on``): LiteLLM then drops a ``thinking: disabled`` the model would 400 on.
+
+    Nothing else the probe measures is mirrored: LiteLLM does not register
+    ``supports_forced_tool_use`` from model_info, and ``supports_response_schema: False`` would make
+    it rewrite ``response_format`` into a forced tool call the same models reject."""
+    flags: dict = {}
+    if "low" in thinking_levels_for(info) and info.get("supports_low_reasoning_effort") is None:
+        flags["supports_low_reasoning_effort"] = True
+    off = capabilities_of(info).get(THINKING_OFF)
+    if off is not None:
+        flags["thinking_always_on"] = off == THINKING_OFF_ALWAYS_ON
+    return flags
 
 
 # The litellm_params that decide which endpoint answers: a record measured on one of them says
@@ -264,10 +290,12 @@ class ModelGatewayService:
         }
 
     async def register_model(self, model_name: str, litellm_params: dict, model_info: dict | None = None) -> dict:
+        model_info = dict(model_info or {})
+        model_info.update(litellm_flags_for(model_info))
         result = await self._request(
             "POST",
             "/model/new",
-            json={"model_name": model_name, "litellm_params": litellm_params, "model_info": model_info or {}},
+            json={"model_name": model_name, "litellm_params": litellm_params, "model_info": model_info},
         )
         self._invalidate_list_cache()
         return result
@@ -610,7 +638,11 @@ class ModelGatewayService:
                     else:
                         kept = prior
                 await self.record_capabilities(
-                    target_id, {**kept, **report.capabilities, PROBED_AT: _utc_now_iso()}
+                    target_id,
+                    {**kept, **report.capabilities, PROBED_AT: _utc_now_iso()},
+                    # The levels are read off the deployment the probe ran on; on the alias
+                    # fallback that is another deployment, whose declaration says nothing here.
+                    model_info=info if info.get("id") == target_id else None,
                 )
                 recorded = True
             except ModelGatewayError as e:
@@ -655,14 +687,20 @@ class ModelGatewayService:
         except httpx.HTTPError as e:
             raise ProbeCallError(f"gateway unreachable: {type(e).__name__}") from e
 
-    async def record_capabilities(self, model_id: str, capabilities: dict) -> None:
-        """Store the probe's flags under ``model_info.nannos_capabilities`` on a deployment.
+    async def record_capabilities(self, model_id: str, capabilities: dict, model_info: dict | None = None) -> None:
+        """Store the probe's flags under ``model_info.nannos_capabilities`` on a deployment, with
+        the LiteLLM-native flags that follow from them and from ``model_info`` (the deployment's
+        own, as the probe read it; see ``litellm_flags_for``) — so a deployment registered before
+        those flags existed gets them on its next Test.
 
         ``PATCH /model/{id}/update`` merges ``model_info`` (stored ∪ patch) on the proxy
         version the gateway pins, so the deployment's other keys survive and its id is kept —
         unlike ``update_model``, which re-registers. The router picks the change up on its
         next DB reload, so a flag is live within the proxy's reload interval, not instantly."""
+        flags = litellm_flags_for({**(model_info or {}), CAPABILITIES_KEY: capabilities})
         await self._request(
-            "PATCH", f"/model/{model_id}/update", json={"model_info": {"id": model_id, CAPABILITIES_KEY: capabilities}}
+            "PATCH",
+            f"/model/{model_id}/update",
+            json={"model_info": {"id": model_id, **flags, CAPABILITIES_KEY: capabilities}},
         )
         self._invalidate_list_cache()

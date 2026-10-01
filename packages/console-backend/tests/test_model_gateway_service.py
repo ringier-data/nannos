@@ -443,6 +443,50 @@ async def test_an_always_on_floor_is_tried_from_the_levels_the_picker_offers(svc
     assert caps["thinking_off"] == "always_on"
     assert caps["thinking_floor"] == "low"
     assert not any(b.get("reasoning_effort") == "minimal" for b in calls["probe_bodies"])
+    # The LiteLLM-native flags ride along, so the effort is actually sent next time.
+    written = calls["patched"][0][1]["model_info"]
+    assert written["supports_low_reasoning_effort"] is True
+    assert written["thinking_always_on"] is True
+
+
+@pytest.mark.parametrize(
+    "info, expected",
+    [
+        # A reasoning model without a level flag: LiteLLM would drop every effort (nannos#330).
+        ({"supports_reasoning": True}, {"supports_low_reasoning_effort": True}),
+        # The admin's own flag is never overridden, either way.
+        ({"supports_reasoning": True, "supports_low_reasoning_effort": False}, {}),
+        ({"supports_reasoning": True, "supports_low_reasoning_effort": True}, {}),
+        # Not a reasoning model: nothing to send an effort to.
+        ({}, {}),
+        ({"supports_reasoning": False}, {}),
+        # thinking_always_on mirrors the measured record, both ways.
+        (
+            {"supports_reasoning": True, "nannos_capabilities": {"thinking_off": "always_on"}},
+            {"supports_low_reasoning_effort": True, "thinking_always_on": True},
+        ),
+        ({"nannos_capabilities": {"thinking_off": "disabled"}}, {"thinking_always_on": False}),
+    ],
+)
+def test_litellm_flags_follow_the_offered_levels_and_the_record(info, expected):
+    from console_backend.services.model_gateway_service import litellm_flags_for
+
+    assert litellm_flags_for(info) == expected
+
+
+@pytest.mark.asyncio
+async def test_registration_writes_the_litellm_effort_flag(svc, monkeypatch):
+    sent: list = []
+
+    async def _fake_request(method, path, **kwargs):
+        sent.append((method, path, kwargs.get("json")))
+        return {"model_info": {"id": "new"}}
+
+    monkeypatch.setattr(svc, "_request", _fake_request)
+    await svc.register_model("m", {"model": "bedrock/eu.anthropic.claude-opus-5-5"}, {"supports_reasoning": True})
+    (_, path, body), = sent
+    assert path == "/model/new"
+    assert body["model_info"] == {"supports_reasoning": True, "supports_low_reasoning_effort": True}
 
 
 @pytest.mark.asyncio

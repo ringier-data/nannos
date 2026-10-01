@@ -111,7 +111,16 @@ around failing is **recorded, not refused**; the record is what lets the harness
   floor existed behaves the same until the deployment is re-tested. Known limit: with `modify_params`, LiteLLM drops
   `thinking` on a tool turn whose history carries no thinking blocks (after a replay strip, a
   cross-family failover, or a history from a non-thinking model); the turn keeps the floor effort
-  but its thinking text is omitted again. Gemini 3.5 Flash is
+  but its thinking text is omitted again.
+- Two LiteLLM-native flags follow from the console's levels and the record, written on save and
+  with every recorded Test (`litellm_flags_for`), because LiteLLM's own request translation reads
+  them and nothing else would set them for a model its map does not list:
+  `supports_low_reasoning_effort: true` where the picker offers `low` (without some level flag,
+  under `drop_params`, LiteLLM drops `output_config.effort` and every effort — a user's pick and
+  the floor alike — runs at the model's default; Opus 5.5 on v1.103), and `thinking_always_on`
+  from `thinking_off`. Nothing else is mirrored: `supports_forced_tool_use` is not read from a
+  deployment's model_info, and `supports_response_schema: false` would make LiteLLM rewrite
+  `response_format` into a forced tool call the same models reject. Gemini 3.5 Flash is
   *not* always-on: its floor, `minimal`, measured as no reasoning, so its "off" is real. When every
   off request is refused outright, the effort alone included (OpenAI-direct gpt-5 and the o-series
   400 on `none`), the record says `unsupported`: the hook strips the effort and the switch, so a
