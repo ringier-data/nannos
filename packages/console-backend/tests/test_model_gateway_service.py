@@ -141,38 +141,88 @@ _SONNET = "bedrock/eu.anthropic.claude-sonnet-5-5"
 
 
 @pytest.mark.asyncio
-async def test_an_edit_is_applied_in_place_and_keeps_the_deployment_id(svc, monkeypatch):
-    """nannos#323: an edit used to re-register the deployment, changing its id, and an edit from
-    a form still holding the old id left the previous deployment live beside the new one. In place
-    there is nothing to leave behind: the second edit from the same id still edits the one row."""
-    gw = _Deployments(**{"dep-0": {"litellm_params": {"model": "bedrock/rejected-id"}, "model_info": {"input_modes": ["text"]}}})
+async def test_an_edit_that_keeps_the_model_is_applied_in_place_and_keeps_the_id(svc, monkeypatch):
+    """Edits used to re-register, changing the id, and an edit from a client still holding the old
+    id left the previous deployment live beside the new one (nannos#323). In place, the same id
+    edited twice is still the one row."""
+    gw = _Deployments(**{"dep-0": {"litellm_params": {"model": _SONNET}, "model_info": {"mode": "chat", "input_modes": ["text"]}}})
     monkeypatch.setattr(svc, "_request", gw.request)
 
-    first = await svc.update_model("dep-0", "m", {"model": "bedrock/rejected-id"}, {"input_modes": ["text", "file"], "mode": "chat"})
-    second = await svc.update_model("dep-0", "m", {"model": _SONNET}, {"input_modes": ["text", "file"], "mode": "chat"})
+    first = await svc.update_model("dep-0", "m", {"model": _SONNET}, {"input_modes": ["text", "file"], "mode": "chat"})
+    second = await svc.update_model("dep-0", "m", {"model": _SONNET}, {"input_modes": ["text", "image"], "mode": "chat"})
 
     assert first["model_info"]["id"] == second["model_info"]["id"] == "dep-0"
     assert list(gw.rows) == ["dep-0"]
-    assert gw.rows["dep-0"]["litellm_params"]["model"] == _SONNET
-    assert gw.rows["dep-0"]["model_info"]["input_modes"] == ["text", "file"]  # custom keys persist
+    assert gw.rows["dep-0"]["model_info"]["input_modes"] == ["text", "image"]  # custom keys persist
     assert not [c for c in gw.calls if c[1] in ("/model/new", "/model/delete")]
 
 
 @pytest.mark.asyncio
-async def test_an_in_place_edit_keeps_the_probe_record_unless_the_route_changes(svc, monkeypatch):
-    """The record is not part of the edit form: in place it stays; an edit that routes the
-    deployment to another provider model (or region) resets it to {} — a value, since the merge
-    ignores a null — and the edit flow re-tests."""
+async def test_correcting_a_rejected_model_id_then_editing_from_the_returned_id_leaves_one(svc, monkeypatch):
+    """The nannos#323 cycle: an admin corrects a model id the provider rejects — a re-route, so a
+    re-registration with a new id. The form moves onto that id (the page re-binds it), and the next
+    edit from it (Back to form after the re-test) ends with one deployment."""
+    gw = _Deployments(**{"dep-0": {"litellm_params": {"model": "bedrock/rejected-id"}, "model_info": {"mode": "chat"}}})
+    monkeypatch.setattr(svc, "_request", gw.request)
+
+    first = await svc.update_model("dep-0", "m", {"model": _SONNET}, {"mode": "chat"})
+    second = await svc.update_model(first["model_info"]["id"], "m", {"model": _SONNET}, {"mode": "chat", "input_modes": ["text"]})
+
+    assert list(gw.rows) == [second["model_info"]["id"]] == [first["model_info"]["id"]]  # the second edit is in place
+
+
+@pytest.mark.asyncio
+async def test_an_in_place_edit_keeps_the_probe_record(svc, monkeypatch):
+    """The record is not part of the edit form; an edit that keeps the model leaves it alone."""
     record = {"response_format": False}
-    stored = {"litellm_params": {"model": _SONNET, "aws_region_name": "eu-central-1"}, "model_info": {"nannos_capabilities": record}}
+    stored = {"litellm_params": {"model": _SONNET, "aws_region_name": "eu-central-1"}, "model_info": {"mode": "chat", "nannos_capabilities": record}}
     gw = _Deployments(**{"dep-0": stored})
     monkeypatch.setattr(svc, "_request", gw.request)
 
-    await svc.update_model("dep-0", "m", {"model": _SONNET, "aws_region_name": "eu-central-1"}, {"mode": "chat"})
+    result = await svc.update_model("dep-0", "m", {"model": _SONNET, "aws_region_name": "eu-central-1"}, {"mode": "chat", "input_modes": ["text", "file"]})
+
+    assert result["model_info"]["id"] == "dep-0"
     assert gw.rows["dep-0"]["model_info"]["nannos_capabilities"] == record
 
-    await svc.update_model("dep-0", "m", {"model": _SONNET, "aws_region_name": "us-east-1"}, {"mode": "chat"})
-    assert gw.rows["dep-0"]["model_info"]["nannos_capabilities"] == {}
+
+@pytest.mark.asyncio
+async def test_a_route_kept_from_outside_the_form_stays_in_place(svc, monkeypatch):
+    """A stored key the form never sends (an api_base set on the gateway) survives the merge, so the
+    route is unchanged — compared with what the merge stores, not with what the form sent."""
+    gw = _Deployments(**{"dep-0": {"litellm_params": {"model": _SONNET, "api_base": "https://proxy.internal"}, "model_info": {"mode": "chat"}}})
+    monkeypatch.setattr(svc, "_request", gw.request)
+
+    result = await svc.update_model("dep-0", "m", {"model": _SONNET}, {"mode": "chat"})
+
+    assert result["model_info"]["id"] == "dep-0"
+    assert gw.rows["dep-0"]["litellm_params"]["api_base"] == "https://proxy.internal"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "edit,why",
+    [
+        (dict(params={"model": "bedrock/eu.anthropic.claude-opus-5-5"}, info={"mode": "chat"}, name="m"), "another provider model"),
+        (dict(params={"model": _SONNET, "aws_region_name": "us-east-1"}, info={"mode": "chat"}, name="m"), "another region"),
+        (dict(params={"model": _SONNET}, info={"mode": "embedding"}, name="m"), "another mode"),
+        (dict(params={"model": _SONNET}, info={"mode": "chat"}, name="m-renamed"), "another alias"),
+    ],
+)
+async def test_an_edit_that_makes_it_another_model_re_registers(svc, monkeypatch, edit, why):
+    """A merge cannot drop what described the previous model (the probe record, flags derived from
+    it, chat-only capability keys), so a re-route, a mode change or a rename replaces the deployment."""
+    stored = {"litellm_params": {"model": _SONNET}, "model_info": {"mode": "chat", "supports_reasoning": True, "nannos_capabilities": {"response_format": False}}}
+    gw = _Deployments(**{"dep-0": stored})
+    monkeypatch.setattr(svc, "_request", gw.request)
+    if edit["params"].get("aws_region_name"):
+        gw.rows["dep-0"]["litellm_params"]["aws_region_name"] = "eu-central-1"
+
+    result = await svc.update_model("dep-0", edit["name"], edit["params"], edit["info"])
+
+    new_id = result["model_info"]["id"]
+    assert new_id != "dep-0" and list(gw.rows) == [new_id], why
+    assert "nannos_capabilities" not in gw.rows[new_id]["model_info"] or why == "another alias"
+    assert "supports_reasoning" not in gw.rows[new_id]["model_info"], why
 
 
 @pytest.mark.asyncio

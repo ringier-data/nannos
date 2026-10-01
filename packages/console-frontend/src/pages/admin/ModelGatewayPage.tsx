@@ -638,7 +638,8 @@ export function ModelGatewayPage() {
       if (editingId) {
         const startedFrom = editingId;
         const updated = await updateGatewayModel(startedFrom, body);
-        // An edit keeps the deployment id unless it had to re-register (it cleared a field); then
+        // An edit keeps the deployment id unless it re-registered (it made the deployment another
+        // model, or cleared a field); then
         // the form moves onto the new id so "Back to form" edits the live deployment — but only
         // while it is still this model's form (the run window can be closed mid-save).
         const newId = updated.gateway_model_id;

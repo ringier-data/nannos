@@ -157,6 +157,9 @@ def _same_route(a: dict, b: dict) -> bool:
 #: Keys an edit removes by leaving a field blank. ``PATCH /model/{id}/update`` merges and ignores a
 #: null for them (LiteLLM v1.103.0 honours nulls for cost fields only), so an edit that drops one
 #: re-registers instead (``update_model``). The rest of the edit form is always sent with a value.
+#: (A blank Vertex location is refilled with the deployment default before it gets here, so on a
+#: Vertex model it is never dropped; it is on a model re-routed away from Vertex, which re-registers
+#: anyway.)
 _CLEARABLE_LITELLM_PARAMS = ("aws_region_name", "vertex_location", "vertex_project")
 _CLEARABLE_MODEL_INFO = ("base_model",)
 
@@ -306,35 +309,45 @@ class ModelGatewayService:
     async def update_model(
         self, model_id: str, model_name: str, litellm_params: dict, model_info: dict | None = None
     ) -> dict:
-        """Edit a registered deployment — in place, keeping its id, whenever the edit allows it.
+        """Edit a registered deployment — in place, keeping its id, while it stays the same model.
 
         In place is LiteLLM's ``PATCH /model/{id}/update``: it merges ``litellm_params`` and
-        ``model_info`` into the stored deployment, persists custom ``model_info`` keys (input_modes,
-        mode, supports_*, the probe record) and the router serves the edit at once (verified on
-        v1.103.0). Keeping the id is the point: the form, the cards and a retried request all hold
-        it, and an edit that changed it left the previous deployment live beside the next one
-        whenever one of them still held the old id (nannos#323).
+        ``model_info`` into the stored deployment, persists custom ``model_info`` keys and the router
+        serves the edit at once (verified on v1.103.0). Keeping the id is the point: the form, the
+        cards and a retried request all hold it, and an edit that changed it left the previous
+        deployment live beside the next one whenever one of them still held the old id (nannos#323).
+        The probe record, which is not part of the edit form, simply stays.
 
-        A merge cannot remove a key — LiteLLM ignores a null there except for cost fields — so an
-        edit that drops a routing pin or a base model (``_CLEARABLE_*``) re-registers instead:
-        register new, then delete old, as every edit used to. The response then carries the new id.
-
-        The probe record (nannos#318) is not part of the edit form. In place it simply stays; when
-        the edit re-routes the deployment to another provider model it is overwritten with ``{}`` —
-        a different model, which the edit flow re-tests anyway.
+        A merge can only add and overwrite, so it is used only for an edit that keeps the deployment
+        the same model: same route (provider model, region, location, project, base URL — compared
+        with what the merge would store), same mode, same alias, and no field cleared (LiteLLM
+        ignores a null there except for cost fields). Anything else replaces the deployment the way
+        every edit used to (``_reregister``): register new, then delete old, which changes the id —
+        a re-routed or re-moded deployment must not keep keys, flags or a probe record that described
+        the previous model. The returned dict carries the deployment id either way.
         """
         model_info = dict(model_info or {})
-        previous = await self.get_model_by_id(model_id)
-        stored_params = (previous or {}).get("litellm_params") or {}
-        stored_info = (previous or {}).get("model_info") or {}
-        drops = [k for k in _CLEARABLE_LITELLM_PARAMS if stored_params.get(k) and not litellm_params.get(k)]
-        drops += [k for k in _CLEARABLE_MODEL_INFO if stored_info.get(k) and not model_info.get(k)]
-        if drops:
-            logger.info("update_model: '%s' drops %s; re-registering (a PATCH cannot remove keys)", model_name, drops)
+        previous = await self._get_model_by_id_with_retry(model_id)
+        if previous is None:
+            # Not listed (a replica that has not loaded it, or gone): the PATCH reads the gateway's
+            # database, so it edits a lagging deployment and refuses a deleted one — never a duplicate.
+            return await self._patch_in_place(model_id, litellm_params, model_info)
+        stored_params = previous.get("litellm_params") or {}
+        stored_info = previous.get("model_info") or {}
+        reasons = [f"clears {k}" for k in _CLEARABLE_LITELLM_PARAMS if stored_params.get(k) and not litellm_params.get(k)]
+        reasons += [f"clears {k}" for k in _CLEARABLE_MODEL_INFO if stored_info.get(k) and not model_info.get(k)]
+        if not _same_route(stored_params, {**stored_params, **litellm_params}):
+            reasons.append("re-routes it")
+        if model_info.get("mode", "chat") != stored_info.get("mode", "chat"):
+            reasons.append("changes its mode")
+        if previous.get("model_name") != model_name:
+            reasons.append("renames it")
+        if reasons:
+            logger.info("update_model: the edit of '%s' %s; re-registering", model_name, ", ".join(reasons))
             return await self._reregister(model_id, model_name, litellm_params, model_info, previous)
+        return await self._patch_in_place(model_id, litellm_params, model_info)
 
-        if previous is not None and not _same_route(stored_params, litellm_params) and CAPABILITIES_KEY not in model_info:
-            model_info[CAPABILITIES_KEY] = {}
+    async def _patch_in_place(self, model_id: str, litellm_params: dict, model_info: dict) -> dict:
         await self._request(
             "PATCH",
             f"/model/{model_id}/update",
@@ -356,9 +369,11 @@ class ModelGatewayService:
         private key, never serialized to the API client) so the endpoint can surface it rather
         than reporting a clean success.
         """
-        # Carry the probe record over while the deployment still points at the same provider model.
-        if CAPABILITIES_KEY not in model_info:
-            if previous and _same_route((previous.get("litellm_params") or {}), litellm_params):
+        # Carry the probe record over while the deployment is still the same provider model in the
+        # same mode (an edit that only clears a field, or renames it).
+        same_mode = previous and model_info.get("mode", "chat") == (previous.get("model_info") or {}).get("mode", "chat")
+        if CAPABILITIES_KEY not in model_info and same_mode:
+            if _same_route((previous.get("litellm_params") or {}), litellm_params):
                 inherited = capabilities_of(previous.get("model_info"))
                 if inherited:
                     model_info = {**model_info, CAPABILITIES_KEY: inherited}
@@ -730,8 +745,8 @@ class ModelGatewayService:
 
         ``PATCH /model/{id}/update`` merges ``model_info`` (stored ∪ patch) on the proxy
         version the gateway pins, so the deployment's other keys survive and its id is kept —
-        unlike ``update_model``, which re-registers. The router picks the change up on its
-        next DB reload, so a flag is live within the proxy's reload interval, not instantly."""
+        the same call ``update_model`` uses for an in-place edit. The router picks the change up
+        on its next DB reload, so a flag is live within the proxy's reload interval, not instantly."""
         flags = litellm_flags_for(model_info or {})
         await self._request(
             "PATCH",

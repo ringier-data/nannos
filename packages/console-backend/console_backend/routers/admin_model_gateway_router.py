@@ -500,10 +500,10 @@ async def edit_model(
         )
     else:
         logger.info(
-            "Updated model %s (old gateway id=%s, new gateway id=%s) by %s",
+            "Updated model %s (gateway id=%s%s) by %s",
             body.model_name,
-            model_id,
             new_model_id,
+            "" if new_model_id == model_id else f", replaced {model_id}",
             user.id,
         )
     return ModelRegistrationResponse(

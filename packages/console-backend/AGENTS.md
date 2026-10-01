@@ -497,11 +497,13 @@ same alias, which is how duplicates happened.
 
 **An edit is applied in place and keeps the deployment id** (`update_model` → LiteLLM's
 `PATCH /model/{id}/update`, which merges `litellm_params` and `model_info`, persists custom keys and
-is served at once). Edits used to re-register (new id, then delete the old), and any client still
-holding the old id — the form after a failed test, a second tab — re-registered again beside it
-(nannos#323). The merge cannot remove a key (LiteLLM ignores a null except for cost fields), so an
-edit that clears a region pin, a Vertex location/project or a base model still re-registers
-(`_CLEARABLE_*`); that is the only path that changes the id or can leave a
+is served at once) — while the edit keeps the deployment the same model. Edits used to re-register
+(new id, then delete the old), and any client still holding the old id — the form after a failed
+test, a second tab — re-registered again beside it (nannos#323). A merge can only add and overwrite,
+so an edit that re-routes the deployment (provider model, region, location, project, base URL),
+changes its mode, renames it or clears a field (`_CLEARABLE_*`; LiteLLM ignores a null except for
+cost fields) still re-registers: a different model must not keep the previous one's keys, flags or
+probe record. That is the only path that changes the id or can leave a
 `updated_with_stale_duplicate`. The registration probe addresses its requests to the deployment
 id it records on, never the alias, so a duplicate behind an alias cannot make it measure a mix.
 
