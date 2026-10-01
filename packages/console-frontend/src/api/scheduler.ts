@@ -13,6 +13,8 @@
  * raw calls below are the CRUD ones whose bodies are still wider than the generated
  * types (createScheduledJob's delivery_channel_id, for one).
  */
+import { describeTextError } from '@/lib/utils';
+
 import { client } from './generated/client.gen';
 import { totalCountFrom } from './total-count';
 import {
@@ -116,6 +118,7 @@ export class ApiError extends Error {
  * and it was being thrown away.
  */
 export function formatApiError(error: unknown): string {
+  if (typeof error === 'string') return describeTextError(error);
   const detail = (error as { detail?: unknown } | null)?.detail;
   if (typeof detail === 'string') return detail;
   if (Array.isArray(detail)) {

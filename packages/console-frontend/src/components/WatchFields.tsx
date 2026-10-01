@@ -267,7 +267,10 @@ export function WatchFields({
     }
     setMissingArgs(new Set());
     setRiskPrompt(null);
-    setCheck({ loading: true });
+    // The last response stays up while the call runs (its signature still says which call
+    // it answers): dropping it flipped the tester to "no payload" and back for the length
+    // of every re-run.
+    setCheck((last) => ({ ...last, loading: true, error: undefined }));
     try {
       // The test call uses the same argument resolution the scheduler will: static
       // args plus the `= …` expressions, or it is not testing the real job.
@@ -279,7 +282,12 @@ export function WatchFields({
           prev: storedResult ?? null,
         });
         if (!dyn.valid) {
-          setCheck({ loading: false, error: `Dynamic arguments failed: ${dyn.error ?? 'unresolvable'}` });
+          // As on the risk prompt below: nothing was called, so the last response stands.
+          setCheck((last) => ({
+            ...last,
+            loading: false,
+            error: `Dynamic arguments failed: ${dyn.error ?? 'unresolvable'}`,
+          }));
           return;
         }
         callArgs = dyn.resolved ?? callArgs;
@@ -299,7 +307,8 @@ export function WatchFields({
       setShowResponse(!value.cel_expr.trim());
     } catch (e) {
       if (e instanceof McpToolRiskError) {
-        setCheck({ loading: false });
+        // Nothing was called, so the last response still answers the same call.
+        setCheck((last) => ({ ...last, loading: false }));
         setRiskPrompt(e.message);
         return;
       }

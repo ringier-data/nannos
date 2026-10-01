@@ -799,7 +799,7 @@ function EditForm({
       setAiQuery('');
       touch();
     } catch (e) {
-      setError(`AI generation failed: ${formatApiError(e)}. Please edit the fields manually.`);
+      setError(`AI generation failed: ${formatApiError(e).replace(/\.$/, '')}. Please edit the fields manually.`);
     } finally {
       setAiLoading(false);
     }
