@@ -200,9 +200,9 @@ const PRICING_UNITS: Array<{
   { unit: 'web_search', label: 'Web search ($/M searches)', flow: 'output', webSearchOnly: true },
 ];
 
-// The pricing fields shown/submitted for a given mode. web_search is gated on the model being
-// able to search — the capability toggle, or a prefill having surfaced a fee (capable models
-// only); everything else follows the input/embedding split.
+// The pricing fields shown/submitted for a given mode. web_search is shown when the capability
+// toggle is on or the form already holds a fee for it; everything else follows the
+// input/embedding split.
 const visiblePricingUnits = (mode: string, prices: Record<string, string>, canSearch = false) =>
   (mode === 'embedding'
     ? PRICING_UNITS.filter((u) => u.flow === 'input')
@@ -823,13 +823,15 @@ export function ModelGatewayPage() {
   // Only units the gateway knows are overwritten; nothing is saved until "Save changes".
   const prefill = async () => {
     if (!form.model_name) return;
+    const seq = ratesLoadSeq.current; // a dialog closed or reopened meanwhile must not receive these
     let prices: Record<string, string>;
     try {
       prices = pricesFromPrefill((await getCostPrefill(form.model_name, 'gateway')).pricing);
     } catch (e) {
-      toast.error(`Pre-fill failed: ${errMsg(e)}`);
+      if (seq === ratesLoadSeq.current) toast.error(`Pre-fill failed: ${errMsg(e)}`);
       return;
     }
+    if (seq !== ratesLoadSeq.current) return;
     // Only the units this form shows and saves: an embedding model has no output price, and a
     // web-search fee is only added once the capability is on (one already shown is corrected).
     const shown = new Set(visiblePricingUnits(form.mode, form.prices, form.supports_web_search).map((u) => u.unit));
