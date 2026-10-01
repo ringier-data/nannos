@@ -3969,10 +3969,12 @@ export const costPrefillApiV1AdminModelGatewayModelsModelNameCostPrefillGetQuery
  *
  * Seed the rate-card form (best-effort).
  *
- * Prefers the model's stored rate card so EDITING a model starts from its real, previously-saved
- * rates (they live in the rate card, not the gateway's model_info). Falls back to the gateway's
- * known cost for models we don't bill yet (fresh registration). Empty when neither knows the
- * model — the admin then enters rates manually.
+ * ``auto`` (opening the edit dialog) prefers the model's stored rate card so EDITING a model starts
+ * from its real, previously-saved rates (they live in the rate card, not the gateway's model_info),
+ * and falls back to the gateway's known cost for models we don't bill yet (fresh registration).
+ * ``gateway`` (the "Pre-fill from gateway" button) skips the stored card: the dialog already shows
+ * it, so returning it again would leave a card missing units (e.g. cache rates) unrepairable.
+ * Empty when the source doesn't know the model — the admin then enters rates manually.
  */
 export const costPrefillApiV1AdminModelGatewayModelsModelNameCostPrefillGetOptions = (options: Options<CostPrefillApiV1AdminModelGatewayModelsModelNameCostPrefillGetData>) => queryOptions<CostPrefillApiV1AdminModelGatewayModelsModelNameCostPrefillGetResponse, CostPrefillApiV1AdminModelGatewayModelsModelNameCostPrefillGetError, CostPrefillApiV1AdminModelGatewayModelsModelNameCostPrefillGetResponse, ReturnType<typeof costPrefillApiV1AdminModelGatewayModelsModelNameCostPrefillGetQueryKey>>({
     queryFn: async ({ queryKey, signal }) => {

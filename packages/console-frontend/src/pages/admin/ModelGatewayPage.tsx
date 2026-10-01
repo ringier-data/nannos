@@ -29,6 +29,7 @@ import {
   setGatewayModelDefault,
   getCostPrefill,
   type CatalogModel,
+  type CostPrefill,
   type DefaultRole,
   type GatewayModel,
   type ModelRegistrationRequest,
@@ -194,19 +195,23 @@ const PRICING_UNITS: Array<{
   { unit: 'cache_creation_input_tokens', label: 'Cache write ($/M)', flow: 'input' },
   { unit: 'input_images', label: 'Per image ($/M images)', flow: 'input', embeddingOnly: true },
   // Per-grounded-call web-search fee (matches the proxy's `web_search` billing unit). Only shown
-  // for web-search-capable models — i.e. once the gateway prefill reports a price for it — so it
-  // isn't a confusing empty field on chat models that can't search. See webSearchOnly gating below.
+  // when the web-search capability is on or the form already holds a price for it, so it isn't a
+  // confusing empty field on chat models that can't search. See webSearchOnly gating below.
   { unit: 'web_search', label: 'Web search ($/M searches)', flow: 'output', webSearchOnly: true },
 ];
 
-// The pricing fields shown/submitted for a given mode. web_search is gated on the model being
-// able to search — the capability toggle, or a prefill having surfaced a fee (capable models
-// only); everything else follows the input/embedding split.
+// The pricing fields shown/submitted for a given mode. web_search is shown when the capability
+// toggle is on or the form already holds a fee for it; everything else follows the
+// input/embedding split.
 const visiblePricingUnits = (mode: string, prices: Record<string, string>, canSearch = false) =>
   (mode === 'embedding'
     ? PRICING_UNITS.filter((u) => u.flow === 'input')
     : PRICING_UNITS.filter((u) => !u.embeddingOnly)
   ).filter((u) => !u.webSearchOnly || canSearch || prices[u.unit] != null);
+
+// A cost-prefill response as form prices (billing unit → per-million string, trailing zeros dropped).
+const pricesFromPrefill = (pricing: CostPrefill['pricing']): Record<string, string> =>
+  Object.fromEntries(Object.entries(pricing ?? {}).map(([unit, e]) => [unit, String(Number(e.price_per_million))]));
 
 interface FormState {
   model_name: string;
@@ -339,6 +344,16 @@ export function ModelGatewayPage() {
     }
   };
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
+  // Units the last "Pre-fill from gateway" changed: the value before and the gateway's value. A
+  // field shows its "was" hint only while it still holds the gateway's value, so editing it by hand
+  // drops the hint on its own; re-seeding from a catalog or base model clears it explicitly.
+  const [prefillDiff, setPrefillDiff] = useState<Record<string, { was: string; now: string }>>({});
+  // The edit dialog's stored-rate load is in flight. Pre-fill waits for it: diffing against the
+  // still-empty form would mark every unit "was empty", and the load would then be dropped.
+  const [ratesLoading, setRatesLoading] = useState(false);
+  // Which dialog opening the in-flight stored-rate load belongs to: a load that resolves after its
+  // dialog was closed (or another model opened) must neither seed nor re-enable the button.
+  const ratesLoadSeq = useRef(0);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [basePickerOpen, setBasePickerOpen] = useState(false);
   // The base-model list filters only on text typed since the field was focused: a value already
@@ -421,6 +436,7 @@ export function ModelGatewayPage() {
 
   // Selecting a catalog model pre-fills the gateway id, provider, input modes and cost.
   const applyCatalogEntry = (entry: CatalogModel) => {
+    setPrefillDiff({}); // the prices below replace the form's; a gateway "was" no longer applies
     const modes = ['text'];
     if (entry.supports_vision) modes.push('image');
     if (entry.supports_audio_input) modes.push('audio');
@@ -461,8 +477,10 @@ export function ModelGatewayPage() {
   // A base model names the priced catalog entry for a deployment whose id can't (an Azure
   // deployment name says which model, not which tier). Choosing one re-seeds the prices from it,
   // replacing the gateway id's: the base model is the more specific answer.
-  const applyBaseModelEntry = (entry: CatalogModel) =>
+  const applyBaseModelEntry = (entry: CatalogModel) => {
+    setPrefillDiff({});
     setForm((f) => ({ ...f, base_model: entry.model_id, prices: pricesFromCatalogEntry(entry) }));
+  };
 
   // The provider route this deployment will be served and billed under. ONE value answers all of it,
   // and the form never authors it — it mirrors the server's resolution so what you see is what will
@@ -533,15 +551,21 @@ export function ModelGatewayPage() {
   };
 
   const closeDialog = () => {
+    ratesLoadSeq.current += 1;
+    setRatesLoading(false);
     setDialogOpen(false);
     setEditingId(null);
     setForm(EMPTY_FORM);
+    setPrefillDiff({});
     setRegionError(null);
   };
 
   const openCreate = () => {
+    ratesLoadSeq.current += 1;
+    setRatesLoading(false);
     setEditingId(null);
     setForm(EMPTY_FORM);
+    setPrefillDiff({});
     setCredsOpen(false);
     setAliasEdited(false);
     setDialogOpen(true);
@@ -549,6 +573,7 @@ export function ModelGatewayPage() {
 
   const openEdit = async (m: GatewayModel) => {
     setEditingId(m.model_id ?? null);
+    setPrefillDiff({});
     const awsRegion = m.aws_region_name ?? '';
     const vertexLocation = m.vertex_location ?? '';
     const vertexProject = m.vertex_project ?? '';
@@ -573,15 +598,18 @@ export function ModelGatewayPage() {
     });
     setDialogOpen(true);
     // Best-effort: seed the current rates from the gateway so edits start from real numbers.
+    const seq = ++ratesLoadSeq.current;
+    setRatesLoading(true);
     try {
-      const { pricing } = await getCostPrefill(m.model_name);
-      const prices: Record<string, string> = {};
-      for (const [unit, entry] of Object.entries(pricing ?? {})) prices[unit] = String(entry.price_per_million);
+      const prices = pricesFromPrefill((await getCostPrefill(m.model_name)).pricing);
+      if (seq !== ratesLoadSeq.current) return;
       // The dialog is already open while this loads: if the admin picked a base model (or typed
       // a price) in the meantime, those prices are newer than the stored ones and win.
       setForm((f) => (Object.keys(f.prices).length ? f : { ...f, prices }));
     } catch {
       /* no seed — admin enters rates */
+    } finally {
+      if (seq === ratesLoadSeq.current) setRatesLoading(false);
     }
   };
 
@@ -790,17 +818,50 @@ export function ModelGatewayPage() {
     onError: (e: unknown) => toast.error(`Set default failed: ${errMsg(e)}`),
   });
 
+  // Always the gateway's cost, never the stored rate card: the dialog already loaded that on open,
+  // so this is how a card missing units (e.g. cache rates) or holding a stale price gets corrected.
+  // Only units the gateway knows are overwritten; nothing is saved until "Save changes".
   const prefill = async () => {
     if (!form.model_name) return;
+    const seq = ratesLoadSeq.current; // a dialog closed or reopened meanwhile must not receive these
+    let prices: Record<string, string>;
     try {
-      const { pricing } = await getCostPrefill(form.model_name);
-      const prices: Record<string, string> = {};
-      for (const [unit, entry] of Object.entries(pricing ?? {})) prices[unit] = String(entry.price_per_million);
-      setForm((f) => ({ ...f, prices: { ...f.prices, ...prices } }));
-      toast.success('Pre-filled cost from the gateway');
-    } catch {
-      toast.info('Gateway has no cost for this model yet — enter rates manually');
+      prices = pricesFromPrefill((await getCostPrefill(form.model_name, 'gateway')).pricing);
+    } catch (e) {
+      if (seq === ratesLoadSeq.current) toast.error(`Pre-fill failed: ${errMsg(e)}`);
+      return;
     }
+    if (seq !== ratesLoadSeq.current) return;
+    // Only the units this form shows and saves: an embedding model has no output price, and a
+    // web-search fee is only added once the capability is on (one already shown is corrected).
+    const shown = new Set(visiblePricingUnits(form.mode, form.prices, form.supports_web_search).map((u) => u.unit));
+    prices = Object.fromEntries(Object.entries(prices).filter(([unit]) => shown.has(unit)));
+    if (Object.keys(prices).length === 0) {
+      toast.info('Gateway has no cost for this model yet — enter rates manually');
+      return;
+    }
+    const diff: Record<string, { was: string; now: string }> = {};
+    for (const [unit, now] of Object.entries(prices)) {
+      const was = form.prices[unit] ?? '';
+      if (was === '' || Number(was) !== Number(now)) diff[unit] = { was, now };
+    }
+    setForm((f) => ({ ...f, prices: { ...f.prices, ...prices } }));
+    setPrefillDiff(diff);
+    const label = (unit: string) =>
+      (PRICING_UNITS.find((u) => u.unit === unit)?.label ?? unit).replace(/ \(.*\)$/, '').toLowerCase();
+    const filled = Object.keys(diff)
+      .filter((u) => diff[u].was === '')
+      .map(label);
+    const updated = Object.keys(diff)
+      .filter((u) => diff[u].was !== '')
+      .map(label);
+    if (Object.keys(diff).length === 0) toast.success('Rates already match the gateway');
+    else
+      toast.success(
+        [filled.length && `Filled ${filled.join(', ')}`, updated.length && `Updated ${updated.join(', ')}`]
+          .filter(Boolean)
+          .join(' · ') + ' from the gateway — review, then save'
+      );
   };
 
   const submit = () => {
@@ -1393,22 +1454,31 @@ export function ModelGatewayPage() {
             <div className="grid gap-1.5">
               <div className="flex items-center justify-between">
                 <Label>Pricing ($ per million units)</Label>
-                <Button type="button" size="sm" variant="ghost" onClick={prefill}>
+                <Button type="button" size="sm" variant="ghost" onClick={prefill} disabled={ratesLoading}>
                   Pre-fill from gateway
                 </Button>
               </div>
               <div className="grid grid-cols-2 gap-2">
-                {visiblePricingUnits(form.mode, form.prices, form.supports_web_search).map(({ unit, label }) => (
-                  <div key={unit} className="grid gap-1">
-                    <Label className="text-xs text-muted-foreground">{label}</Label>
-                    <Input
-                      type="number"
-                      step="0.0001"
-                      value={form.prices[unit] ?? ''}
-                      onChange={(e) => setForm({ ...form, prices: { ...form.prices, [unit]: e.target.value } })}
-                    />
-                  </div>
-                ))}
+                {visiblePricingUnits(form.mode, form.prices, form.supports_web_search).map(({ unit, label }) => {
+                  const changed = prefillDiff[unit]?.now === form.prices[unit] ? prefillDiff[unit] : undefined;
+                  return (
+                    <div key={unit} className="grid gap-1">
+                      <Label className="text-xs text-muted-foreground">{label}</Label>
+                      <Input
+                        type="number"
+                        step="0.0001"
+                        className={changed ? 'border-amber-500 focus-visible:ring-amber-500' : undefined}
+                        value={form.prices[unit] ?? ''}
+                        onChange={(e) => setForm({ ...form, prices: { ...form.prices, [unit]: e.target.value } })}
+                      />
+                      {changed && (
+                        <p className="text-xs text-amber-700 dark:text-amber-400">
+                          {changed.was === '' ? 'was empty' : `was ${Number(changed.was)}`}
+                        </p>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </div>
           </div>

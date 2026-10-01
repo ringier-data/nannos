@@ -41,6 +41,7 @@ import type {
   ModelRegistrationRequest,
   ModelRegistrationResponse,
   RateCardPricingEntryInput,
+  SourceEnum,
   TierGroup,
   WebSearchConfig,
   WebSearchModelOption,
@@ -162,9 +163,14 @@ export async function listGatewayModels(): Promise<GatewayModel[]> {
   return (data ?? []) as GatewayModel[];
 }
 
-export async function getCostPrefill(modelName: string): Promise<CostPrefill> {
+/**
+ * Rate-card seed for a model. `auto` (the edit dialog's initial load) returns the stored rate card,
+ * else the gateway's cost; `gateway` (the "Pre-fill from gateway" button) skips the stored card.
+ */
+export async function getCostPrefill(modelName: string, source: SourceEnum = 'auto'): Promise<CostPrefill> {
   const { data, error } = await costPrefillApiV1AdminModelGatewayModelsModelNameCostPrefillGet({
     path: { model_name: modelName },
+    query: { source },
   });
   if (error) throw error;
   return data as CostPrefill;

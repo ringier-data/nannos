@@ -9320,6 +9320,13 @@ export type GranularityEnum = 'day' | 'week';
 export type GranularityEnum2 = 'day' | 'week' | 'month';
 
 /**
+ * Source
+ *
+ * auto: the stored rate card, else the gateway's cost. gateway: the gateway's cost only.
+ */
+export type SourceEnum = 'auto' | 'gateway';
+
+/**
  * Scope
  *
  * 'personal' or 'group'
@@ -13836,7 +13843,12 @@ export type CostPrefillApiV1AdminModelGatewayModelsModelNameCostPrefillGetData =
          */
         model_name: string;
     };
-    query?: never;
+    query?: {
+        /**
+         * auto: the stored rate card, else the gateway's cost. gateway: the gateway's cost only.
+         */
+        source?: SourceEnum;
+    };
     url: '/api/v1/admin/model-gateway/models/{model_name}/cost-prefill';
 };
 

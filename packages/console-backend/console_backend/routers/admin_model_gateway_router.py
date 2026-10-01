@@ -323,13 +323,23 @@ async def bedrock_model_regions(
 
 
 @router.get("/models/{model_name}/cost-prefill", response_model=CostPrefill)
-async def cost_prefill(model_name: str, request: Request, db: DbSession, user: User = Depends(require_admin)):
+async def cost_prefill(
+    model_name: str,
+    request: Request,
+    db: DbSession,
+    user: User = Depends(require_admin),
+    source: Literal["auto", "gateway"] = Query(
+        "auto", description="auto: the stored rate card, else the gateway's cost. gateway: the gateway's cost only."
+    ),
+):
     """Seed the rate-card form (best-effort).
 
-    Prefers the model's stored rate card so EDITING a model starts from its real, previously-saved
-    rates (they live in the rate card, not the gateway's model_info). Falls back to the gateway's
-    known cost for models we don't bill yet (fresh registration). Empty when neither knows the
-    model — the admin then enters rates manually.
+    ``auto`` (opening the edit dialog) prefers the model's stored rate card so EDITING a model starts
+    from its real, previously-saved rates (they live in the rate card, not the gateway's model_info),
+    and falls back to the gateway's known cost for models we don't bill yet (fresh registration).
+    ``gateway`` (the "Pre-fill from gateway" button) skips the stored card: the dialog already shows
+    it, so returning it again would leave a card missing units (e.g. cache rates) unrepairable.
+    Empty when the source doesn't know the model — the admin then enters rates manually.
     """
     try:
         model = await get_model_gateway_service(request).get_model(model_name)
@@ -343,7 +353,7 @@ async def cost_prefill(model_name: str, request: Request, db: DbSession, user: U
     #    provider derived from the routing params. The gateway's litellm_provider (a cost-map
     #    implementation tag like `bedrock_converse`) is tried second, only so cards mis-keyed
     #    before this derivation existed still prefill their stored rates when edited.
-    candidates = [_billing_provider(params), info.get("litellm_provider")]
+    candidates = [_billing_provider(params), info.get("litellm_provider")] if source != "gateway" else []
     for provider in dict.fromkeys(p for p in candidates if p):
         rates = await request.app.state.rate_card_service.repository.get_all_active_rates(
             db=db, provider=provider, model_name=model_name
@@ -360,9 +370,9 @@ async def cost_prefill(model_name: str, request: Request, db: DbSession, user: U
     pricing: dict[str, RateCardPricingEntry] = {}
     for cost_field, (unit, flow) in _COST_FIELD_TO_UNIT.items():
         val = info.get(cost_field)
-        # ``is not None`` (not truthiness): a genuine 0.0 cost (free tier / 0.0 cache-read
-        # rate) is a meaningful explicit-zero rate, not a "missing" value to drop.
-        if val is not None:
+        # A rate card entry must be positive (RateCardPricingEntry), so a 0.0 cost — e.g. the
+        # output cost every embedding model carries — is left unpriced rather than 500ing the seed.
+        if val is not None and val > 0:
             pricing[unit] = RateCardPricingEntry(
                 price_per_million=Decimal(str(val)) * Decimal(1_000_000),
                 flow_direction=flow,
