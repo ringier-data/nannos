@@ -330,6 +330,28 @@ class TestOneUpdatePathRoutesEachField:
         assert before is not None and after is not None and after["revision"] == before["revision"]
 
     @pytest.mark.asyncio
+    async def test_a_stored_placeholder_text_does_not_block_a_readers_own_save(self, world):
+        """The placeholder rule is checked on a CHANGED text only. A job stored before it
+        existed is resent by every save; a reader, who cannot touch the text, must still
+        be able to save their own state — and the owner's genuine change is refused."""
+        svc, db, u = world["service"], world["db"], world["users"]
+        legacy = "New bug: {{title}}"
+        # model_copy skips validation: the row predates the rule.
+        job = await svc.create_job(db, _watch_create().model_copy(update={"notification_message": legacy}), u["owner"])
+        await svc.update_permissions(
+            db, job.definition_id, [{"user_group_id": world["group"], "permissions": ["read"]}], u["owner"]
+        )
+        mine = await svc.subscribe(db, job.definition_id, u["member"])
+
+        saved = await svc.update_job(
+            db, mine.id, ScheduledJobUpdate(enabled=False), u["member"], notification_message=legacy
+        )
+        assert saved is not None and saved.enabled is False
+
+        with pytest.raises(ValueError, match=r"\{\{id\}\}"):
+            await svc.update_job(db, job.id, ScheduledJobUpdate(), u["owner"], notification_message="New bug: {{id}}")
+
+    @pytest.mark.asyncio
     async def test_fixed_binds_the_sole_subscriber_too(self, world):
         svc, db, u = world["service"], world["db"], world["users"]
         job = await svc.create_job(db, _watch_create(trigger_policy=TriggerPolicy.FIXED), u["owner"])

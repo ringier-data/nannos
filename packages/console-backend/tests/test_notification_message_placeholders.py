@@ -55,9 +55,15 @@ def test_create_accepts_plain_fixed_text():
     assert job.notification_message == "A new bug report was filed"
 
 
-def test_update_refuses_a_placeholder():
-    with pytest.raises(ValidationError):
-        ScheduledJobUpdate(notification_message="Report {id} was filed")
+def test_update_parses_a_placeholder_and_leaves_the_rule_to_the_service():
+    # A stored job's text is resent by every save; refusing it at parse time would refuse
+    # a reader their own delivery change. The service checks a changed text only.
+    assert ScheduledJobUpdate(notification_message="Report {id} was filed").notification_message
+
+
+def test_non_ascii_names_are_not_placeholders_as_in_the_form():
+    # The form's JS pattern is ASCII-only; the two must agree on what is refused.
+    assert find_placeholder("Größe: {größe}") is None
 
 
 def test_update_can_still_clear_the_text():

@@ -28,7 +28,7 @@ export interface WatchArgsValue {
 export function argsModeFor(
   args: Record<string, unknown>,
   tool: McpTool | undefined,
-  exprs: Record<string, string> = {},
+  exprs: Record<string, string>,
 ): 'fields' | 'json' {
   // An expression lives in its argument's field, so it needs one as much as a value does.
   const renderable = new Set(parseToolSchema(tool).params.map((param) => param.key));
@@ -73,7 +73,8 @@ export function parseArgsText(text: string): {
   const exprs: Record<string, string> = {};
   for (const [key, raw] of Object.entries(parsed as Record<string, unknown>)) {
     if (typeof raw === 'string' && raw.startsWith('=')) {
-      const expr = raw.slice(1).trim();
+      // trimStart, as the field does: the same `= …` text is the same expression.
+      const expr = raw.slice(1).trimStart();
       // A bare `=` sets nothing, as in a field.
       if (expr) exprs[key] = expr;
     } else {
@@ -83,18 +84,40 @@ export function parseArgsText(text: string): {
   return { args: Object.keys(args).length > 0 ? args : undefined, exprs };
 }
 
-/** The arguments to send, or the reason the raw JSON cannot be used. */
+/**
+ * The arguments and expressions to send, or the reason the raw JSON cannot be used.
+ *
+ * In the JSON editor both halves come from its text. `check_args_exprs` there is a copy
+ * kept for the views that read state, and a copy is only as fresh as the last edit: text
+ * filled in from a stored job or a draft has never been through one.
+ */
 export function resolveArgs(value: WatchArgsValue): {
   args: Record<string, unknown> | undefined;
+  exprs: Record<string, string>;
   error?: string;
 } {
   if (value.args_mode === 'fields') {
-    return { args: Object.keys(value.check_args).length > 0 ? value.check_args : undefined };
+    return {
+      args: Object.keys(value.check_args).length > 0 ? value.check_args : undefined,
+      exprs: value.check_args_exprs,
+    };
   }
-  // The expressions in the text are already in `check_args_exprs`: the editor writes them
-  // there on every valid edit.
-  const { args, error } = parseArgsText(value.check_args_text);
-  return error ? { args: undefined, error } : { args };
+  const { args, exprs, error } = parseArgsText(value.check_args_text);
+  // Mid-edit JSON keeps the last good expressions, so the preview does not blink.
+  return error ? { args: undefined, exprs: value.check_args_exprs, error } : { args, exprs };
+}
+
+/**
+ * The arguments editor for a set of arguments: its JSON text, and the mode that can show
+ * all of them. Every path that fills the form from outside — a draft, an AI edit, a
+ * stored job — goes through this, so they cannot drift apart.
+ */
+export function argsView(
+  args: Record<string, unknown>,
+  exprs: Record<string, string>,
+  tool: McpTool | undefined,
+): Pick<WatchArgsValue, 'check_args_text' | 'args_mode'> {
+  return { check_args_text: argsText(args, exprs), args_mode: argsModeFor(args, tool, exprs) };
 }
 
 /**

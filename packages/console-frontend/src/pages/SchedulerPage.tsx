@@ -81,7 +81,7 @@ import { isOwnJob, subscriberCount } from '@/lib/sharedJobs';
 import { CronField } from '@/components/CronField';
 import { AgentActionFields } from '@/components/AgentActionFields';
 import { agentActionError, automatedSubAgentParameters } from '@/lib/agentAction';
-import { argsModeFor, argsText, missingRequiredArgs, resolveArgs } from '@/lib/watchArgs';
+import { argsView, missingRequiredArgs, resolveArgs } from '@/lib/watchArgs';
 import { type ConditionMode, type MessageMode, conditionModeOf, resolveWatchChoices } from '@/lib/watchChoices';
 import { WatchFields } from '@/components/WatchFields';
 import { describeCron } from '@/lib/cron';
@@ -404,6 +404,10 @@ function CreateJobDialog({
         }
         if (result.check_tool) {
           next.check_tool = result.check_tool;
+          // A tool's arguments mean nothing to another one, as when it is picked by
+          // hand: what an earlier draft gave the old tool must not ride along.
+          next.check_args = {};
+          next.check_args_exprs = {};
           filled.add('check_tool');
         }
         if (result.check_args) {
@@ -414,14 +418,16 @@ function CreateJobDialog({
           next.check_args_exprs = result.check_args_exprs as Record<string, string>;
           filled.add('check_args');
         }
-        if (filled.has('check_args')) {
+        if (filled.has('check_args') || filled.has('check_tool')) {
           // After both halves land: the JSON editor shows the expressions, and the field
           // form needs a field for each of them.
-          next.check_args_text = argsText(next.check_args, next.check_args_exprs);
-          next.args_mode = argsModeFor(
-            next.check_args,
-            mcpTools.find((t) => t.name === result.check_tool),
-            next.check_args_exprs,
+          Object.assign(
+            next,
+            argsView(
+              next.check_args,
+              next.check_args_exprs,
+              mcpTools.find((t) => t.name === next.check_tool),
+            ),
           );
         }
         if (result.cel_expr) {
@@ -531,6 +537,7 @@ function CreateJobDialog({
     // Watch job validations. Errors are collected per field rather than returned as
     // one string, so the user is told which control to fix instead of hunting for it.
     let check_args: Record<string, unknown> | undefined;
+    let check_args_exprs: Record<string, string> = {};
     // Only what the form's choices use; a hidden field keeps its text but is not sent.
     const chosen = resolveWatchChoices(form);
     if (form.job_type === 'watch') {
@@ -540,6 +547,7 @@ function CreateJobDialog({
       const parsed = resolveArgs(form);
       if (parsed.error) errors.check_args = parsed.error;
       check_args = parsed.args;
+      check_args_exprs = parsed.exprs;
 
       const selectedTool = mcpTools.find((t) => t.name === form.check_tool);
       const missing = missingRequiredArgs(selectedTool, form, check_args);
@@ -597,7 +605,7 @@ function CreateJobDialog({
       body.check_tool = form.check_tool;
       body.check_args = check_args;
       body.check_args_exprs =
-        Object.keys(form.check_args_exprs).length > 0 ? form.check_args_exprs : undefined;
+        Object.keys(check_args_exprs).length > 0 ? check_args_exprs : undefined;
       body.destroy_after_trigger = form.destroy_after_trigger;
       // The two halves of the condition: the expression gates deterministically, the
       // judgement is the semantic stage on what it returned. At least one is set —

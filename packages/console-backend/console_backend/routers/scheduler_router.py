@@ -345,6 +345,7 @@ def _build_draft(generated: dict[str, Any]) -> ScheduledJobDraft:
 def _placeholders_to_brief(
     result: dict[str, Any],
     current: ScheduledJobDraft | None,  # type: ignore[valid-type]
+    allowed_agent_ids: set[int],
 ) -> dict[str, Any]:
     """A fixed text written as a template, turned into the brief it was meant as.
 
@@ -355,6 +356,9 @@ def _placeholders_to_brief(
 
     The brief lives in `prompt`, which on a job with a sub-agent is the agent's
     instruction; there the text is only dropped. So is it when a brief is already given.
+    Both are judged on the job as it will be after the edit, with the agent id as the
+    coercion below will leave it: an invented id is no agent, and an agent the edit
+    removes leaves an instruction that is no brief.
     """
     message = result.get("notification_message")
     if not isinstance(message, str) or not find_placeholder(message):
@@ -365,17 +369,30 @@ def _placeholders_to_brief(
         result["notification_message"] = None
     else:
         result.pop("notification_message")
-    has_agent = result.get("sub_agent_id") is not None or (
-        current is not None and current.sub_agent_id is not None and "sub_agent_id" not in result
+
+    current_agent = current.sub_agent_id if current is not None else None
+    proposed_agent = _coerce_id(result.get("sub_agent_id"), allowed_agent_ids)
+    if proposed_agent is not None:
+        agent_after = proposed_agent
+    elif "sub_agent_id" in result and result["sub_agent_id"] is None:
+        agent_after = None
+    else:
+        # Not mentioned, or an id coercion will discard: the job's own agent stands.
+        agent_after = current_agent
+    if agent_after is not None:
+        return result
+
+    # The model's reply is not schema-checked: a prompt can arrive as a list.
+    proposed_prompt = result.get("prompt")
+    if isinstance(proposed_prompt, str) and proposed_prompt.strip():
+        return result
+    # The job's own prompt is a brief only if it was one — not an agent's instruction.
+    if current is not None and current_agent is None and "prompt" not in result and (current.prompt or "").strip():
+        return result
+    result["prompt"] = (
+        f"Write it in this shape: {message.strip()} — each placeholder filled in from "
+        "the matched item's field of that name, one line per item."
     )
-    has_brief = bool((result.get("prompt") or "").strip()) or (
-        current is not None and bool((current.prompt or "").strip()) and "prompt" not in result
-    )
-    if not has_agent and not has_brief:
-        result["prompt"] = (
-            f"Write it in this shape: {message.strip()} — each placeholder filled in from "
-            "the matched item's field of that name, one line per item."
-        )
     logger.info("Generated notification_message %r is a template; moved to the brief", message)
     return result
 
@@ -803,7 +820,7 @@ async def generate_job_draft(
             else:
                 result.pop("check_args_exprs", None)
 
-        result = _placeholders_to_brief(result, current)
+        result = _placeholders_to_brief(result, current, allowed_agent_ids)
 
         # Fields the model is never allowed to set: an inline sub-agent would be created for
         # real, a voice call places an outbound phone call and is left for the person to tick

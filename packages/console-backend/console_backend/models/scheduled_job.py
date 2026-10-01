@@ -503,7 +503,8 @@ class AutomatedSubAgentConfig(BaseModel):
 #: What a template placeholder looks like — `{{title}}`, `${title}`, `{title}`. The fixed
 #: notification text is delivered exactly as written, so any of these reaches the recipient
 #: as the literal characters: nothing fills them in.
-_PLACEHOLDER = re.compile(r"\{\{[^{}]*\}\}|\$\{[^{}]*\}|\{[A-Za-z_][\w.]*\}")
+#: ASCII on purpose: the form checks the same pattern in JS, whose `\w` is ASCII-only.
+_PLACEHOLDER = re.compile(r"\{\{[^{}]*\}\}|\$\{[^{}]*\}|\{[A-Za-z_][\w.]*\}", re.ASCII)
 
 
 def find_placeholder(text: str | None) -> str | None:
@@ -512,14 +513,16 @@ def find_placeholder(text: str | None) -> str | None:
     return match.group(0) if match else None
 
 
-def _refuse_placeholders(v: str | None) -> str | None:
+def refuse_placeholders(v: str | None) -> str | None:
+    """`v`, or a ValueError naming the first placeholder in it and what to do instead."""
     placeholder = find_placeholder(v)
     if placeholder:
         raise ValueError(
             f"notification_message is sent exactly as written, so {placeholder} would reach the "
             "recipient as is: placeholders are not filled in. To build the message from what "
             "the condition matched, leave notification_message empty and say how to write it "
-            "in prompt, e.g. 'the title, then the id in parentheses'."
+            "in prompt, e.g. 'the title, then the id in parentheses'. Text that only "
+            "looks like a placeholder needs rewording without the braces."
         )
     return v
 
@@ -683,7 +686,7 @@ class ScheduledJobCreate(BaseModel):
     @classmethod
     def validate_notification_message(cls, v: str) -> str:
         """Reject placeholders: the text is delivered verbatim, never rendered."""
-        return _refuse_placeholders(v) or ""
+        return refuse_placeholders(v) or ""
 
     @field_validator("check_args_exprs")
     @classmethod
@@ -1017,12 +1020,6 @@ class ScheduledJobUpdate(BaseModel):
         except CelSyntaxError as exc:
             raise ValueError(f"{exc}. {CEL_SYNTAX_HINT}") from exc
         return v
-
-    @field_validator("notification_message")
-    @classmethod
-    def validate_notification_message(cls, v: str | None) -> str | None:
-        """Reject placeholders — same rule as create."""
-        return _refuse_placeholders(v)
 
     @field_validator("check_args_exprs")
     @classmethod

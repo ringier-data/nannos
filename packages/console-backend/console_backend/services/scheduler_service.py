@@ -28,6 +28,7 @@ from ..models.scheduled_job import (
     ScheduleKind,
     SharedJobDefinition,
     TriggerPolicy,
+    refuse_placeholders,
     render_pause,
 )
 from ..config import config
@@ -843,6 +844,12 @@ class SchedulerService:
         for key in list(def_fields):
             if key in _DEFINITION_FIELDS and self._same_definition_value(job, key, def_fields[key]):
                 del def_fields[key]
+        # Create's placeholder rule, applied to a CHANGED text only — so here, after the
+        # echo is gone, and not on the request model. A job stored before the rule existed
+        # is resent by every save, and a subscriber who cannot write the definition would
+        # otherwise be refused their own delivery change over text they cannot touch.
+        if "notification_message" in def_fields:
+            refuse_placeholders(def_fields["notification_message"])
 
         # --- subscription fields ---
         if delivery_channel_id is not _UNSET:

@@ -576,6 +576,50 @@ class TestATemplatedFixedTextBecomesABrief:
         assert body["prompt"] == "Triage it"
         assert "notification_message" not in body
 
+    def test_an_invented_agent_id_is_no_agent(self, draft_client, gateway, catalogue):
+        # The id is coerced away later; judged before that, the template was dropped with
+        # no brief written, and the request for the title was lost.
+        gateway.return_value = {
+            "job_type": "watch",
+            "check_tool": "console_list_bug_reports",
+            "cel_expr": "result.reports",
+            "notification_message": self.TEMPLATE,
+            "sub_agent_id": 999,
+        }
+
+        body = _filled(draft_client.post(URL, json={"query": QUERY}))
+
+        assert "sub_agent_id" not in body
+        assert self.TEMPLATE in body["prompt"]
+
+    def test_an_edit_removing_the_agent_does_not_keep_its_instruction_as_the_brief(
+        self, draft_client, gateway, catalogue
+    ):
+        draft_client.app.state.scheduler_service.schedulable_sub_agents = AsyncMock(
+            return_value=[SimpleNamespace(id=3, name="research", config_version=None)]
+        )
+        current = {**CURRENT, "sub_agent_id": 3, "prompt": "Research the reporter"}
+        gateway.return_value = {"sub_agent_id": None, "notification_message": self.TEMPLATE}
+
+        body = _filled(draft_client.post(URL, json={"query": "just tell me the title", "current": current}))
+
+        assert "sub_agent_id" not in body
+        assert self.TEMPLATE in body["prompt"]
+
+    def test_a_non_string_prompt_is_not_a_500(self, draft_client, gateway, catalogue):
+        gateway.return_value = {
+            "job_type": "watch",
+            "check_tool": "console_list_bug_reports",
+            "cel_expr": "result.reports",
+            "notification_message": self.TEMPLATE,
+            "prompt": ["step 1"],
+        }
+
+        resp = draft_client.post(URL, json={"query": QUERY})
+
+        assert resp.status_code == 200
+        assert self.TEMPLATE in resp.json()["prompt"]
+
     def test_plain_fixed_text_is_left_alone(self, draft_client, gateway, catalogue):
         gateway.return_value = {
             "job_type": "watch",

@@ -5039,7 +5039,7 @@ export type ScheduledJobCreate = {
     /**
      * Notification Message
      *
-     * Notification text delivered verbatim when the watch condition triggers (watch jobs only). If empty, a model writes the message from what the condition matched, following `prompt` as its brief when one is set.
+     * Notification text delivered verbatim when the watch condition triggers (watch jobs only). It cannot reference the result: placeholders such as {{title}} are refused, since nothing would fill them in. If empty, a model writes the message from what the condition matched, following `prompt` as its brief when one is set — the way to name fields of the matched items in the message.
      */
     notification_message?: string;
     /**
@@ -5159,7 +5159,7 @@ export type ScheduledJobDraft = {
     /**
      * Notification Message
      *
-     * Notification text delivered verbatim when the watch condition triggers (watch jobs only). If empty, a model writes the message from what the condition matched, following `prompt` as its brief when one is set.
+     * Notification text delivered verbatim when the watch condition triggers (watch jobs only). It cannot reference the result: placeholders such as {{title}} are refused, since nothing would fill them in. If empty, a model writes the message from what the condition matched, following `prompt` as its brief when one is set — the way to name fields of the matched items in the message.
      */
     notification_message?: string | null;
     /**

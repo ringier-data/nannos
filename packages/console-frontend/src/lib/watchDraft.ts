@@ -9,7 +9,7 @@
 import type { ScheduledJobDraft } from '@/api/generated/types.gen';
 import type { WatchFieldsValue } from '@/components/WatchFields';
 import type { McpTool } from '@/api/generated/types.gen';
-import { argsModeFor, argsText, resolveArgs } from '@/lib/watchArgs';
+import { argsView, resolveArgs } from '@/lib/watchArgs';
 import { conditionModeOf, messageModeOf, resolveWatchChoices } from '@/lib/watchChoices';
 
 /**
@@ -36,13 +36,13 @@ type Editable = (typeof EDITABLE)[number];
 export function draftOfWatch(value: WatchFieldsValue): ScheduledJobDraft {
   const chosen = resolveWatchChoices(value);
   // A JSON editor left mid-edit has no args to send; the model then edits without them.
-  const { args } = resolveArgs(value);
+  const { args, exprs } = resolveArgs(value);
   const agentId = value.outcome === 'agent' && value.sub_agent_mode === 'existing' ? value.sub_agent_id : '';
   return {
     job_type: 'watch',
     check_tool: value.check_tool || null,
     check_args: args && Object.keys(args).length > 0 ? args : null,
-    check_args_exprs: Object.keys(value.check_args_exprs).length > 0 ? value.check_args_exprs : null,
+    check_args_exprs: Object.keys(exprs).length > 0 ? exprs : null,
     cel_expr: chosen.cel_expr || null,
     llm_condition: chosen.llm_condition || null,
     notification_message: chosen.notification_message || null,
@@ -115,11 +115,9 @@ export function applyDraftEdit(
   if (differs.has('check_args') || differs.has('check_tool') || differs.has('check_args_exprs')) {
     // After both halves land: the JSON editor shows the expressions, and the field form
     // needs a field for each of them.
-    next.check_args_text = argsText(next.check_args, next.check_args_exprs);
-    next.args_mode = argsModeFor(
-      next.check_args,
-      tools.find((t) => t.name === next.check_tool),
-      next.check_args_exprs,
+    Object.assign(
+      next,
+      argsView(next.check_args, next.check_args_exprs, tools.find((t) => t.name === next.check_tool)),
     );
   }
 
