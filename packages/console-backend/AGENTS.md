@@ -491,9 +491,19 @@ them — this console cannot express that: the rate card, the provider check and
 all keyed on the alias, edit/delete address a single gateway id, and `edit_model` already reports a
 surviving second deployment as a fault (`updated_with_stale_duplicate`). A duplicate alias silently
 doubles routing for a model the admin can only manage half of. If replica/failover routing is ever
-wanted, it needs an explicit flow, not a re-registration. The guard is registration-only: an edit
-re-registers its own alias by design. `ModelGatewayPage` mirrors it (`aliasTaken`) — picking the
-same catalog entry twice auto-fills the same alias, which is how duplicates happened.
+wanted, it needs an explicit flow, not a re-registration. The guard is registration-only.
+`ModelGatewayPage` mirrors it (`aliasTaken`) — picking the same catalog entry twice auto-fills the
+same alias, which is how duplicates happened.
+
+**An edit is applied in place and keeps the deployment id** (`update_model` → LiteLLM's
+`PATCH /model/{id}/update`, which merges `litellm_params` and `model_info`, persists custom keys and
+is served at once). Edits used to re-register (new id, then delete the old), and any client still
+holding the old id — the form after a failed test, a second tab — re-registered again beside it
+(nannos#323). The merge cannot remove a key (LiteLLM ignores a null except for cost fields), so an
+edit that clears a region pin, a Vertex location/project or a base model still re-registers
+(`_CLEARABLE_*`); that is the only path that changes the id or can leave a
+`updated_with_stale_duplicate`. The registration probe addresses its requests to the deployment
+id it records on, never the alias, so a duplicate behind an alias cannot make it measure a mix.
 
 ### Rate-Card Provider Must Equal the litellm Provider Family (cost tracking ↔ rate cards)
 

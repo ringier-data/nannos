@@ -154,6 +154,13 @@ def _same_route(a: dict, b: dict) -> bool:
     return all(a.get(k) == b.get(k) for k in _ROUTE_PARAMS)
 
 
+#: Keys an edit removes by leaving a field blank. ``PATCH /model/{id}/update`` merges and ignores a
+#: null for them (LiteLLM v1.103.0 honours nulls for cost fields only), so an edit that drops one
+#: re-registers instead (``update_model``). The rest of the edit form is always sent with a value.
+_CLEARABLE_LITELLM_PARAMS = ("aws_region_name", "vertex_location", "vertex_project")
+_CLEARABLE_MODEL_INFO = ("base_model",)
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
@@ -299,36 +306,62 @@ class ModelGatewayService:
     async def update_model(
         self, model_id: str, model_name: str, litellm_params: dict, model_info: dict | None = None
     ) -> dict:
-        """Edit a registered deployment by re-creating it (register new, then delete old).
+        """Edit a registered deployment — in place, keeping its id, whenever the edit allows it.
 
-        LiteLLM's /model/update does NOT persist custom model_info keys (input_modes, mode,
-        the default flag, …) — only /model/new does (see model_defaults_service). So a plain
-        /model/update silently drops our capability metadata, leaving edits (e.g. adding the
-        'file' input mode) with no runtime effect. Re-registering forces model_info to stick.
+        In place is LiteLLM's ``PATCH /model/{id}/update``: it merges ``litellm_params`` and
+        ``model_info`` into the stored deployment, persists custom ``model_info`` keys (input_modes,
+        mode, supports_*, the probe record) and the router serves the edit at once (verified on
+        v1.103.0). Keeping the id is the point: the form, the cards and a retried request all hold
+        it, and an edit that changed it left the previous deployment live beside the next one
+        whenever one of them still held the old id (nannos#323).
+
+        A merge cannot remove a key — LiteLLM ignores a null there except for cost fields — so an
+        edit that drops a routing pin or a base model (``_CLEARABLE_*``) re-registers instead:
+        register new, then delete old, as every edit used to. The response then carries the new id.
+
+        The probe record (nannos#318) is not part of the edit form. In place it simply stays; when
+        the edit re-routes the deployment to another provider model it is overwritten with ``{}`` —
+        a different model, which the edit flow re-tests anyway.
+        """
+        model_info = dict(model_info or {})
+        previous = await self.get_model_by_id(model_id)
+        stored_params = (previous or {}).get("litellm_params") or {}
+        stored_info = (previous or {}).get("model_info") or {}
+        drops = [k for k in _CLEARABLE_LITELLM_PARAMS if stored_params.get(k) and not litellm_params.get(k)]
+        drops += [k for k in _CLEARABLE_MODEL_INFO if stored_info.get(k) and not model_info.get(k)]
+        if drops:
+            logger.info("update_model: '%s' drops %s; re-registering (a PATCH cannot remove keys)", model_name, drops)
+            return await self._reregister(model_id, model_name, litellm_params, model_info, previous)
+
+        if previous is not None and not _same_route(stored_params, litellm_params) and CAPABILITIES_KEY not in model_info:
+            model_info[CAPABILITIES_KEY] = {}
+        await self._request(
+            "PATCH",
+            f"/model/{model_id}/update",
+            json={"litellm_params": litellm_params, "model_info": {**model_info, "id": model_id}},
+        )
+        self._invalidate_list_cache()
+        return {"model_info": {"id": model_id}}
+
+    async def _reregister(
+        self, model_id: str, model_name: str, litellm_params: dict, model_info: dict, previous: dict | None
+    ) -> dict:
+        """Replace a deployment by registering a new one, then deleting the old (new id).
 
         Register-before-delete avoids a window where the alias has no live deployment; LiteLLM
-        allows multiple deployments per public model_name, so the brief overlap is safe. Returns
-        the newly registered deployment (carrying the NEW gateway model id).
-
-        If deleting the old deployment fails, the re-registration still stands but a stale
-        duplicate remains live under the same public model_name — the gateway will load-balance
-        across both, so the edit is only partially applied until the old one is removed. That is
+        allows multiple deployments per public model_name, so the brief overlap is safe. If deleting
+        the old deployment fails, the re-registration still stands but a stale duplicate remains
+        live under the same public model_name — the gateway will load-balance across both. That is
         signalled to the caller via ``_stale_duplicate_deployment_id`` on the returned dict (a
         private key, never serialized to the API client) so the endpoint can surface it rather
         than reporting a clean success.
         """
-        # The registration probe's record (nannos#318) is not part of the edit form, so a
-        # rebuilt model_info would silently drop it — and every reader would then treat a model
-        # known to reject `response_format` as unprobed. Carry it over while the deployment
-        # still points at the same provider model; a re-routed edit is a different model, and
-        # the edit flow re-tests anyway.
-        model_info = dict(model_info or {})
+        # Carry the probe record over while the deployment still points at the same provider model.
         if CAPABILITIES_KEY not in model_info:
-            previous = await self.get_model_by_id(model_id)
             if previous and _same_route((previous.get("litellm_params") or {}), litellm_params):
                 inherited = capabilities_of(previous.get("model_info"))
                 if inherited:
-                    model_info[CAPABILITIES_KEY] = inherited
+                    model_info = {**model_info, CAPABILITIES_KEY: inherited}
         result = await self.register_model(model_name, litellm_params, model_info)
         try:
             await self.delete_model(model_id)
@@ -544,8 +577,9 @@ class ModelGatewayService:
         recorded on the deployment's ``model_info`` under ``nannos_capabilities`` for the
         gateway hook and the app to act on, and the report is returned for the admin.
 
-        ``model_id`` pins the deployment the record is written to (the caller has it right
-        after register/edit); otherwise the alias's listed deployment is used. The gateway
+        ``model_id`` pins the deployment that is probed and that the record is written to (the
+        caller has it right after register/edit); otherwise the alias's listed deployment is used.
+        Either way the requests address that deployment by id, never the alias. The gateway
         serves ``/model/info`` from per-replica memory, so a just-registered alias can be
         missing from one replica's list for a moment — the lookup retries briefly.
 
@@ -568,11 +602,15 @@ class ModelGatewayService:
                 logger.warning("[probe] %s: pinned deployment %s not listed; falling back to the alias", model_name, model_id)
             model = await self._get_model_with_retry(model_name)
         info = (model or {}).get("model_info") or {}
+        # Every request goes to the deployment the record is written to, by id: LiteLLM routes an
+        # id to that deployment alone, while the alias load-balances across every deployment under
+        # it — a duplicate behind the alias had the probe record a mix of both (nannos#323).
+        target_id = model_id or info.get("id")
         mode = info.get("mode", "chat")
         if mode == "embedding":
             litellm_model = ((model or {}).get("litellm_params") or {}).get("model")
             provider = info.get("litellm_provider")
-            body: dict = {"model": model_name, "input": ["ping"]}
+            body: dict = {"model": target_id or model_name, "input": ["ping"]}
             if profile_for(litellm_model, provider).send_dimensions:
                 body["dimensions"] = _DEFAULT_DIMENSION
             await self._request("POST", "/v1/embeddings", json=body, timeout=30.0, expose_error=True)
@@ -585,6 +623,7 @@ class ModelGatewayService:
         report = await probe_model(
             model_name,
             self._probe_call,
+            deployment=target_id,
             supports_reasoning=supports_reasoning,
             # The floor of an always-on model is tried from the levels the picker offers for it,
             # so it is always one of them (nannos#330).
@@ -598,7 +637,6 @@ class ModelGatewayService:
             reasons = "; ".join(f"{r.shape}: {r.error}" for r in report.inconclusive_unavoidable)
             raise ModelGatewayError(f"inconclusive — the probe could not reach the model; re-run the test ({reasons})")
 
-        target_id = model_id or info.get("id")
         # Only a DB deployment can be written (LiteLLM rejects /model/update on config-defined
         # ones) — judged on the looked-up deployment, not on whether an id was passed. `None`
         # = not recordable at all (the console shows no warning); False = a write that failed.

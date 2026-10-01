@@ -484,7 +484,7 @@ async def edit_model(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Rate card updated but gateway update failed ({e}); retry.",
         )
-    # update_model re-creates the deployment, so the gateway id changes.
+    # In place the id is kept; an edit that re-registers (it drops a key) returns a new one.
     new_model_id = _gateway_model_id(result)
     # If the old deployment couldn't be deleted it lingers under the same model_name and the
     # gateway load-balances across both — the edit is only partially applied. Surface that as a
@@ -511,6 +511,7 @@ async def edit_model(
         rate_card_entry_ids=entry_ids,
         gateway_model_id=new_model_id,
         status="updated_with_stale_duplicate" if stale_duplicate_id else "updated",
+        stale_duplicate_model_id=stale_duplicate_id,
         provider=provider,
     )
 

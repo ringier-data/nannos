@@ -629,6 +629,7 @@ async def probe_model(
     model: str,
     call: ProbeCall,
     *,
+    deployment: str | None = None,
     supports_reasoning: bool = False,
     floor_candidates: Sequence[str] | None = None,
     budget_seconds: float = DEFAULT_BUDGET_SECONDS,
@@ -651,8 +652,14 @@ async def probe_model(
     judged, or a shape not reached within ``budget_seconds`` is *inconclusive*: it is reported
     but writes no flag, and it never refuses a model. ``report.capabilities`` therefore holds
     exactly the keys that were measured.
+
+    ``deployment`` addresses every request to one deployment of the alias (its ``model_info.id``,
+    which LiteLLM's router routes to that deployment alone). An alias with two deployments
+    load-balances, so an alias-addressed probe can measure a mix of both and record it on one;
+    the report still names ``model``.
     """
     report = ProbeReport(model=model)
+    target = deployment or model
     started = time.monotonic()
 
     async def emit(event: dict[str, Any]) -> None:
@@ -708,17 +715,17 @@ async def probe_model(
 
     # Unavoidable ----------------------------------------------------------------------
     for shape, body in (
-        ("tools_auto", shape_tools_auto(model)),
-        ("tool_round_trip", shape_tool_round_trip(model)),
-        ("streaming_tools", shape_streaming_tools(model)),
+        ("tools_auto", shape_tools_auto(target)),
+        ("tool_round_trip", shape_tool_round_trip(target)),
+        ("streaming_tools", shape_streaming_tools(target)),
     ):
         ok, _, err, transient = await attempt(body, shape)
         await add(ShapeResult(shape, ok, err, unavoidable=True, inconclusive=not ok and transient))
 
     # Forced tool choice: both forms must work for the flag to be True ------------------
-    forced_ok, forced_err, forced_inc = await graded(shape_forced_tool_choice(model), "forced_tool_choice", _check_forced)
+    forced_ok, forced_err, forced_inc = await graded(shape_forced_tool_choice(target), "forced_tool_choice", _check_forced)
     await add(ShapeResult("forced_tool_choice", forced_ok, forced_err, inconclusive=forced_inc))
-    named_ok, named_err, named_inc = await graded(shape_named_tool_choice(model), "named_tool_choice", _check_named)
+    named_ok, named_err, named_inc = await graded(shape_named_tool_choice(target), "named_tool_choice", _check_named)
     await add(ShapeResult("named_tool_choice", named_ok, named_err, inconclusive=named_inc))
     if forced_ok and named_ok:
         report.capabilities[FORCED_TOOL_CHOICE] = True
@@ -726,7 +733,7 @@ async def probe_model(
         report.capabilities[FORCED_TOOL_CHOICE] = False  # a definite rejection of either form
 
     # response_format ------------------------------------------------------------------
-    rf_ok, rf_err, rf_inc = await graded(shape_response_format(model), "response_format", _check_response_format)
+    rf_ok, rf_err, rf_inc = await graded(shape_response_format(target), "response_format", _check_response_format)
     await add(ShapeResult("response_format", rf_ok, rf_err, inconclusive=rf_inc))
     if not rf_inc:
         report.capabilities[RESPONSE_FORMAT] = rf_ok
@@ -742,7 +749,7 @@ async def probe_model(
     async def verify() -> str:
         nonlocal control
         if control is None:
-            ok, response, err, _ = await attempt(shape_thinking_control(model), "thinking_off:control")
+            ok, response, err, _ = await attempt(shape_thinking_control(target), "thinking_off:control")
             if not ok:
                 control = f"unverified: the thinking-on control turn failed ({err})"
             elif not _reasoned(response):
@@ -760,7 +767,7 @@ async def probe_model(
     tried: list[str] = []
     for switch in (THINKING_OFF_DISABLED, THINKING_OFF_BETWEEN_TOOLS, None):
         label = switch or "reasoning_effort: none alone"
-        ok, response, err, transient = await attempt(shape_thinking_off(model, switch), f"thinking_off:{switch or 'effort_only'}")
+        ok, response, err, transient = await attempt(shape_thinking_off(target, switch), f"thinking_off:{switch or 'effort_only'}")
         if not ok and transient:
             off_error = err  # cannot tell which way works; leave no record
             break
@@ -811,7 +818,7 @@ async def probe_model(
         # offers, so the floor is always a level the admin also sees — else the fixed pair.
         candidates = tuple(floor_candidates or ())[:FLOOR_CANDIDATE_COUNT] or THINKING_FLOOR_CANDIDATES
         for effort in candidates:
-            ok, _, err, transient = await attempt(shape_thinking_floor(model, effort), f"thinking_floor:{effort}")
+            ok, _, err, transient = await attempt(shape_thinking_floor(target, effort), f"thinking_floor:{effort}")
             if ok:
                 report.capabilities[THINKING_FLOOR] = effort
                 await add(ShapeResult("thinking_floor", True, note=f"thinking-off requests are sent as reasoning_effort: {effort}"))
@@ -840,10 +847,10 @@ async def probe_model(
 
     # Thinking replay: only for models declared to think ---------------------------------
     if supports_reasoning:
-        on_ok, response, on_err, on_t = await attempt(shape_thinking_on(model), "thinking_replay:turn")
+        on_ok, response, on_err, on_t = await attempt(shape_thinking_on(target), "thinking_replay:turn")
         assistant = _message(response) if on_ok else {}
         if on_ok and assistant.get("thinking_blocks"):
-            ok, _, err, transient = await attempt(shape_thinking_replay(model, assistant), "thinking_replay:replay")
+            ok, _, err, transient = await attempt(shape_thinking_replay(target, assistant), "thinking_replay:replay")
             await add(ShapeResult("thinking_replay", ok, err, inconclusive=not ok and transient))
             if ok or not transient:
                 report.capabilities[THINKING_REPLAY] = ok

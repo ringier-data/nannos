@@ -342,7 +342,26 @@ async def test_editing_a_model_keeps_its_own_alias():
     result = await router.edit_model("gw-1", request, body, AsyncMock(), user=SimpleNamespace(id="admin"))
 
     assert result.status == "updated"
+    assert result.stale_duplicate_model_id is None
     gateway.update_model.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_an_edit_whose_old_deployment_survived_names_it():
+    """A re-registering edit whose old delete failed: the console names the leftover deployment
+    instead of "Saved & tested" (nannos#323)."""
+    import console_backend.routers.admin_model_gateway_router as router
+
+    request, rate_card_service, gateway = _register_request(
+        [1], registered=[{"model_name": "claude-opus-4-8", "litellm_params": {"model": "bedrock/x"}}]
+    )
+    gateway.update_model = AsyncMock(return_value={"model_info": {"id": "gw-2"}, "_stale_duplicate_deployment_id": "gw-1"})
+    body = _body({"model": "bedrock/us.anthropic.claude-opus-4-8-v1:0"})
+
+    result = await router.edit_model("gw-1", request, body, AsyncMock(), user=SimpleNamespace(id="admin"))
+
+    assert result.status == "updated_with_stale_duplicate"
+    assert result.gateway_model_id == "gw-2" and result.stale_duplicate_model_id == "gw-1"
 
 
 @pytest.mark.asyncio
