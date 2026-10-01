@@ -40,6 +40,7 @@ from ..models.scheduled_job import (
     SuspendJobRequest,
     ValidateConditionRequest,
     ValidateConditionResponse,
+    find_placeholder,
 )
 from ..models.sub_agent import SubAgent
 from ..models.user import User
@@ -339,6 +340,69 @@ def _build_draft(generated: dict[str, Any]) -> ScheduledJobDraft:
             continue
         accepted[key] = value
     return ScheduledJobDraft(**accepted)
+
+
+def _placeholders_to_brief(
+    result: dict[str, Any],
+    current: ScheduledJobDraft | None,  # type: ignore[valid-type]
+    allowed_agent_ids: set[int],
+) -> dict[str, Any]:
+    """A fixed text written as a template, turned into the brief it was meant as.
+
+    Told otherwise, the model still reaches for `{{title}}` when the request wants a
+    field of the matched items in the message, and the text would be delivered with the
+    braces in it. What it meant is a message written from the items, which is what the
+    brief does: the template becomes the brief's instruction, and the fixed text goes.
+
+    The brief lives in `prompt`, which on a job with a sub-agent is the agent's
+    instruction; there the text is only dropped. So is it when a brief is already given.
+    Both are judged on the job as it will be after the edit, with the agent id as the
+    coercion below will leave it: an invented id is no agent, and an agent the edit
+    removes leaves an instruction that is no brief.
+    """
+    message = result.get("notification_message")
+    if not isinstance(message, str) or not find_placeholder(message):
+        return result
+    result = dict(result)
+    # On an edit an explicit null removes the job's fixed text; left out, it would be kept.
+    if current is not None:
+        result["notification_message"] = None
+    else:
+        result.pop("notification_message")
+
+    current_agent = current.sub_agent_id if current is not None else None
+    proposed_agent = _coerce_id(result.get("sub_agent_id"), allowed_agent_ids)
+    if proposed_agent is not None:
+        agent_after = proposed_agent
+    elif "sub_agent_id" in result and result["sub_agent_id"] is None:
+        agent_after = None
+    else:
+        # Not mentioned, or an id coercion will discard: the job's own agent stands.
+        agent_after = current_agent
+    if agent_after is not None:
+        return result
+
+    # The model's reply is not schema-checked: a prompt can arrive as a list.
+    proposed_prompt = result.get("prompt")
+    # Models echo the fields around their edit: the instruction of an agent this edit
+    # removes, restated, is still that agent's instruction and no brief.
+    echoed_instruction = (
+        current is not None
+        and current_agent is not None
+        and isinstance(proposed_prompt, str)
+        and proposed_prompt.strip() == (current.prompt or "").strip()
+    )
+    if isinstance(proposed_prompt, str) and proposed_prompt.strip() and not echoed_instruction:
+        return result
+    # The job's own prompt is a brief only if it was one — not an agent's instruction.
+    if current is not None and current_agent is None and "prompt" not in result and (current.prompt or "").strip():
+        return result
+    result["prompt"] = (
+        f"Write it in this shape: {message.strip()} — each placeholder filled in from "
+        "the matched item's field of that name, one line per item."
+    )
+    logger.info("Generated notification_message %r is a template; moved to the brief", message)
+    return result
 
 
 def _get_scheduler_service(request: Request) -> SchedulerService:
@@ -642,9 +706,12 @@ async def generate_job_draft(
         "5. `llm_condition`: only when part of the condition is genuinely semantic; it "
         "judges what cel_expr returned. Omit it otherwise.\n"
         "6. `notification_message`: for a plain notification, a concise fixed text sent "
-        "verbatim when the condition is met (e.g., 'Pull request #123 has been merged'). "
-        "Leave it out when a brief in `prompt` says how the message is to be written from "
-        "the matched items — give one of the two, never both.\n\n"
+        "verbatim when the condition is met (e.g., 'The deploy window is open'). It is "
+        "never rendered: it cannot name anything from the result, and a placeholder such "
+        "as {{title}} would be delivered as those characters. When the message should "
+        "carry anything from the matched items (a title, an id, a link), leave this out "
+        "and put the brief in `prompt` instead (e.g. 'New bug report: its title, then its "
+        "id in parentheses') — give one of the two, never both.\n\n"
         f"Available tools:\n{tools_summary}\n\n"
         f"Available sub-agents:\n{json.dumps(agent_choices, indent=2)}\n\n"
         f"Available delivery channels:\n{json.dumps(channel_choices, indent=2)}\n\n"
@@ -760,6 +827,8 @@ async def generate_job_draft(
                 result["check_args_exprs"] = kept
             else:
                 result.pop("check_args_exprs", None)
+
+        result = _placeholders_to_brief(result, current, allowed_agent_ids)
 
         # Fields the model is never allowed to set: an inline sub-agent would be created for
         # real, a voice call places an outbound phone call and is left for the person to tick

@@ -1,6 +1,7 @@
 """Pydantic models for the scheduler — scheduled jobs, runs, and delivery config."""
 
 import json
+import re
 from datetime import datetime
 from enum import Enum
 from typing import Any, Literal
@@ -499,6 +500,44 @@ class AutomatedSubAgentConfig(BaseModel):
         return self
 
 
+#: What a template placeholder looks like — `{{title}}`, `${title}`, `{title}`. The fixed
+#: notification text is delivered exactly as written, so any of these reaches the recipient
+#: as the literal characters: nothing fills them in.
+#: ASCII on purpose: the form checks the same pattern in JS, whose `\w` is ASCII-only.
+_PLACEHOLDER = re.compile(r"\{\{[^{}]*\}\}|\$\{[^{}]*\}|\{[A-Za-z_][\w.]*\}", re.ASCII)
+
+
+def find_placeholder(text: str | None) -> str | None:
+    """The first template placeholder in `text`, or None."""
+    match = _PLACEHOLDER.search(text or "")
+    return match.group(0) if match else None
+
+
+#: The free-text definition fields. The engine reads each by truthiness (a fixed text is
+#: sent if set, a judgement runs if set), so a whitespace-only value is acted on as
+#: present. Normalised on write, it cannot be stored: blank is empty.
+_BLANKABLE_TEXT = ("prompt", "notification_message", "cel_expr", "llm_condition")
+
+
+def blank_to(v: Any, empty: str | None) -> Any:
+    """`empty` for a whitespace-only string, `v` otherwise."""
+    return empty if isinstance(v, str) and not v.strip() else v
+
+
+def refuse_placeholders(v: str | None) -> str | None:
+    """`v`, or a ValueError naming the first placeholder in it and what to do instead."""
+    placeholder = find_placeholder(v)
+    if placeholder:
+        raise ValueError(
+            f"notification_message is sent exactly as written, so {placeholder} would reach the "
+            "recipient as is: placeholders are not filled in. To build the message from what "
+            "the condition matched, leave notification_message empty and say how to write it "
+            "in prompt, e.g. 'the title, then the id in parentheses'. Text that only "
+            "looks like a placeholder needs rewording without the braces."
+        )
+    return v
+
+
 class ScheduledJobCreate(BaseModel):
     """Request body for creating a new scheduled job."""
 
@@ -568,8 +607,10 @@ class ScheduledJobCreate(BaseModel):
         max_length=4000,
         description=(
             "Notification text delivered verbatim when the watch condition triggers (watch "
-            "jobs only). If empty, a model writes the message from what the condition "
-            "matched, following `prompt` as its brief when one is set."
+            "jobs only). It cannot reference the result: placeholders such as {{title}} are "
+            "refused, since nothing would fill them in. If empty, a model writes the message "
+            "from what the condition matched, following `prompt` as its brief when one is set "
+            "— the way to name fields of the matched items in the message."
         ),
     )
 
@@ -651,6 +692,18 @@ class ScheduledJobCreate(BaseModel):
         except CelSyntaxError as exc:
             raise ValueError(f"{exc}. {CEL_SYNTAX_HINT}") from exc
         return v
+
+    @field_validator(*_BLANKABLE_TEXT, mode="before")
+    @classmethod
+    def blank_text_is_empty(cls, v: Any, info: Any) -> Any:
+        # prompt and notification_message are non-null strings here, defaulting to "".
+        return blank_to(v, "" if info.field_name in ("prompt", "notification_message") else None)
+
+    @field_validator("notification_message")
+    @classmethod
+    def validate_notification_message(cls, v: str) -> str:
+        """Reject placeholders: the text is delivered verbatim, never rendered."""
+        return refuse_placeholders(v) or ""
 
     @field_validator("check_args_exprs")
     @classmethod
@@ -974,6 +1027,12 @@ class ScheduledJobUpdate(BaseModel):
     @classmethod
     def validate_timezone(cls, v: str | None) -> str | None:
         return _validate_timezone_name(v)
+
+    @field_validator(*_BLANKABLE_TEXT, mode="before")
+    @classmethod
+    def blank_text_is_empty(cls, v: Any) -> Any:
+        """A whitespace-only value is a clear, as null is — same rule as create."""
+        return blank_to(v, None)
 
     @field_validator("cel_expr")
     @classmethod

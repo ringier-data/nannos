@@ -58,6 +58,56 @@ export type {
 } from './generated/types.gen';
 
 /**
+ * Pydantic's prefix on a validator's message ("Value error, …"): the field is already
+ * named by `loc`, and the prefix is the library's, not the message's.
+ */
+function validatorMessage(msg: string): string {
+  return msg.replace(/^Value error, /, '');
+}
+
+/**
+ * The 422's messages keyed by top-level body field, so a form can show each under its
+ * control instead of in one banner. Nested locations are left to the banner.
+ */
+export function apiFieldErrors(error: unknown): Record<string, string> {
+  const detail = (error as { detail?: unknown } | null)?.detail;
+  const out: Record<string, string> = {};
+  if (!Array.isArray(detail)) return out;
+  for (const item of detail) {
+    const { loc, msg } = (item ?? {}) as { loc?: unknown[]; msg?: string };
+    if (!msg || !Array.isArray(loc) || loc[0] !== 'body' || loc.length !== 2) continue;
+    out[String(loc[1])] ??= validatorMessage(msg);
+  }
+  return out;
+}
+
+/**
+ * An API failure: the banner text, plus what the 422 said about individual fields — and
+ * the error itself, so a form that shows some of those fields can word the rest alone.
+ */
+export class ApiError extends Error {
+  readonly fieldErrors: Record<string, string>;
+  readonly raw: unknown;
+
+  constructor(message: string, fieldErrors: Record<string, string> = {}, raw: unknown = undefined) {
+    super(message);
+    this.fieldErrors = fieldErrors;
+    this.raw = raw;
+  }
+
+  /** The banner text without the top-level fields in `shown`, or null if nothing is left. */
+  messageWithout(shown: ReadonlySet<string>): string | null {
+    const detail = (this.raw as { detail?: unknown } | null)?.detail;
+    if (!Array.isArray(detail)) return this.message;
+    const rest = detail.filter((item) => {
+      const loc = (item as { loc?: unknown[] } | null)?.loc;
+      return !(Array.isArray(loc) && loc.length === 2 && loc[0] === 'body' && shown.has(String(loc[1])));
+    });
+    return rest.length ? formatApiError({ detail: rest }) : null;
+  }
+}
+
+/**
  * Turn an API error into something worth showing a person.
  *
  * FastAPI answers a validation failure with `detail` as a list of `{loc, msg}` objects,
@@ -72,8 +122,9 @@ export function formatApiError(error: unknown): string {
     const lines = detail
       .map((item) => {
         if (typeof item === 'string') return item;
-        const { loc, msg } = (item ?? {}) as { loc?: unknown[]; msg?: string };
-        if (!msg) return null;
+        const { loc, msg: raw } = (item ?? {}) as { loc?: unknown[]; msg?: string };
+        if (!raw) return null;
+        const msg = validatorMessage(raw);
         // Skip the "body" prefix every FastAPI location carries.
         const field = Array.isArray(loc) ? loc.filter((p) => p !== 'body').join('.') : '';
         return field ? `${field}: ${msg}` : msg;
@@ -362,7 +413,7 @@ export async function createScheduledJob(body: ScheduledJobCreateExtended): Prom
     url: '/api/v1/scheduler/jobs',
     body,
   });
-  if (error) throw new Error(formatApiError(error));
+  if (error) throw new ApiError(formatApiError(error), apiFieldErrors(error), error);
   return data as ScheduledJob;
 }
 

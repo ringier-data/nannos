@@ -52,6 +52,57 @@ export interface ParsedToolSchema {
 const RENDERABLE = new Set(['string', 'number', 'integer', 'boolean']);
 
 /**
+ * A property spelled as Pydantic's `Optional[X]` — `anyOf: [X, {type: 'null'}]` — read
+ * as `X`, with the outer description, title and default kept (they describe the
+ * argument, not the branch). Anything else is returned as it is.
+ *
+ * Read here rather than relied on from the backend, which unwraps it for its own reasons
+ * (model providers that reject the spelling), so the form does not depend on that
+ * cleaning. Only an inline branch is read: a `$ref` to `$defs` (raw Pydantic output for
+ * an enum) is left as it is, and the argument goes to the JSON editor — resolving refs
+ * stays the backend's job.
+ */
+function unwrapOptional(prop: Record<string, unknown>): Record<string, unknown> {
+  const variants = prop.anyOf ?? prop.oneOf;
+  if (!Array.isArray(variants)) return prop;
+  const nonNull = variants.filter(
+    (v): v is Record<string, unknown> =>
+      typeof v === 'object' && v !== null && (v as Record<string, unknown>).type !== 'null',
+  );
+  if (nonNull.length !== 1 || nonNull.length === variants.length) return prop;
+  const unwrapped: Record<string, unknown> = { ...nonNull[0] };
+  for (const key of ['description', 'title', 'default'] as const) {
+    if (prop[key] !== undefined && prop[key] !== null) unwrapped[key] = prop[key];
+  }
+  return unwrapped;
+}
+
+/**
+ * Whether the tool's schema says, explicitly, that it takes no arguments: an empty
+ * `properties` object, with nothing else let in. A missing schema, a free-form one
+ * (`additionalProperties: true`) or one whose properties could not be read is no such
+ * statement, and leaves the raw JSON editor as the way in.
+ */
+export function declaresNoArguments(tool: McpTool | undefined): boolean {
+  const schema = tool?.input_schema as
+    | { properties?: unknown; additionalProperties?: unknown; required?: unknown }
+    | undefined
+    | null;
+  if (!schema || typeof schema !== 'object') return false;
+  const { properties, additionalProperties, required } = schema;
+  // A required argument with no property left is one the schema cleaning dropped (an
+  // untyped `Any`): the tool does take it.
+  if (Array.isArray(required) && required.length > 0) return false;
+  return (
+    typeof properties === 'object' &&
+    properties !== null &&
+    Object.keys(properties).length === 0 &&
+    additionalProperties !== true &&
+    (typeof additionalProperties !== 'object' || additionalProperties === null)
+  );
+}
+
+/**
  * Flatten a tool's input schema into renderable scalar fields.
  *
  * Anything nested is reported in `complex` rather than dropped silently, so the
@@ -74,7 +125,7 @@ export function parseToolSchema(tool: McpTool | undefined): ParsedToolSchema {
   const complex: string[] = [];
 
   for (const [key, rawProp] of Object.entries(properties)) {
-    const prop = (rawProp ?? {}) as Record<string, unknown>;
+    const prop = unwrapOptional((rawProp ?? {}) as Record<string, unknown>);
 
     // A union type (`["string", "null"]`) is renderable as long as exactly one
     // non-null member is; optional parameters are commonly spelled that way.

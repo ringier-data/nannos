@@ -518,6 +518,147 @@ class TestEditingAnExistingJob:
         assert "sub_agent_id" not in body
 
 
+class TestATemplatedFixedTextBecomesABrief:
+    """Fixed text is delivered verbatim, so `{{title}}` in it reaches the recipient as is.
+
+    The model still writes one when the request wants a field of the matched items in the
+    message. What it meant is a message written from the items, so the template becomes
+    the brief and the fixed text goes.
+    """
+
+    TEMPLATE = "New bug report filed: {{title}} ({{id}})"
+
+    def test_a_new_job_gets_the_template_as_its_brief(self, draft_client, gateway, catalogue):
+        gateway.return_value = {
+            "job_type": "watch",
+            "check_tool": "console_list_bug_reports",
+            "cel_expr": "result.reports",
+            "notification_message": self.TEMPLATE,
+        }
+
+        body = _filled(draft_client.post(URL, json={"query": QUERY}))
+
+        assert "notification_message" not in body
+        assert self.TEMPLATE in body["prompt"]
+
+    def test_a_brief_already_given_is_kept(self, draft_client, gateway, catalogue):
+        gateway.return_value = {
+            "job_type": "watch",
+            "check_tool": "console_list_bug_reports",
+            "cel_expr": "result.reports",
+            "notification_message": self.TEMPLATE,
+            "prompt": "Name each report's title.",
+        }
+
+        body = _filled(draft_client.post(URL, json={"query": QUERY}))
+
+        assert "notification_message" not in body
+        assert body["prompt"] == "Name each report's title."
+
+    def test_an_edit_removes_the_jobs_fixed_text(self, draft_client, gateway, catalogue):
+        current = {**CURRENT, "prompt": None, "notification_message": "A bug was filed"}
+        gateway.return_value = {"notification_message": self.TEMPLATE}
+
+        body = _filled(draft_client.post(URL, json={"query": "name the title and id", "current": current}))
+
+        assert "notification_message" not in body
+        assert self.TEMPLATE in body["prompt"]
+
+    def test_an_agents_instruction_is_not_overwritten(self, draft_client, gateway, catalogue):
+        draft_client.app.state.scheduler_service.schedulable_sub_agents = AsyncMock(
+            return_value=[SimpleNamespace(id=3, name="triage", config_version=None)]
+        )
+        current = {**CURRENT, "sub_agent_id": 3, "prompt": "Triage it"}
+        gateway.return_value = {"notification_message": self.TEMPLATE, "cel_expr": "result.reports"}
+
+        body = _filled(draft_client.post(URL, json={"query": "name the title", "current": current}))
+
+        assert body["prompt"] == "Triage it"
+        assert "notification_message" not in body
+
+    def test_an_invented_agent_id_is_no_agent(self, draft_client, gateway, catalogue):
+        # The id is coerced away later; judged before that, the template was dropped with
+        # no brief written, and the request for the title was lost.
+        gateway.return_value = {
+            "job_type": "watch",
+            "check_tool": "console_list_bug_reports",
+            "cel_expr": "result.reports",
+            "notification_message": self.TEMPLATE,
+            "sub_agent_id": 999,
+        }
+
+        body = _filled(draft_client.post(URL, json={"query": QUERY}))
+
+        assert "sub_agent_id" not in body
+        assert self.TEMPLATE in body["prompt"]
+
+    def test_an_edit_removing_the_agent_does_not_keep_its_instruction_as_the_brief(
+        self, draft_client, gateway, catalogue
+    ):
+        draft_client.app.state.scheduler_service.schedulable_sub_agents = AsyncMock(
+            return_value=[SimpleNamespace(id=3, name="research", config_version=None)]
+        )
+        current = {**CURRENT, "sub_agent_id": 3, "prompt": "Research the reporter"}
+        gateway.return_value = {"sub_agent_id": None, "notification_message": self.TEMPLATE}
+
+        body = _filled(draft_client.post(URL, json={"query": "just tell me the title", "current": current}))
+
+        assert "sub_agent_id" not in body
+        assert self.TEMPLATE in body["prompt"]
+
+    def test_an_echoed_instruction_of_a_removed_agent_is_no_brief(self, draft_client, gateway, catalogue):
+        # Models restate the fields around their edit; the removed agent's instruction,
+        # echoed, must not become the notification's brief.
+        draft_client.app.state.scheduler_service.schedulable_sub_agents = AsyncMock(
+            return_value=[SimpleNamespace(id=3, name="research", config_version=None)]
+        )
+        current = {**CURRENT, "sub_agent_id": 3, "prompt": "Research the reporter"}
+        gateway.return_value = {
+            "sub_agent_id": None,
+            "prompt": "Research the reporter",
+            "notification_message": self.TEMPLATE,
+        }
+
+        body = _filled(draft_client.post(URL, json={"query": "just tell me the title", "current": current}))
+
+        assert "sub_agent_id" not in body
+        assert self.TEMPLATE in body["prompt"]
+
+    def test_a_non_string_prompt_is_not_a_500(self, draft_client, gateway, catalogue):
+        gateway.return_value = {
+            "job_type": "watch",
+            "check_tool": "console_list_bug_reports",
+            "cel_expr": "result.reports",
+            "notification_message": self.TEMPLATE,
+            "prompt": ["step 1"],
+        }
+
+        resp = draft_client.post(URL, json={"query": QUERY})
+
+        assert resp.status_code == 200
+        assert self.TEMPLATE in resp.json()["prompt"]
+
+    def test_plain_fixed_text_is_left_alone(self, draft_client, gateway, catalogue):
+        gateway.return_value = {
+            "job_type": "watch",
+            "check_tool": "console_list_bug_reports",
+            "cel_expr": "result.reports",
+            "notification_message": "A new bug report was filed",
+        }
+
+        body = _filled(draft_client.post(URL, json={"query": QUERY}))
+
+        assert body["notification_message"] == "A new bug report was filed"
+        assert "prompt" not in body
+
+    def test_the_prompt_says_fixed_text_is_never_rendered(self, draft_client, gateway, catalogue):
+        gateway.return_value = {"job_type": "watch", "check_tool": "console_list_bug_reports"}
+
+        draft_client.post(URL, json={"query": QUERY})
+
+        assert "It is never rendered" in _prompt(gateway)
+
+
 class TestEditingATaskJob:
     """generate-job-draft drafts task jobs as well as watches; an edit follows the job's type."""
 

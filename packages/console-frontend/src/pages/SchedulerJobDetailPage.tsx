@@ -49,7 +49,7 @@ import { SubAgentSelect } from '@/components/SubAgentSelect';
 import { WatchFields, type WatchFieldsValue } from '@/components/WatchFields';
 import { AiComposer, HintTip } from '@/components/formChrome';
 import { LastCheckPanel } from '@/components/LastCheckPanel';
-import { resolveArgs } from '@/lib/watchArgs';
+import { argsView, resolveArgs } from '@/lib/watchArgs';
 import { conditionModeOf, messageModeOf, resolveWatchChoices } from '@/lib/watchChoices';
 import { applyDraftEdit, draftOfWatch } from '@/lib/watchDraft';
 import { agentActionError, automatedSubAgentParameters } from '@/lib/agentAction';
@@ -79,6 +79,7 @@ import {
   schedulerFollowDefaultScheduleMutation,
   schedulerResetJobSchedulesMutation,
 } from '@/api/generated/@tanstack/react-query.gen';
+import type { McpTool } from '@/api/generated/types.gen';
 import { JobPermissionsDialog } from '@/components/scheduler/JobPermissionsDialog';
 import { OwnershipBadge, SharingBadge } from '@/components/scheduler/sharing';
 import { isOwnJob, subscriberCount } from '@/lib/sharedJobs';
@@ -587,13 +588,23 @@ function JobHeader({
  * does not state outright: whether the condition is a rule or a judgement, and whether the
  * outcome is a notification or an agent run.
  */
-function watchValueFromJob(job: ScheduledJob): WatchFieldsValue {
+function watchValueFromJob(job: ScheduledJob, tools: McpTool[] | undefined): WatchFieldsValue {
   const agent = job.sub_agent_id != null;
+  const args = (job.check_args ?? {}) as Record<string, unknown>;
+  const exprs = (job.check_args_exprs ?? {}) as Record<string, string>;
+  // Until the tools have loaded (`undefined`) nothing is known about the schema, and
+  // judging the mode without one would open every job in the JSON editor: fields until
+  // then. A loaded but empty list is an answer — no schema — and is judged like any other.
+  const view = argsView(
+    args,
+    exprs,
+    tools?.find((t) => t.name === job.check_tool),
+  );
   return {
     check_tool: job.check_tool ?? '',
-    check_args: (job.check_args ?? {}) as Record<string, unknown>,
-    check_args_text: job.check_args ? JSON.stringify(job.check_args, null, 2) : '',
-    args_mode: 'fields',
+    check_args: args,
+    check_args_text: view.check_args_text,
+    args_mode: tools ? view.args_mode : 'fields',
     check_args_exprs: (job.check_args_exprs ?? {}) as Record<string, string>,
     cel_expr: job.cel_expr ?? '',
     llm_condition: job.llm_condition ?? '',
@@ -656,7 +667,7 @@ function EditForm({
   const [voiceCall, setVoiceCall] = useState(job.voice_call ?? false);
   const [dirty, setDirty] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [watch, setWatch] = useState<WatchFieldsValue>(() => watchValueFromJob(job));
+  const [watch, setWatch] = useState<WatchFieldsValue>(() => watchValueFromJob(job, undefined));
   const [aiQuery, setAiQuery] = useState('');
   const [aiOpen, setAiOpen] = useState(false);
   /** The call the saved job makes — what `last_check_result` is a response to. */
@@ -708,6 +719,29 @@ function EditForm({
   const { data: mcpToolsData } = useQuery(consoleListMcpToolsOptions());
   const mcpTools = mcpToolsData?.tools ?? [];
 
+  // The editor's mode needs the tool's schema, which arrives after the form is built: an
+  // expression with no field would otherwise sit in the field form with nothing showing
+  // it. Once, and only on an untouched form — never under someone typing.
+  const modeChosen = useRef(false);
+  useEffect(() => {
+    // Deferred, not dropped, while the form is being edited: it runs once it is clean
+    // again. Mode and text are derived together from the form as it is — after a save
+    // `job` can still be the pre-save prop, and a mode without its text would put the
+    // old arguments back on the next save.
+    if (modeChosen.current || !mcpToolsData || dirty) return;
+    modeChosen.current = true;
+    setWatch((w) => {
+      const view = argsView(
+        w.check_args,
+        w.check_args_exprs,
+        (mcpToolsData.tools ?? []).find((t) => t.name === w.check_tool),
+      );
+      // The text only follows a mode change: in the same mode it is already what is
+      // shown, and rewriting it would only reformat what the person wrote.
+      return view.args_mode === w.args_mode ? w : { ...w, ...view };
+    });
+  }, [mcpToolsData, dirty]);
+
   // A picker: it must offer every channel, so no page size is passed.
   const { data: channelPage } = useQuery({
     queryKey: ['delivery-channels'],
@@ -738,7 +772,7 @@ function EditForm({
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     setDeliveryChannel((job as any).delivery_channel_id != null ? String((job as any).delivery_channel_id) : '');
     setVoiceCall(job.voice_call ?? false);
-    setWatch(watchValueFromJob(job));
+    setWatch(watchValueFromJob(job, mcpToolsData ? (mcpToolsData.tools ?? []) : undefined));
     setAiFilled(new Set());
     setDirty(false);
     setError(null);
@@ -863,6 +897,8 @@ function EditForm({
       }
     }
 
+    // In the JSON editor both halves come from its text (see resolveArgs).
+    const resolvedArgs = resolveArgs(watch);
     const body: Record<string, unknown> = {
       name: name || undefined,
       max_failures: maxFailures || undefined,
@@ -897,9 +933,12 @@ function EditForm({
       }),
       ...(job.job_type === 'watch' && {
         check_tool: watch.check_tool || undefined,
-        check_args: resolveArgs(watch).args ?? null,
-        check_args_exprs:
-          Object.keys(watch.check_args_exprs).length > 0 ? watch.check_args_exprs : null,
+        // A reader cannot change the call, so it is not sent: re-deriving it from the
+        // editor's text could only ever read as a change they are refused.
+        ...(canWrite && {
+          check_args: resolvedArgs.args ?? null,
+          check_args_exprs: Object.keys(resolvedArgs.exprs).length > 0 ? resolvedArgs.exprs : null,
+        }),
         // The two halves of one condition: the expression gates deterministically,
         // the judgement is the semantic stage on what it returned. Cleared halves are
         // sent as null so a stale one cannot silently keep deciding the job.

@@ -28,30 +28,96 @@ export interface WatchArgsValue {
 export function argsModeFor(
   args: Record<string, unknown>,
   tool: McpTool | undefined,
+  exprs: Record<string, string>,
 ): 'fields' | 'json' {
+  // An expression lives in its argument's field, so it needs one as much as a value does.
   const renderable = new Set(parseToolSchema(tool).params.map((param) => param.key));
-  return Object.keys(args).every((key) => renderable.has(key)) ? 'fields' : 'json';
+  return [...Object.keys(args), ...Object.keys(exprs)].every((key) => renderable.has(key)) ? 'fields' : 'json';
 }
 
-/** The arguments to send, or the reason the raw JSON cannot be used. */
+/**
+ * The JSON editor's text for a set of arguments: values as they are, expressions as
+ * `"= …"` strings — the fields' own convention.
+ *
+ * The expressions are part of the call, so an editor showing only the values reads as a
+ * call without them: a rolling `created_after` window displayed as `{}`.
+ */
+export function argsText(args: Record<string, unknown>, exprs: Record<string, string>): string {
+  const all: Record<string, unknown> = { ...args };
+  for (const [key, expr] of Object.entries(exprs)) all[key] = `= ${expr}`;
+  return Object.keys(all).length ? JSON.stringify(all, null, 2) : '';
+}
+
+/**
+ * The JSON editor's text split into values and expressions: a top-level string starting
+ * with `=` is an expression, as it is in a field. Only the top level — a nested string is
+ * data the tool receives, and the scheduler resolves expressions per argument.
+ */
+export function parseArgsText(text: string): {
+  args: Record<string, unknown> | undefined;
+  exprs: Record<string, string>;
+  error?: string;
+} {
+  const trimmed = text.trim();
+  if (!trimmed) return { args: undefined, exprs: {} };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return { args: undefined, exprs: {}, error: 'Arguments are not valid JSON.' };
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return { args: undefined, exprs: {}, error: 'Arguments must be a JSON object.' };
+  }
+  const args: Record<string, unknown> = {};
+  const exprs: Record<string, string> = {};
+  for (const [key, raw] of Object.entries(parsed as Record<string, unknown>)) {
+    if (typeof raw === 'string' && raw.startsWith('=')) {
+      // trimStart, as the field does: the same `= …` text is the same expression.
+      const expr = raw.slice(1).trimStart();
+      // A bare `=` sets nothing, as in a field.
+      if (expr) exprs[key] = expr;
+    } else {
+      args[key] = raw;
+    }
+  }
+  return { args: Object.keys(args).length > 0 ? args : undefined, exprs };
+}
+
+/**
+ * The arguments and expressions to send, or the reason the raw JSON cannot be used.
+ *
+ * In the JSON editor both halves come from its text. `check_args_exprs` there is a copy
+ * kept for the views that read state, and a copy is only as fresh as the last edit: text
+ * filled in from a stored job or a draft has never been through one.
+ */
 export function resolveArgs(value: WatchArgsValue): {
   args: Record<string, unknown> | undefined;
+  exprs: Record<string, string>;
   error?: string;
 } {
   if (value.args_mode === 'fields') {
-    return { args: Object.keys(value.check_args).length > 0 ? value.check_args : undefined };
+    return {
+      args: Object.keys(value.check_args).length > 0 ? value.check_args : undefined,
+      exprs: value.check_args_exprs,
+    };
   }
-  const text = value.check_args_text.trim();
-  if (!text) return { args: undefined };
-  try {
-    const parsed = JSON.parse(text);
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-      return { args: undefined, error: 'Arguments must be a JSON object.' };
-    }
-    return { args: parsed as Record<string, unknown> };
-  } catch {
-    return { args: undefined, error: 'Arguments are not valid JSON.' };
-  }
+  const { args, exprs, error } = parseArgsText(value.check_args_text);
+  // Mid-edit JSON keeps the last good expressions, so the preview does not blink.
+  return error ? { args: undefined, exprs: value.check_args_exprs, error } : { args, exprs };
+}
+
+/**
+ * The arguments editor for a set of arguments: its JSON text, and the mode that can show
+ * all of them. Every path that fills the form from outside — a draft, an AI edit, a
+ * stored job — goes through this, so they cannot drift apart.
+ */
+export function argsView(
+  args: Record<string, unknown>,
+  exprs: Record<string, string>,
+  tool: McpTool | undefined,
+): Pick<WatchArgsValue, 'check_args_text' | 'args_mode'> {
+  return { check_args_text: argsText(args, exprs), args_mode: argsModeFor(args, tool, exprs) };
 }
 
 /**

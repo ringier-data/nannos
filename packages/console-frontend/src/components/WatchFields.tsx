@@ -39,8 +39,16 @@ import {
   ReadValue,
   Segmented,
 } from '@/components/formChrome';
-import { toolServer, toolShortName, parseToolSchema } from '@/lib/mcpTools';
-import { type CheckCall, missingRequiredArgs, resolveArgs, sameCheckCall } from '@/lib/watchArgs';
+import { declaresNoArguments, toolServer, toolShortName, parseToolSchema } from '@/lib/mcpTools';
+import {
+  type CheckCall,
+  argsModeFor,
+  argsText,
+  missingRequiredArgs,
+  parseArgsText,
+  resolveArgs,
+  sameCheckCall,
+} from '@/lib/watchArgs';
 import { jsonPathToCel } from '@/lib/watchCondition';
 import { cn } from '@/lib/utils';
 import { type ConditionMode, type MessageMode, type WatchChoices } from '@/lib/watchChoices';
@@ -135,9 +143,12 @@ export function WatchFields({
   // be called with?" is answered here rather than on the first live run. Debounced,
   // like the condition tester, and keyed on the static args too — they are part of
   // the merged result.
-  const argsExprsKey = JSON.stringify(value.check_args_exprs);
-  const hasArgExprs = Object.keys(value.check_args_exprs).length > 0;
-  const staticArgsKey = JSON.stringify(value.check_args);
+  // Both halves as they would be sent: in the JSON editor that is its text, so the
+  // preview follows what is typed there rather than the field form's last values.
+  const formArgs = resolveArgs(value);
+  const argsExprsKey = JSON.stringify(formArgs.exprs);
+  const hasArgExprs = Object.keys(formArgs.exprs).length > 0;
+  const staticArgsKey = JSON.stringify(formArgs.args ?? {});
   // prev is bound as on the run, to the stored last result — a cursor-style argument
   // (`prev.next_page`) otherwise previews as if the job had never run.
   // Memoised: a stored result can be tens of kilobytes, and this runs in the render body.
@@ -150,8 +161,8 @@ export function WatchFields({
     let cancelled = false;
     const timer = setTimeout(() => {
       validateArgsExpr({
-        check_args_exprs: value.check_args_exprs,
-        check_args: value.check_args,
+        check_args_exprs: formArgs.exprs,
+        check_args: formArgs.args ?? {},
         prev: storedResult ?? null,
       })
         .then((res) => {
@@ -190,14 +201,13 @@ export function WatchFields({
   /** The response a condition is tested against: this session's call, else the last run's. */
   // Unparseable JSON mid-edit is no known call, so it matches nothing; "no arguments"
   // (args undefined, no error) is a call like any other.
-  const formArgs = resolveArgs(value);
   const storedMatches =
     !storedCall ||
     (!formArgs.error &&
       sameCheckCall(storedCall, {
         check_tool: value.check_tool,
         check_args: formArgs.args,
-        check_args_exprs: value.check_args_exprs,
+        check_args_exprs: formArgs.exprs,
       }));
   const storedTestable = storedMatches ? (storedResult ?? undefined) : undefined;
   const testable = liveResult ?? storedTestable;
@@ -215,21 +225,27 @@ export function WatchFields({
   const conditionMode = value.condition_mode;
   const messageMode = value.message_mode;
   const hasMessage = Boolean(value.notification_message.trim());
+  // The backend's `find_placeholder`: fixed text is sent as written, so these would arrive
+  // as the literal characters. The save refuses them; this says why before it does.
+  const placeholder = /\{\{[^{}]*\}\}|\$\{[^{}]*\}|\{[A-Za-z_][\w.]*\}/.exec(value.notification_message)?.[0];
 
   function toggleArgsMode() {
     if (value.args_mode === 'fields') {
-      const text = Object.keys(value.check_args).length
-        ? JSON.stringify(value.check_args, null, 2)
-        : '';
-      patch({ args_mode: 'json', check_args_text: text });
+      patch({ args_mode: 'json', check_args_text: argsText(value.check_args, value.check_args_exprs) });
       return;
     }
-    const { args, error } = resolveArgs(value);
+    const { args, exprs, error } = resolveArgs(value);
     if (error) {
       onError?.(error);
       return;
     }
-    patch({ args_mode: 'fields', check_args: args ?? {} });
+    // The field form shows only the arguments the schema declares; one outside it would
+    // still be saved and sent with nothing showing it.
+    if (argsModeFor(args ?? {}, selectedTool, exprs) === 'json') {
+      onError?.('Some arguments have no field in this tool’s schema — keep editing them as JSON.');
+      return;
+    }
+    patch({ args_mode: 'fields', check_args: args ?? {}, check_args_exprs: exprs });
   }
 
   /**
@@ -238,7 +254,7 @@ export function WatchFields({
    * cannot confirm is read-only, which surfaces here as an explicit confirmation.
    */
   async function runCheck(acknowledgeRisk: boolean) {
-    const { args, error } = resolveArgs(value);
+    const { args, exprs, error } = resolveArgs(value);
     if (error) {
       setCheck({ loading: false, error });
       return;
@@ -256,9 +272,9 @@ export function WatchFields({
       // The test call uses the same argument resolution the scheduler will: static
       // args plus the `= …` expressions, or it is not testing the real job.
       let callArgs = args ?? {};
-      if (Object.keys(value.check_args_exprs).length > 0) {
+      if (Object.keys(exprs).length > 0) {
         const dyn = await validateArgsExpr({
-          check_args_exprs: value.check_args_exprs,
+          check_args_exprs: exprs,
           check_args: callArgs,
           prev: storedResult ?? null,
         });
@@ -357,11 +373,16 @@ export function WatchFields({
                           patch({ check_args_exprs: next });
                         }}
                       />
-                      {toolSchema.params.length === 0 && toolSchema.complex.length === 0 && (
-                        <p className="text-muted-foreground text-xs">
-                          No argument schema — use “Edit as JSON” if it needs any.
-                        </p>
-                      )}
+                      {toolSchema.params.length === 0 &&
+                        toolSchema.complex.length === 0 &&
+                        (declaresNoArguments(selectedTool) ? (
+                          // An explicitly empty schema is an answer: the tool declares none.
+                          <p className="text-muted-foreground text-xs">This tool takes no arguments.</p>
+                        ) : (
+                          <p className="text-muted-foreground text-xs">
+                            No argument schema — use “Edit as JSON” if it needs any.
+                          </p>
+                        ))}
                       {toolSchema.complex.length > 0 && (
                         <p className="text-muted-foreground text-xs">
                           {toolSchema.complex.join(', ')}{' '}
@@ -376,12 +397,23 @@ export function WatchFields({
                       text={value.check_args_text}
                       error={errors.check_args}
                       onChange={(text) => {
-                        patch({ check_args_text: text });
+                        // The text holds the expressions too, as `"= …"` values. Mid-edit
+                        // JSON keeps the last good set; it cannot be saved until it parses.
+                        const parsed = parseArgsText(text);
+                        patch(
+                          parsed.error
+                            ? { check_args_text: text }
+                            : {
+                                check_args_text: text,
+                                check_args: parsed.args ?? {},
+                                check_args_exprs: parsed.exprs,
+                              },
+                        );
                       }}
                     />
                   )}
 
-                  {Object.keys(value.check_args_exprs).length > 0 ? (
+                  {hasArgExprs ? (
                     argsPreview.error ? (
                       <FieldError>{argsPreview.error}</FieldError>
                     ) : argsPreview.resolved ? (
@@ -637,10 +669,21 @@ export function WatchFields({
                           patch({ notification_message: e.target.value });
                         }}
                       />
-                      {!hasMessage && (
-                        <p className="text-muted-foreground text-xs">
-                          Left empty, a message is written from what matched instead.
-                        </p>
+                      {placeholder ? (
+                        <FieldError>
+                          Fixed text is sent exactly as written, so {placeholder} would arrive as
+                          is. To put what matched into the message, choose “Written from what
+                          matched” and describe it there; otherwise reword it without braces.
+                        </FieldError>
+                      ) : errors.notification_message ? (
+                        // A refusal the pattern above did not foresee: the server's word.
+                        <FieldError>{errors.notification_message}</FieldError>
+                      ) : (
+                        !hasMessage && (
+                          <p className="text-muted-foreground text-xs">
+                            Left empty, a message is written from what matched instead.
+                          </p>
+                        )
                       )}
                     </div>
                   )}

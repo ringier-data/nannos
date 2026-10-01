@@ -273,6 +273,11 @@ def _get_console_mcp_tools(request: Request, user: User | None = None) -> list[M
         )
 
     app = request.app
+    # The input schemas come from the FastApiMCP instance that serves these tools on /mcp, so
+    # the arguments a form or a drafting model is offered are the ones a call is checked
+    # against. Without them a console tool read as argument-less.
+    served = getattr(app.state, "console_mcp", None)
+    schemas = {tool.name: tool.inputSchema for tool in served.tools} if served is not None else {}
     tools = []
     for route in app.routes:
         if not hasattr(route, "tags") or "MCP" not in route.tags:
@@ -293,6 +298,7 @@ def _get_console_mcp_tools(request: Request, user: User | None = None) -> list[M
             MCPTool(
                 name=name,
                 description=f"{summary} {description}".strip() if summary or description else None,
+                input_schema=clean_gemini_schema(schemas.get(name)),
                 server="console",
             )
         )

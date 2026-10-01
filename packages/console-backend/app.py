@@ -508,6 +508,8 @@ mcp = FastApiMCP(
     # can read it (see services.forwarded_attribution). Without this it's silently stripped.
     headers=["authorization", "x-nannos-context"],
 )
+# The console tool listing (mcp_router) reads each tool's input schema from here.
+app.state.console_mcp = mcp
 
 # Override list_tools handler to hide triage-only tools from users without triage capability.
 # fastapi-mcp registers a static handler that returns all tools unconditionally.

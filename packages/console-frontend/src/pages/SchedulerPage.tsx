@@ -60,6 +60,7 @@ import {
   getDeliveryChannels,
   formatApiError,
   generateJobDraft,
+  ApiError,
   createScheduledJob,
   type DeliveryChannel,
   listJobs,
@@ -81,13 +82,24 @@ import { isOwnJob, subscriberCount } from '@/lib/sharedJobs';
 import { CronField } from '@/components/CronField';
 import { AgentActionFields } from '@/components/AgentActionFields';
 import { agentActionError, automatedSubAgentParameters } from '@/lib/agentAction';
-import { argsModeFor, missingRequiredArgs, resolveArgs } from '@/lib/watchArgs';
+import { argsView, missingRequiredArgs, resolveArgs } from '@/lib/watchArgs';
 import { type ConditionMode, type MessageMode, conditionModeOf, resolveWatchChoices } from '@/lib/watchChoices';
 import { WatchFields } from '@/components/WatchFields';
 import { describeCron } from '@/lib/cron';
 import { AiBadge, FieldError, SectionHeader } from '@/components/formChrome';
 import { toast } from 'sonner';
 import { DeliveryChannelOptions, DeliveryReachabilityNote } from '@/components/scheduler/DeliveryChannelOptions';
+
+/** The fields the create form shows a server-side refusal under. */
+const FORM_ERROR_FIELDS = new Set([
+  'name',
+  'check_tool',
+  'check_args',
+  'cel_expr',
+  'llm_condition',
+  'notification_message',
+  'sub_agent_id',
+]);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -404,21 +416,33 @@ function CreateJobDialog({
         }
         if (result.check_tool) {
           next.check_tool = result.check_tool;
+          // A tool's arguments mean nothing to another one, as when it is picked by
+          // hand: what an earlier draft gave the old tool must not ride along.
+          next.check_args = {};
+          next.check_args_exprs = {};
+          // So is its condition: it was written against the old tool's response.
+          next.cel_expr = '';
           filled.add('check_tool');
         }
         if (result.check_args) {
-          const args = result.check_args as Record<string, unknown>;
-          next.check_args = args;
-          next.check_args_text = JSON.stringify(args, null, 2);
-          next.args_mode = argsModeFor(
-            args,
-            mcpTools.find((t) => t.name === result.check_tool),
-          );
+          next.check_args = result.check_args as Record<string, unknown>;
           filled.add('check_args');
         }
         if (result.check_args_exprs && Object.keys(result.check_args_exprs).length > 0) {
           next.check_args_exprs = result.check_args_exprs as Record<string, string>;
           filled.add('check_args');
+        }
+        if (filled.has('check_args') || filled.has('check_tool')) {
+          // After both halves land: the JSON editor shows the expressions, and the field
+          // form needs a field for each of them.
+          Object.assign(
+            next,
+            argsView(
+              next.check_args,
+              next.check_args_exprs,
+              mcpTools.find((t) => t.name === next.check_tool),
+            ),
+          );
         }
         if (result.cel_expr) {
           next.cel_expr = result.cel_expr;
@@ -527,6 +551,7 @@ function CreateJobDialog({
     // Watch job validations. Errors are collected per field rather than returned as
     // one string, so the user is told which control to fix instead of hunting for it.
     let check_args: Record<string, unknown> | undefined;
+    let check_args_exprs: Record<string, string> = {};
     // Only what the form's choices use; a hidden field keeps its text but is not sent.
     const chosen = resolveWatchChoices(form);
     if (form.job_type === 'watch') {
@@ -536,6 +561,7 @@ function CreateJobDialog({
       const parsed = resolveArgs(form);
       if (parsed.error) errors.check_args = parsed.error;
       check_args = parsed.args;
+      check_args_exprs = parsed.exprs;
 
       const selectedTool = mcpTools.find((t) => t.name === form.check_tool);
       const missing = missingRequiredArgs(selectedTool, form, check_args);
@@ -593,7 +619,7 @@ function CreateJobDialog({
       body.check_tool = form.check_tool;
       body.check_args = check_args;
       body.check_args_exprs =
-        Object.keys(form.check_args_exprs).length > 0 ? form.check_args_exprs : undefined;
+        Object.keys(check_args_exprs).length > 0 ? check_args_exprs : undefined;
       body.destroy_after_trigger = form.destroy_after_trigger;
       // The two halves of the condition: the expression gates deterministically, the
       // judgement is the semantic stage on what it returned. At least one is set —
@@ -626,7 +652,18 @@ function CreateJobDialog({
       qc.invalidateQueries({ queryKey: ['scheduler-jobs'] });
       onCreated(created.id);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      // A refusal the form has a control for is shown under that control; only the
+      // rest goes to the banner, which would otherwise repeat it in the API's wording.
+      const onFields =
+        e instanceof ApiError
+          ? Object.fromEntries(Object.entries(e.fieldErrors).filter(([k]) => FORM_ERROR_FIELDS.has(k)))
+          : {};
+      if (e instanceof ApiError && Object.keys(onFields).length > 0) {
+        setFieldErrors((prev) => ({ ...prev, ...onFields }));
+        setError(e.messageWithout(FORM_ERROR_FIELDS));
+      } else {
+        setError(e instanceof Error ? e.message : String(e));
+      }
     } finally {
       setSubmitting(false);
     }
