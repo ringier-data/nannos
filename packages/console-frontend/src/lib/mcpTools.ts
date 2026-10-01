@@ -78,6 +78,28 @@ function unwrapOptional(prop: Record<string, unknown>): Record<string, unknown> 
 }
 
 /**
+ * Whether the tool's schema says, explicitly, that it takes no arguments: an empty
+ * `properties` object, with nothing else let in. A missing schema, a free-form one
+ * (`additionalProperties: true`) or one whose properties could not be read is no such
+ * statement, and leaves the raw JSON editor as the way in.
+ */
+export function declaresNoArguments(tool: McpTool | undefined): boolean {
+  const schema = tool?.input_schema as
+    | { properties?: unknown; additionalProperties?: unknown }
+    | undefined
+    | null;
+  if (!schema || typeof schema !== 'object') return false;
+  const { properties, additionalProperties } = schema;
+  return (
+    typeof properties === 'object' &&
+    properties !== null &&
+    Object.keys(properties).length === 0 &&
+    additionalProperties !== true &&
+    (typeof additionalProperties !== 'object' || additionalProperties === null)
+  );
+}
+
+/**
  * Flatten a tool's input schema into renderable scalar fields.
  *
  * Anything nested is reported in `complex` rather than dropped silently, so the

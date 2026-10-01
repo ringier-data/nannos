@@ -39,7 +39,7 @@ import {
   ReadValue,
   Segmented,
 } from '@/components/formChrome';
-import { toolServer, toolShortName, parseToolSchema } from '@/lib/mcpTools';
+import { declaresNoArguments, toolServer, toolShortName, parseToolSchema } from '@/lib/mcpTools';
 import {
   type CheckCall,
   argsModeFor,
@@ -375,8 +375,8 @@ export function WatchFields({
                       />
                       {toolSchema.params.length === 0 &&
                         toolSchema.complex.length === 0 &&
-                        (selectedTool?.input_schema ? (
-                          // A schema with no properties is an answer: the tool declares none.
+                        (declaresNoArguments(selectedTool) ? (
+                          // An explicitly empty schema is an answer: the tool declares none.
                           <p className="text-muted-foreground text-xs">This tool takes no arguments.</p>
                         ) : (
                           <p className="text-muted-foreground text-xs">

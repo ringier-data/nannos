@@ -58,14 +58,6 @@ export type {
 } from './generated/types.gen';
 
 /**
- * Turn an API error into something worth showing a person.
- *
- * FastAPI answers a validation failure with `detail` as a list of `{loc, msg}` objects,
- * which `String(...)` renders as "[object Object]". That started mattering when the API
- * began rejecting unparsable watch conditions: the message explains which syntax works,
- * and it was being thrown away.
- */
-/**
  * Pydantic's prefix on a validator's message ("Value error, …"): the field is already
  * named by `loc`, and the prefix is the library's, not the message's.
  */
@@ -89,16 +81,40 @@ export function apiFieldErrors(error: unknown): Record<string, string> {
   return out;
 }
 
-/** An API failure: the banner text, plus whatever the 422 said about individual fields. */
+/**
+ * An API failure: the banner text, plus what the 422 said about individual fields — and
+ * the error itself, so a form that shows some of those fields can word the rest alone.
+ */
 export class ApiError extends Error {
   readonly fieldErrors: Record<string, string>;
+  readonly raw: unknown;
 
-  constructor(message: string, fieldErrors: Record<string, string> = {}) {
+  constructor(message: string, fieldErrors: Record<string, string> = {}, raw: unknown = undefined) {
     super(message);
     this.fieldErrors = fieldErrors;
+    this.raw = raw;
+  }
+
+  /** The banner text without the top-level fields in `shown`, or null if nothing is left. */
+  messageWithout(shown: ReadonlySet<string>): string | null {
+    const detail = (this.raw as { detail?: unknown } | null)?.detail;
+    if (!Array.isArray(detail)) return this.message;
+    const rest = detail.filter((item) => {
+      const loc = (item as { loc?: unknown[] } | null)?.loc;
+      return !(Array.isArray(loc) && loc.length === 2 && loc[0] === 'body' && shown.has(String(loc[1])));
+    });
+    return rest.length ? formatApiError({ detail: rest }) : null;
   }
 }
 
+/**
+ * Turn an API error into something worth showing a person.
+ *
+ * FastAPI answers a validation failure with `detail` as a list of `{loc, msg}` objects,
+ * which `String(...)` renders as "[object Object]". That started mattering when the API
+ * began rejecting unparsable watch conditions: the message explains which syntax works,
+ * and it was being thrown away.
+ */
 export function formatApiError(error: unknown): string {
   const detail = (error as { detail?: unknown } | null)?.detail;
   if (typeof detail === 'string') return detail;
@@ -397,7 +413,7 @@ export async function createScheduledJob(body: ScheduledJobCreateExtended): Prom
     url: '/api/v1/scheduler/jobs',
     body,
   });
-  if (error) throw new ApiError(formatApiError(error), apiFieldErrors(error));
+  if (error) throw new ApiError(formatApiError(error), apiFieldErrors(error), error);
   return data as ScheduledJob;
 }
 

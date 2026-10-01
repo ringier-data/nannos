@@ -658,10 +658,9 @@ function CreateJobDialog({
         e instanceof ApiError
           ? Object.fromEntries(Object.entries(e.fieldErrors).filter(([k]) => FORM_ERROR_FIELDS.has(k)))
           : {};
-      if (Object.keys(onFields).length > 0) {
+      if (e instanceof ApiError && Object.keys(onFields).length > 0) {
         setFieldErrors((prev) => ({ ...prev, ...onFields }));
-        const rest = e instanceof ApiError && Object.keys(e.fieldErrors).some((k) => !FORM_ERROR_FIELDS.has(k));
-        setError(rest ? (e as Error).message : null);
+        setError(e.messageWithout(FORM_ERROR_FIELDS));
       } else {
         setError(e instanceof Error ? e.message : String(e));
       }
