@@ -140,4 +140,6 @@ async def test_failed_target_lookup_fails_closed():
     response = await _impersonate(user_service, ADMIN, "true")
 
     assert response.status_code == 503
+    # The console's lockout recovery keys on this code (AuthContext.tsx); pin the literal.
+    assert response.json()["code"] == "impersonation_unavailable"
     assert user_service.lookups == [(ADMIN.id, True), (TARGET.id, True)]

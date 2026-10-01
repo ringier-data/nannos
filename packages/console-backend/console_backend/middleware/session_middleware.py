@@ -17,6 +17,10 @@ from ..utils.cookie_signer import verify_cookie
 
 logger = logging.getLogger(__name__)
 
+#: `code` on the 503 for an impersonated user that cannot be looked up. The console keys its
+#: recovery on it (AuthContext.tsx), so it is a contract: change both sides together.
+IMPERSONATION_UNAVAILABLE = "impersonation_unavailable"
+
 
 class SessionMiddleware(BaseHTTPMiddleware):
     """Middleware to load session data from cookies.
@@ -62,7 +66,10 @@ class SessionMiddleware(BaseHTTPMiddleware):
                             logger.exception(f"Impersonation lookup failed for admin {user.id}")
                             return JSONResponse(
                                 status_code=503,
-                                content={"detail": "Impersonation unavailable: the user lookup failed"},
+                                content={
+                                    "detail": "Impersonation unavailable: the user lookup failed",
+                                    "code": IMPERSONATION_UNAVAILABLE,
+                                },
                             )
                     if user:
                         request.state.session_id = session_id
