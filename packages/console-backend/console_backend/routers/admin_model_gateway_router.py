@@ -476,7 +476,7 @@ async def edit_model(
     # An edit cannot rename the alias (the form does not offer it; update_model refuses it too).
     # Checked here first so a refused rename writes no rate card under the other name.
     try:
-        current = await svc.get_model_by_id(model_id)
+        current = await svc.find_model_by_id(model_id)
     except ModelGatewayError as e:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
     if current is not None and current.get("model_name") != body.model_name:

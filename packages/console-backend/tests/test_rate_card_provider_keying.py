@@ -71,7 +71,7 @@ def _register_request(
     gateway = SimpleNamespace(
         register_model=AsyncMock(return_value={"model_info": {"id": "gw-1"}}),
         list_models=AsyncMock(return_value=registered or []),
-        get_model_by_id=AsyncMock(return_value=None),
+        find_model_by_id=AsyncMock(return_value=None),
         catalog_model=AsyncMock(side_effect=lambda mid: next((c for c in entries if c["model_id"] == mid), None)),
         # Readability is what separates "unknown model id" (422) from "catalog outage" (502).
         get_catalog=AsyncMock(return_value=entries),
@@ -354,7 +354,7 @@ async def test_an_edit_cannot_rename_the_alias_and_writes_no_rate_card():
     import console_backend.routers.admin_model_gateway_router as router
 
     request, rate_card_service, gateway = _register_request([1])
-    gateway.get_model_by_id = AsyncMock(return_value={"model_name": "claude-opus-4-7", "model_info": {"id": "gw-1"}})
+    gateway.find_model_by_id = AsyncMock(return_value={"model_name": "claude-opus-4-7", "model_info": {"id": "gw-1"}})
     gateway.update_model = AsyncMock()
     body = _body({"model": "bedrock/us.anthropic.claude-opus-4-8-v1:0"})
 
@@ -364,6 +364,21 @@ async def test_an_edit_cannot_rename_the_alias_and_writes_no_rate_card():
     assert exc.value.status_code == 422 and "cannot rename" in exc.value.detail
     rate_card_service.create_model_rate_card.assert_not_awaited()
     gateway.update_model.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_an_edit_of_the_deployments_own_alias_passes_the_rename_check():
+    import console_backend.routers.admin_model_gateway_router as router
+
+    request, rate_card_service, gateway = _register_request([1])
+    gateway.find_model_by_id = AsyncMock(return_value={"model_name": "claude-opus-4-8", "model_info": {"id": "gw-1"}})
+    gateway.update_model = AsyncMock(return_value={"model_info": {"id": "gw-1"}})
+    body = _body({"model": "bedrock/us.anthropic.claude-opus-4-8-v1:0"})
+
+    result = await router.edit_model("gw-1", request, body, AsyncMock(), user=SimpleNamespace(id="admin"))
+
+    assert result.status == "updated" and result.gateway_model_id == "gw-1"
+    rate_card_service.create_model_rate_card.assert_awaited_once()
 
 
 @pytest.mark.asyncio

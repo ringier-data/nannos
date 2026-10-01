@@ -324,14 +324,15 @@ class ModelGatewayService:
 
         A merge can only add and overwrite, so it is used only for an edit that keeps the deployment
         the same model: same route (provider model, region, location, project, base URL — compared
-        with what the merge would store), same mode, same alias, and no field cleared (LiteLLM
+        with what the merge would store), same base model, same mode, and no field cleared (LiteLLM
         ignores a null there except for cost fields). Anything else replaces the deployment the way
         every edit used to (``_reregister``): register new, then delete old, which changes the id —
-        a re-routed or re-moded deployment must not keep keys, flags or a probe record that described
-        the previous model. The returned dict carries the deployment id either way.
+        a different model must not keep keys, flags or a probe record that described the previous
+        one. The returned dict carries the deployment id either way. A rename is refused
+        (``ModelRenameRefused``): the alias is not an editable field.
         """
         model_info = dict(model_info or {})
-        previous = await self._get_model_by_id_with_retry(model_id)
+        previous = await self.find_model_by_id(model_id)
         if previous is None:
             # Not listed (a replica that has not loaded it, or gone): the PATCH reads the gateway's
             # database, so it edits a lagging deployment and refuses a deleted one — never a duplicate.
@@ -714,6 +715,11 @@ class ModelGatewayService:
 
     async def _get_model_by_id_with_retry(self, model_id: str, attempts: int = 4, delay: float = 0.75) -> dict | None:
         return await self._retry_lookup(lambda: self.get_model_by_id(model_id), attempts, delay)
+
+    async def find_model_by_id(self, model_id: str) -> dict | None:
+        """``get_model_by_id`` that rides out a replica not listing the deployment yet (briefly
+        retried, cache dropped between attempts) — for a caller that decides on the answer."""
+        return await self._get_model_by_id_with_retry(model_id)
 
     async def _retry_lookup(self, lookup, attempts: int, delay: float) -> dict | None:
         for i in range(attempts):
