@@ -513,6 +513,17 @@ def find_placeholder(text: str | None) -> str | None:
     return match.group(0) if match else None
 
 
+#: The free-text definition fields. The engine reads each by truthiness (a fixed text is
+#: sent if set, a judgement runs if set), so a whitespace-only value is acted on as
+#: present. Normalised on write, it cannot be stored: blank is empty.
+_BLANKABLE_TEXT = ("prompt", "notification_message", "cel_expr", "llm_condition")
+
+
+def blank_to(v: Any, empty: str | None) -> Any:
+    """`empty` for a whitespace-only string, `v` otherwise."""
+    return empty if isinstance(v, str) and not v.strip() else v
+
+
 def refuse_placeholders(v: str | None) -> str | None:
     """`v`, or a ValueError naming the first placeholder in it and what to do instead."""
     placeholder = find_placeholder(v)
@@ -681,6 +692,12 @@ class ScheduledJobCreate(BaseModel):
         except CelSyntaxError as exc:
             raise ValueError(f"{exc}. {CEL_SYNTAX_HINT}") from exc
         return v
+
+    @field_validator(*_BLANKABLE_TEXT, mode="before")
+    @classmethod
+    def blank_text_is_empty(cls, v: Any, info: Any) -> Any:
+        # prompt and notification_message are non-null strings here, defaulting to "".
+        return blank_to(v, "" if info.field_name in ("prompt", "notification_message") else None)
 
     @field_validator("notification_message")
     @classmethod
@@ -1010,6 +1027,12 @@ class ScheduledJobUpdate(BaseModel):
     @classmethod
     def validate_timezone(cls, v: str | None) -> str | None:
         return _validate_timezone_name(v)
+
+    @field_validator(*_BLANKABLE_TEXT, mode="before")
+    @classmethod
+    def blank_text_is_empty(cls, v: Any) -> Any:
+        """A whitespace-only value is a clear, as null is — same rule as create."""
+        return blank_to(v, None)
 
     @field_validator("cel_expr")
     @classmethod

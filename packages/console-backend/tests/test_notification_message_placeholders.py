@@ -68,4 +68,17 @@ def test_non_ascii_names_are_not_placeholders_as_in_the_form():
 
 def test_update_can_still_clear_the_text():
     assert ScheduledJobUpdate(notification_message=None).notification_message is None
-    assert ScheduledJobUpdate(notification_message="").notification_message == ""
+    # An empty text is a clear, as null is (see test_blank_text_is_stored_as_empty).
+    assert ScheduledJobUpdate(notification_message="").notification_message is None
+
+
+def test_blank_text_is_stored_as_empty():
+    # The engine reads these by truthiness: a whitespace-only value would be a blank
+    # message sent, a judge run on nothing, a blank agent instruction.
+    job = ScheduledJobCreate(**{**WATCH, "llm_condition": "   "}, notification_message="  ", prompt=" \n")
+
+    assert job.notification_message == ""
+    assert job.prompt == ""
+    assert job.llm_condition is None
+    update = ScheduledJobUpdate(notification_message="  ", llm_condition="\t", prompt=" ")
+    assert (update.notification_message, update.llm_condition, update.prompt) == (None, None, None)
