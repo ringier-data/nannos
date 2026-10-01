@@ -66,3 +66,13 @@ async def test_gateway_unknown_model_is_empty_even_with_stored_card():
         "sonnet", _request({}, stored_rates=_STORED), db=None, user=SimpleNamespace(), source="gateway"
     )
     assert out.pricing == {}
+
+
+@pytest.mark.asyncio
+async def test_gateway_skips_zero_costs():
+    # Embedding models carry output_cost_per_token: 0.0; a rate card entry must be positive.
+    info = {"litellm_provider": "bedrock", "input_cost_per_token": 1e-7, "output_cost_per_token": 0.0}
+    out = await router.cost_prefill(
+        "embed", _request(info, stored_rates={}), db=None, user=SimpleNamespace(), source="gateway"
+    )
+    assert set(out.pricing) == {"base_input_tokens"}

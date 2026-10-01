@@ -370,9 +370,9 @@ async def cost_prefill(
     pricing: dict[str, RateCardPricingEntry] = {}
     for cost_field, (unit, flow) in _COST_FIELD_TO_UNIT.items():
         val = info.get(cost_field)
-        # ``is not None`` (not truthiness): a genuine 0.0 cost (free tier / 0.0 cache-read
-        # rate) is a meaningful explicit-zero rate, not a "missing" value to drop.
-        if val is not None:
+        # A rate card entry must be positive (RateCardPricingEntry), so a 0.0 cost — e.g. the
+        # output cost every embedding model carries — is left unpriced rather than 500ing the seed.
+        if val is not None and val > 0:
             pricing[unit] = RateCardPricingEntry(
                 price_per_million=Decimal(str(val)) * Decimal(1_000_000),
                 flow_direction=flow,

@@ -195,8 +195,8 @@ const PRICING_UNITS: Array<{
   { unit: 'cache_creation_input_tokens', label: 'Cache write ($/M)', flow: 'input' },
   { unit: 'input_images', label: 'Per image ($/M images)', flow: 'input', embeddingOnly: true },
   // Per-grounded-call web-search fee (matches the proxy's `web_search` billing unit). Only shown
-  // for web-search-capable models — i.e. once the gateway prefill reports a price for it — so it
-  // isn't a confusing empty field on chat models that can't search. See webSearchOnly gating below.
+  // when the web-search capability is on or the form already holds a price for it, so it isn't a
+  // confusing empty field on chat models that can't search. See webSearchOnly gating below.
   { unit: 'web_search', label: 'Web search ($/M searches)', flow: 'output', webSearchOnly: true },
 ];
 
@@ -346,11 +346,14 @@ export function ModelGatewayPage() {
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   // Units the last "Pre-fill from gateway" changed: the value before and the gateway's value. A
   // field shows its "was" hint only while it still holds the gateway's value, so editing it by hand
-  // (or re-seeding from a base model) drops the hint without any extra bookkeeping.
+  // drops the hint on its own; re-seeding from a catalog or base model clears it explicitly.
   const [prefillDiff, setPrefillDiff] = useState<Record<string, { was: string; now: string }>>({});
   // The edit dialog's stored-rate load is in flight. Pre-fill waits for it: diffing against the
   // still-empty form would mark every unit "was empty", and the load would then be dropped.
   const [ratesLoading, setRatesLoading] = useState(false);
+  // Which dialog opening the in-flight stored-rate load belongs to: a load that resolves after its
+  // dialog was closed (or another model opened) must neither seed nor re-enable the button.
+  const ratesLoadSeq = useRef(0);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [basePickerOpen, setBasePickerOpen] = useState(false);
   // The base-model list filters only on text typed since the field was focused: a value already
@@ -548,6 +551,8 @@ export function ModelGatewayPage() {
   };
 
   const closeDialog = () => {
+    ratesLoadSeq.current += 1;
+    setRatesLoading(false);
     setDialogOpen(false);
     setEditingId(null);
     setForm(EMPTY_FORM);
@@ -556,6 +561,8 @@ export function ModelGatewayPage() {
   };
 
   const openCreate = () => {
+    ratesLoadSeq.current += 1;
+    setRatesLoading(false);
     setEditingId(null);
     setForm(EMPTY_FORM);
     setPrefillDiff({});
@@ -591,16 +598,18 @@ export function ModelGatewayPage() {
     });
     setDialogOpen(true);
     // Best-effort: seed the current rates from the gateway so edits start from real numbers.
+    const seq = ++ratesLoadSeq.current;
     setRatesLoading(true);
     try {
       const prices = pricesFromPrefill((await getCostPrefill(m.model_name)).pricing);
+      if (seq !== ratesLoadSeq.current) return;
       // The dialog is already open while this loads: if the admin picked a base model (or typed
       // a price) in the meantime, those prices are newer than the stored ones and win.
       setForm((f) => (Object.keys(f.prices).length ? f : { ...f, prices }));
     } catch {
       /* no seed — admin enters rates */
     } finally {
-      setRatesLoading(false);
+      if (seq === ratesLoadSeq.current) setRatesLoading(false);
     }
   };
 
@@ -822,8 +831,8 @@ export function ModelGatewayPage() {
       return;
     }
     // Only the units this form shows and saves: an embedding model has no output price, and a
-    // web-search fee is only billed once the capability is on.
-    const shown = new Set(visiblePricingUnits(form.mode, {}, form.supports_web_search).map((u) => u.unit));
+    // web-search fee is only added once the capability is on (one already shown is corrected).
+    const shown = new Set(visiblePricingUnits(form.mode, form.prices, form.supports_web_search).map((u) => u.unit));
     prices = Object.fromEntries(Object.entries(prices).filter(([unit]) => shown.has(unit)));
     if (Object.keys(prices).length === 0) {
       toast.info('Gateway has no cost for this model yet — enter rates manually');
