@@ -102,7 +102,9 @@ around failing is **recorded, not refused**; the record is what lets the harness
   (`thinking_levels_for`, from the gateway's `supports_<effort>_reasoning_effort` flags) —
   `minimal`, then `low`, when it declares none — and records the first effort accepted, so the
   floor is always a level the admin also sees; the hook sends a thinking-off request as that
-  effort. `none` alone is not a floor everywhere: on Claude,
+  effort. The trade-off is accepted: a model LiteLLM accepts `minimal` on but whose picker does not
+  offer it (no `supports_minimal_reasoning_effort` flag) gets `low` as its floor, a little more
+  thinking than `none` alone would map to. `none` alone is not a floor everywhere: on Claude,
   LiteLLM turns it into no thinking parameter and no effort, so Opus 5.5 ran at its default effort
   with its thinking text omitted and nothing streamed (nannos#330); a real effort comes back as
   adaptive thinking with a readable summary. A deployment whose model map does not translate an
@@ -112,15 +114,18 @@ around failing is **recorded, not refused**; the record is what lets the harness
   `thinking` on a tool turn whose history carries no thinking blocks (after a replay strip, a
   cross-family failover, or a history from a non-thinking model); the turn keeps the floor effort
   but its thinking text is omitted again.
-- Two LiteLLM-native flags follow from the console's levels and the record, written on save and
-  with every recorded Test (`litellm_flags_for`), because LiteLLM's own request translation reads
-  them and nothing else would set them for a model its map does not list:
-  `supports_low_reasoning_effort: true` where the picker offers `low` (without some level flag,
-  under `drop_params`, LiteLLM drops `output_config.effort` and every effort — a user's pick and
-  the floor alike — runs at the model's default; Opus 5.5 on v1.103), and `thinking_always_on`
-  from `thinking_off`. Nothing else is mirrored: `supports_forced_tool_use` is not read from a
-  deployment's model_info, and `supports_response_schema: false` would make LiteLLM rewrite
-  `response_format` into a forced tool call the same models reject. Gemini 3.5 Flash is
+- One LiteLLM-native flag is written with every recorded Test (`litellm_flags_for`), because
+  LiteLLM's own request translation reads it and nothing else sets it for a model its map does not
+  list: `supports_low_reasoning_effort: true` where the picker offers `low` and the gateway's merged
+  view (the deployment over LiteLLM's map) has no opinion yet. Without some level flag, under
+  `drop_params`, LiteLLM drops `output_config.effort` and every effort — a user's pick and the floor
+  alike — runs at the model's default (Opus 5.5 on v1.103). It is not written at registration: the
+  form alone cannot see a map that excludes `low` (gpt-5.5-pro). LiteLLM registers it per backend
+  model, not per deployment. Nothing the probe measures is mirrored into LiteLLM's flags:
+  `supports_forced_tool_use` is not read from model_info, `supports_response_schema: false` would
+  make LiteLLM rewrite `response_format` into a forced tool call the same models reject, and
+  `thinking_always_on` would make LiteLLM strip the probe's own `thinking: disabled`, so a later
+  Test could never see thinking turn off. Gemini 3.5 Flash is
   *not* always-on: its floor, `minimal`, measured as no reasoning, so its "off" is real. When every
   off request is refused outright, the effort alone included (OpenAI-direct gpt-5 and the o-series
   400 on `none`), the record says `unsupported`: the hook strips the effort and the switch, so a

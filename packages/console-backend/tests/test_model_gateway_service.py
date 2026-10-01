@@ -446,7 +446,7 @@ async def test_an_always_on_floor_is_tried_from_the_levels_the_picker_offers(svc
     # The LiteLLM-native flags ride along, so the effort is actually sent next time.
     written = calls["patched"][0][1]["model_info"]
     assert written["supports_low_reasoning_effort"] is True
-    assert written["thinking_always_on"] is True
+    assert "thinking_always_on" not in written  # not mirrored: it would strip the probe's `disabled`
 
 
 @pytest.mark.parametrize(
@@ -454,28 +454,27 @@ async def test_an_always_on_floor_is_tried_from_the_levels_the_picker_offers(svc
     [
         # A reasoning model without a level flag: LiteLLM would drop every effort (nannos#330).
         ({"supports_reasoning": True}, {"supports_low_reasoning_effort": True}),
-        # The admin's own flag is never overridden, either way.
+        # Already decided — by LiteLLM's map in the merged view (gpt-5.5-pro excludes low) or by
+        # the deployment itself: never overridden.
         ({"supports_reasoning": True, "supports_low_reasoning_effort": False}, {}),
         ({"supports_reasoning": True, "supports_low_reasoning_effort": True}, {}),
         # Not a reasoning model: nothing to send an effort to.
         ({}, {}),
         ({"supports_reasoning": False}, {}),
-        # thinking_always_on mirrors the measured record, both ways.
-        (
-            {"supports_reasoning": True, "nannos_capabilities": {"thinking_off": "always_on"}},
-            {"supports_low_reasoning_effort": True, "thinking_always_on": True},
-        ),
-        ({"nannos_capabilities": {"thinking_off": "disabled"}}, {"thinking_always_on": False}),
+        # The record is never mirrored (thinking_always_on would strip the probe's `disabled`).
+        ({"supports_reasoning": True, "nannos_capabilities": {"thinking_off": "always_on"}}, {"supports_low_reasoning_effort": True}),
     ],
 )
-def test_litellm_flags_follow_the_offered_levels_and_the_record(info, expected):
+def test_litellm_effort_flag_follows_the_merged_view(info, expected):
     from console_backend.services.model_gateway_service import litellm_flags_for
 
     assert litellm_flags_for(info) == expected
 
 
 @pytest.mark.asyncio
-async def test_registration_writes_the_litellm_effort_flag(svc, monkeypatch):
+async def test_registration_sends_the_form_model_info_unchanged(svc, monkeypatch):
+    """Round 3: the form has no level flags and no map, so a flag derived from it would override
+    LiteLLM's own `false` (gpt-5.5-pro) on every save. The flag is written at Test time instead."""
     sent: list = []
 
     async def _fake_request(method, path, **kwargs):
@@ -483,10 +482,20 @@ async def test_registration_writes_the_litellm_effort_flag(svc, monkeypatch):
         return {"model_info": {"id": "new"}}
 
     monkeypatch.setattr(svc, "_request", _fake_request)
-    await svc.register_model("m", {"model": "bedrock/eu.anthropic.claude-opus-5-5"}, {"supports_reasoning": True})
+    await svc.register_model("m", {"model": "openai/gpt-5.5-pro"}, {"supports_reasoning": True})
     (_, path, body), = sent
     assert path == "/model/new"
-    assert body["model_info"] == {"supports_reasoning": True, "supports_low_reasoning_effort": True}
+    assert body["model_info"] == {"supports_reasoning": True}
+
+
+@pytest.mark.asyncio
+async def test_a_test_respects_a_map_that_excludes_low(svc, monkeypatch):
+    calls = _probe_gateway(
+        svc, monkeypatch, deployment=_chat_deployment(supports_reasoning=True, supports_low_reasoning_effort=False)
+    )
+    await svc.test_model("m")
+    written = calls["patched"][0][1]["model_info"]
+    assert "supports_low_reasoning_effort" not in written
 
 
 @pytest.mark.asyncio
