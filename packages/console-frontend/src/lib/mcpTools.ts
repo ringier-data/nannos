@@ -57,8 +57,10 @@ const RENDERABLE = new Set(['string', 'number', 'integer', 'boolean']);
  * argument, not the branch). Anything else is returned as it is.
  *
  * Read here rather than relied on from the backend, which unwraps it for its own reasons
- * (model providers that reject the spelling): an `Optional[Enum]` argument must stay a
- * dropdown whether or not a schema arrives cleaned.
+ * (model providers that reject the spelling), so the form does not depend on that
+ * cleaning. Only an inline branch is read: a `$ref` to `$defs` (raw Pydantic output for
+ * an enum) is left as it is, and the argument goes to the JSON editor — resolving refs
+ * stays the backend's job.
  */
 function unwrapOptional(prop: Record<string, unknown>): Record<string, unknown> {
   const variants = prop.anyOf ?? prop.oneOf;

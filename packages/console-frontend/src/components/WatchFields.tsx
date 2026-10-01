@@ -373,11 +373,16 @@ export function WatchFields({
                           patch({ check_args_exprs: next });
                         }}
                       />
-                      {toolSchema.params.length === 0 && toolSchema.complex.length === 0 && (
-                        <p className="text-muted-foreground text-xs">
-                          No argument schema — use “Edit as JSON” if it needs any.
-                        </p>
-                      )}
+                      {toolSchema.params.length === 0 &&
+                        toolSchema.complex.length === 0 &&
+                        (selectedTool?.input_schema ? (
+                          // A schema with no properties is an answer: the tool declares none.
+                          <p className="text-muted-foreground text-xs">This tool takes no arguments.</p>
+                        ) : (
+                          <p className="text-muted-foreground text-xs">
+                            No argument schema — use “Edit as JSON” if it needs any.
+                          </p>
+                        ))}
                       {toolSchema.complex.length > 0 && (
                         <p className="text-muted-foreground text-xs">
                           {toolSchema.complex.join(', ')}{' '}
@@ -670,6 +675,9 @@ export function WatchFields({
                           is. To put what matched into the message, choose “Written from what
                           matched” and describe it there; otherwise reword it without braces.
                         </FieldError>
+                      ) : errors.notification_message ? (
+                        // A refusal the pattern above did not foresee: the server's word.
+                        <FieldError>{errors.notification_message}</FieldError>
                       ) : (
                         !hasMessage && (
                           <p className="text-muted-foreground text-xs">

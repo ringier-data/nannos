@@ -65,6 +65,40 @@ export type {
  * began rejecting unparsable watch conditions: the message explains which syntax works,
  * and it was being thrown away.
  */
+/**
+ * Pydantic's prefix on a validator's message ("Value error, …"): the field is already
+ * named by `loc`, and the prefix is the library's, not the message's.
+ */
+function validatorMessage(msg: string): string {
+  return msg.replace(/^Value error, /, '');
+}
+
+/**
+ * The 422's messages keyed by top-level body field, so a form can show each under its
+ * control instead of in one banner. Nested locations are left to the banner.
+ */
+export function apiFieldErrors(error: unknown): Record<string, string> {
+  const detail = (error as { detail?: unknown } | null)?.detail;
+  const out: Record<string, string> = {};
+  if (!Array.isArray(detail)) return out;
+  for (const item of detail) {
+    const { loc, msg } = (item ?? {}) as { loc?: unknown[]; msg?: string };
+    if (!msg || !Array.isArray(loc) || loc[0] !== 'body' || loc.length !== 2) continue;
+    out[String(loc[1])] ??= validatorMessage(msg);
+  }
+  return out;
+}
+
+/** An API failure: the banner text, plus whatever the 422 said about individual fields. */
+export class ApiError extends Error {
+  readonly fieldErrors: Record<string, string>;
+
+  constructor(message: string, fieldErrors: Record<string, string> = {}) {
+    super(message);
+    this.fieldErrors = fieldErrors;
+  }
+}
+
 export function formatApiError(error: unknown): string {
   const detail = (error as { detail?: unknown } | null)?.detail;
   if (typeof detail === 'string') return detail;
@@ -72,8 +106,9 @@ export function formatApiError(error: unknown): string {
     const lines = detail
       .map((item) => {
         if (typeof item === 'string') return item;
-        const { loc, msg } = (item ?? {}) as { loc?: unknown[]; msg?: string };
-        if (!msg) return null;
+        const { loc, msg: raw } = (item ?? {}) as { loc?: unknown[]; msg?: string };
+        if (!raw) return null;
+        const msg = validatorMessage(raw);
         // Skip the "body" prefix every FastAPI location carries.
         const field = Array.isArray(loc) ? loc.filter((p) => p !== 'body').join('.') : '';
         return field ? `${field}: ${msg}` : msg;
@@ -362,7 +397,7 @@ export async function createScheduledJob(body: ScheduledJobCreateExtended): Prom
     url: '/api/v1/scheduler/jobs',
     body,
   });
-  if (error) throw new Error(formatApiError(error));
+  if (error) throw new ApiError(formatApiError(error), apiFieldErrors(error));
   return data as ScheduledJob;
 }
 

@@ -60,6 +60,7 @@ import {
   getDeliveryChannels,
   formatApiError,
   generateJobDraft,
+  ApiError,
   createScheduledJob,
   type DeliveryChannel,
   listJobs,
@@ -88,6 +89,17 @@ import { describeCron } from '@/lib/cron';
 import { AiBadge, FieldError, SectionHeader } from '@/components/formChrome';
 import { toast } from 'sonner';
 import { DeliveryChannelOptions, DeliveryReachabilityNote } from '@/components/scheduler/DeliveryChannelOptions';
+
+/** The fields the create form shows a server-side refusal under. */
+const FORM_ERROR_FIELDS = new Set([
+  'name',
+  'check_tool',
+  'check_args',
+  'cel_expr',
+  'llm_condition',
+  'notification_message',
+  'sub_agent_id',
+]);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -640,7 +652,19 @@ function CreateJobDialog({
       qc.invalidateQueries({ queryKey: ['scheduler-jobs'] });
       onCreated(created.id);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      // A refusal the form has a control for is shown under that control; only the
+      // rest goes to the banner, which would otherwise repeat it in the API's wording.
+      const onFields =
+        e instanceof ApiError
+          ? Object.fromEntries(Object.entries(e.fieldErrors).filter(([k]) => FORM_ERROR_FIELDS.has(k)))
+          : {};
+      if (Object.keys(onFields).length > 0) {
+        setFieldErrors((prev) => ({ ...prev, ...onFields }));
+        const rest = e instanceof ApiError && Object.keys(e.fieldErrors).some((k) => !FORM_ERROR_FIELDS.has(k));
+        setError(rest ? (e as Error).message : null);
+      } else {
+        setError(e instanceof Error ? e.message : String(e));
+      }
     } finally {
       setSubmitting(false);
     }
