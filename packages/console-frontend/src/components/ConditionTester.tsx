@@ -116,7 +116,11 @@ export function ConditionTester({
     [hasPayload, payload],
   );
   // NUL-separated: none of the parts can contain one (JSON escapes it, expressions are typed).
-  const requestKey = `${hasPayload ? payloadKey : '-'}\0${prevKey}\0${cel}\0${judge}`;
+  // Memoised: payloadKey and prevKey can be tens of kilobytes, and this runs every render.
+  const requestKey = useMemo(
+    () => `${hasPayload ? payloadKey : '-'}\0${prevKey}\0${cel}\0${judge}`,
+    [hasPayload, payloadKey, prevKey, cel, judge],
+  );
   useEffect(() => {
     if (!hasPayload && !parseCheckOnly) return;
     if (!cel && !judge) return;

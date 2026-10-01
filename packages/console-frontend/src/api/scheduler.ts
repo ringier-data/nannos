@@ -13,6 +13,8 @@
  * raw calls below are the CRUD ones whose bodies are still wider than the generated
  * types (createScheduledJob's delivery_channel_id, for one).
  */
+import { describeTextError } from '@/lib/utils';
+
 import { client } from './generated/client.gen';
 import { totalCountFrom } from './total-count';
 import {
@@ -116,15 +118,7 @@ export class ApiError extends Error {
  * and it was being thrown away.
  */
 export function formatApiError(error: unknown): string {
-  // A body that is not JSON comes from something in front of the backend (a proxy's
-  // 502 page while it restarts), and its HTML read as the error itself.
-  if (typeof error === 'string') {
-    const title = /<title>([^<]*)<\/title>/i.exec(error)?.[1]?.trim();
-    if (title || /^\s*</.test(error)) {
-      return `The console backend could not be reached${title ? ` (${title})` : ''}. Try again in a moment.`;
-    }
-    return error.trim() || 'The request failed with no explanation.';
-  }
+  if (typeof error === 'string') return describeTextError(error);
   const detail = (error as { detail?: unknown } | null)?.detail;
   if (typeof detail === 'string') return detail;
   if (Array.isArray(detail)) {

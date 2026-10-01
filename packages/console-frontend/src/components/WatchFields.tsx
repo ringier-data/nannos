@@ -282,7 +282,12 @@ export function WatchFields({
           prev: storedResult ?? null,
         });
         if (!dyn.valid) {
-          setCheck({ loading: false, error: `Dynamic arguments failed: ${dyn.error ?? 'unresolvable'}` });
+          // As on the risk prompt below: nothing was called, so the last response stands.
+          setCheck((last) => ({
+            ...last,
+            loading: false,
+            error: `Dynamic arguments failed: ${dyn.error ?? 'unresolvable'}`,
+          }));
           return;
         }
         callArgs = dyn.resolved ?? callArgs;
