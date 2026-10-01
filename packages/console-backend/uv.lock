@@ -644,7 +644,7 @@ wheels = [
 
 [[package]]
 name = "console-backend"
-version = "2.3.0"
+version = "2.3.1"
 source = { virtual = "." }
 dependencies = [
     { name = "a2a-sdk", extra = ["all"] },
