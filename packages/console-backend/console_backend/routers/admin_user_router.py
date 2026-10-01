@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.session import get_db_session
-from ..dependencies import require_admin
+from ..dependencies import require_admin, require_auth
 from ..models.audit import AuditAction, AuditEntityType
 from ..models.user import (
     BulkUserOperationRequest,
@@ -539,16 +539,14 @@ async def start_impersonation(
     )
     await db.commit()
 
-    logger.info(
-        f"Impersonation started: {admin.email} (admin) -> {target_user.email} (target_user_id: {target_user.id})"
-    )
+    logger.info(f"Impersonation started: admin {admin.id} -> target user {target_user.id}")
 
 
 @router.post("/impersonate/stop")
 async def stop_impersonation(
     request: Request,
     db: DbSession,
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_auth),
 ) -> None:
     """Stop impersonating a user (admin only).
 
@@ -571,6 +569,12 @@ async def stop_impersonation(
     # Determine who to log as (original admin if impersonating, current user otherwise)
     actor_user = original_user if original_user else admin
 
+    # Ending an impersonation needs only the administrator flag, not require_admin's active-
+    # status gate: a suspended admin must still be able to drop one, or the client keeps the
+    # stored id and the impersonation silently resumes once the account is reactivated.
+    if not actor_user.is_administrator:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only administrators can stop impersonation")
+
     # Log the impersonation stop
     audit_service = get_audit_service(request)
     await audit_service.log_action(
@@ -586,4 +590,4 @@ async def stop_impersonation(
     )
     await db.commit()
 
-    logger.info(f"Impersonation stopped by {actor_user.email}")
+    logger.info(f"Impersonation stopped by {actor_user.id}")

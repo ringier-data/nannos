@@ -465,7 +465,7 @@ async def _other_session(postgres_with_migrations):
     """A second connection to the test database, for a transaction that runs alongside pg_session."""
     engine = create_async_engine(postgres_with_migrations["dsn"])
     try:
-        async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+        async with async_sessionmaker(engine, expire_on_commit=False, close_resets_only=False)() as session:
             await session.execute(text(f"SET search_path TO {postgres_with_migrations['schema']}"))
             await session.commit()
             yield session

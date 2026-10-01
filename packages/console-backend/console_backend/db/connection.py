@@ -67,6 +67,9 @@ def _make_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSessio
         class_=AsyncSession,
         expire_on_commit=False,
         autoflush=False,
+        # Reusing a session after its `async with` block must raise, not silently check out a
+        # connection nothing returns: that leak exhausted the pool once already (#327).
+        close_resets_only=False,
     )
 
 

@@ -992,7 +992,7 @@ async def pg_session(postgres_with_migrations):
         echo=False,
     )
 
-    async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False, close_resets_only=False)
 
     async with async_session() as session:
         await session.execute(text(f"SET search_path TO {postgres_with_migrations['schema']}"))

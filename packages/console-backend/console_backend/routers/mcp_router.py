@@ -314,7 +314,7 @@ async def _list_mcp_tools(
     # MCP tools are tied to the user's access token, not their user object
     if hasattr(request.state, "original_user") and request.state.original_user:
         logger.info(
-            f"Admin {request.state.original_user.email} is impersonating {user.email}. "
+            f"Admin {request.state.original_user.id} is impersonating {user.id}. "
             "Returning empty MCP tools list (impersonated user's token not available)"
         )
         return MCPToolsResponse(tools=[])

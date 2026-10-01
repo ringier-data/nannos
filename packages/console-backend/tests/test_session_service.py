@@ -15,7 +15,7 @@ async def session_service(postgres_with_migrations, mock_config):
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
     engine = create_async_engine(postgres_with_migrations["dsn"], echo=False)
-    factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+    factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False, close_resets_only=False)
 
     # Patch get_async_session_factory to return our test factory
     with patch("console_backend.services.session_service.get_async_session_factory", return_value=factory):

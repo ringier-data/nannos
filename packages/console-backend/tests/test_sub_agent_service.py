@@ -2151,7 +2151,7 @@ class TestConcurrentVersionCreation:
         from sqlalchemy.orm import sessionmaker
 
         engine = create_async_engine(postgres_with_migrations["dsn"], echo=False)
-        factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False, close_resets_only=False)
         schema = postgres_with_migrations["schema"]
         return engine, factory, schema
 

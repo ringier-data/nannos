@@ -77,6 +77,13 @@ function mergePermissions(): UserPermissions {
   };
 }
 
+// Machine-readable code on the backend's 503 for an impersonated user it cannot look up
+// (SessionMiddleware.IMPERSONATION_UNAVAILABLE). Keyed on the code, never on the message.
+const IMPERSONATION_UNAVAILABLE = 'impersonation_unavailable';
+
+const isImpersonationUnavailable = (err: unknown): boolean =>
+  !!err && typeof err === 'object' && (err as { code?: unknown }).code === IMPERSONATION_UNAVAILABLE;
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient();
   const { data, isLoading, error } = useQuery({
@@ -85,6 +92,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // The thrown error for HTTP errors is the parsed JSON body (e.g. { detail: "Not authenticated" }),
     // while network errors are TypeError instances.
     retry: (failureCount, err) => {
+      // Not transient: the recovery effect below ends the impersonation instead
+      if (isImpersonationUnavailable(err)) {
+        return false;
+      }
       // Don't retry if the backend explicitly said "not authenticated"
       if (
         err &&
@@ -104,6 +115,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const user = data as User | null;
   const isAuthenticated = !!user && !error;
+  // Reported as loading, not unauthenticated, so the recovery effect below refetches
+  // /auth/me on the current route instead of after a round trip through /login.
+  const impersonationUnavailable = isImpersonationUnavailable(error);
   const isAdmin = user?.is_administrator ?? false;
   const isGroupManager = useMemo(() => {
     return user?.groups?.some((group) => group.group_role === 'manager') ?? false;
@@ -230,6 +244,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const stopImpersonation = useCallback(async () => {
+    // Drop the impersonation locally before anything can fail or be cut short by a
+    // navigation: a stored id left behind silently resumes impersonating on the next
+    // request that sends it. The stop call below only records the audit event.
+    clearImpersonatedUserId();
+    setImpersonatedUserIdState(null);
+    // Drop the target's cached data in the same moment, so nothing on screen still shows
+    // the target while requests already go out as the admin; /auth/me refetches without
+    // waiting on the audit call.
+    const reset = queryClient.resetQueries();
+
     try {
       // Call backend to stop impersonation (logs audit)
       const response = await fetch('/api/v1/admin/users/impersonate/stop', {
@@ -245,25 +269,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const error = await response.json().catch(() => ({ detail: 'Failed to stop impersonation' }));
         throw new Error(error.detail || 'Failed to stop impersonation');
       }
-
-      // Clear local state FIRST
-      clearImpersonatedUserId();
-      setImpersonatedUserIdState(null);
-
-      // Force refetch all queries without impersonation header
-      // Use resetQueries to clear cache and force immediate refetch
-      await queryClient.resetQueries();
     } catch (error) {
       console.error('Failed to stop impersonation:', error);
       throw error;
+    } finally {
+      await reset;
     }
   }, [queryClient]);
+
+  // The backend answers 503 when it cannot look up the impersonated user. Every request
+  // carries the stored id, /auth/me included, so without this the admin would be bounced
+  // to /login on every attempt and could never reach the Stop button.
+  useEffect(() => {
+    if (impersonatedUserId && impersonationUnavailable) {
+      stopImpersonation().catch(() => {});
+    }
+  }, [impersonatedUserId, impersonationUnavailable, stopImpersonation]);
 
   return (
     <AuthContext.Provider
       value={{
         user: isAuthenticated ? user : null,
-        isLoading,
+        isLoading: isLoading || impersonationUnavailable,
         isAuthenticated,
         error: error as Error | null,
         permissions,

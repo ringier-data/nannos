@@ -4,14 +4,22 @@ import logging
 from collections.abc import Awaitable, Callable
 
 from fastapi import Request, Response
+from fastapi.responses import JSONResponse
+from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from ..config import config
 from ..db import get_async_session_factory
 from ..dependencies import get_admin_mode, get_impersonated_user_id
+from ..models.user import User, UserStatus
+from ..services.user_service import UserService
 from ..utils.cookie_signer import verify_cookie
 
 logger = logging.getLogger(__name__)
+
+#: `code` on the 503 for an impersonated user that cannot be looked up. The console keys its
+#: recovery on it (AuthContext.tsx), so it is a contract: change both sides together.
+IMPERSONATION_UNAVAILABLE = "impersonation_unavailable"
 
 
 class SessionMiddleware(BaseHTTPMiddleware):
@@ -48,6 +56,21 @@ class SessionMiddleware(BaseHTTPMiddleware):
                     session_factory = get_async_session_factory()
                     async with session_factory() as db:
                         user = await user_service.get_user(db, stored_session.user_id)
+                        try:
+                            impersonated_user = (
+                                await self._resolve_impersonation(request, db, user_service, user) if user else None
+                            )
+                        except Exception:
+                            # Fail closed: the console believes it is impersonating, so running
+                            # this request as the admin would act on the wrong account.
+                            logger.exception(f"Impersonation lookup failed for admin {user.id}")
+                            return JSONResponse(
+                                status_code=503,
+                                content={
+                                    "detail": "Impersonation unavailable: the user lookup failed",
+                                    "code": IMPERSONATION_UNAVAILABLE,
+                                },
+                            )
                     if user:
                         request.state.session_id = session_id
                         request.state.session = stored_session
@@ -56,36 +79,13 @@ class SessionMiddleware(BaseHTTPMiddleware):
                         request.state.access_token = stored_session.access_token
                         request.state.access_token_expires_at = stored_session.access_token_expires_at
                         request.state.refresh_token = stored_session.refresh_token
-                        logger.debug(f"Session loaded for user: {user.email}")
-
-                        # Handle impersonation: admin can impersonate another user
-                        impersonated_user_id = get_impersonated_user_id(request)
-                        if impersonated_user_id:
-                            logger.info(f"Impersonation header detected: {impersonated_user_id}")
-                            admin_mode = get_admin_mode(request)
-                            # Only allow impersonation if user is admin and admin mode is enabled
-                            if user.is_administrator and admin_mode:
-                                impersonated_user = await user_service.get_user(db, impersonated_user_id)
-                                if impersonated_user:
-                                    # Store original user for audit logging
-                                    request.state.original_user = user
-                                    # Override request.state.user with impersonated user
-                                    request.state.user = impersonated_user
-                                    logger.info(
-                                        f"✓ Impersonation active: Admin {user.email} → User {impersonated_user.email}"
-                                    )
-                                else:
-                                    logger.warning(
-                                        f"Admin {user.email} attempted to impersonate non-existent user: "
-                                        f"{impersonated_user_id}"
-                                    )
-                            else:
-                                logger.warning(
-                                    f"User {user.email} (admin={user.is_administrator}, admin_mode={admin_mode}) "
-                                    f"attempted to impersonate user {impersonated_user_id} without proper privileges"
-                                )
-                        else:
-                            logger.debug(f"No impersonation header for {user.email}")
+                        logger.debug(f"Session loaded for user: {user.id}")
+                        if impersonated_user:
+                            # Store original user for audit logging
+                            request.state.original_user = user
+                            # Override request.state.user with impersonated user
+                            request.state.user = impersonated_user
+                            logger.info(f"✓ Impersonation active: Admin {user.id} → User {impersonated_user.id}")
                     else:
                         logger.debug(f"User not found for session: {session_id}")
                 else:
@@ -96,3 +96,35 @@ class SessionMiddleware(BaseHTTPMiddleware):
             logger.debug("No session cookie found in request")
 
         return await call_next(request)
+
+    @staticmethod
+    async def _resolve_impersonation(
+        request: Request, db: AsyncSession, user_service: UserService, user: User
+    ) -> User | None:
+        """Return the user an admin asked to impersonate, or None.
+
+        Raises when the target lookup itself fails, so the caller can fail closed rather
+        than read a database error as "no such user" and carry on as the admin.
+
+        Runs inside the caller's session block: a closed AsyncSession silently checks out
+        a fresh connection on reuse and nothing checks it back in, so it stays out of the
+        pool until the garbage collector terminates it — impersonated requests exhausted
+        the pool faster than GC reclaimed them.
+        """
+        impersonated_user_id = get_impersonated_user_id(request)
+        if not impersonated_user_id:
+            logger.debug(f"No impersonation header for {user.id}")
+            return None
+        logger.info(f"Impersonation header detected: {impersonated_user_id}")
+        admin_mode = get_admin_mode(request)
+        # Only an active admin with admin mode enabled may impersonate
+        if not (user.is_administrator and admin_mode and user.status == UserStatus.ACTIVE):
+            logger.warning(
+                f"User {user.id} (admin={user.is_administrator}, admin_mode={admin_mode}, status={user.status.value}) "
+                f"attempted to impersonate user {impersonated_user_id} without proper privileges"
+            )
+            return None
+        impersonated_user = await user_service.fetch_user(db, impersonated_user_id)
+        if not impersonated_user:
+            logger.warning(f"Admin {user.id} attempted to impersonate non-existent user: {impersonated_user_id}")
+        return impersonated_user
