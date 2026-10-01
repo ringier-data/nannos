@@ -58,13 +58,13 @@ class SessionMiddleware(BaseHTTPMiddleware):
                         request.state.access_token = stored_session.access_token
                         request.state.access_token_expires_at = stored_session.access_token_expires_at
                         request.state.refresh_token = stored_session.refresh_token
-                        logger.debug(f"Session loaded for user: {user.email}")
+                        logger.debug(f"Session loaded for user: {user.id}")
                         if impersonated_user:
                             # Store original user for audit logging
                             request.state.original_user = user
                             # Override request.state.user with impersonated user
                             request.state.user = impersonated_user
-                            logger.info(f"✓ Impersonation active: Admin {user.email} → User {impersonated_user.email}")
+                            logger.info(f"✓ Impersonation active: Admin {user.id} → User {impersonated_user.id}")
                     else:
                         logger.debug(f"User not found for session: {session_id}")
                 else:
@@ -88,18 +88,18 @@ class SessionMiddleware(BaseHTTPMiddleware):
             return None
         impersonated_user_id = get_impersonated_user_id(request)
         if not impersonated_user_id:
-            logger.debug(f"No impersonation header for {user.email}")
+            logger.debug(f"No impersonation header for {user.id}")
             return None
         logger.info(f"Impersonation header detected: {impersonated_user_id}")
         admin_mode = get_admin_mode(request)
         # Only allow impersonation if user is admin and admin mode is enabled
         if not (user.is_administrator and admin_mode):
             logger.warning(
-                f"User {user.email} (admin={user.is_administrator}, admin_mode={admin_mode}) "
+                f"User {user.id} (admin={user.is_administrator}, admin_mode={admin_mode}) "
                 f"attempted to impersonate user {impersonated_user_id} without proper privileges"
             )
             return None
         impersonated_user = await user_service.get_user(db, impersonated_user_id)
         if not impersonated_user:
-            logger.warning(f"Admin {user.email} attempted to impersonate non-existent user: {impersonated_user_id}")
+            logger.warning(f"Admin {user.id} attempted to impersonate non-existent user: {impersonated_user_id}")
         return impersonated_user
