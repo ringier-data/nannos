@@ -85,11 +85,14 @@ function unwrapOptional(prop: Record<string, unknown>): Record<string, unknown> 
  */
 export function declaresNoArguments(tool: McpTool | undefined): boolean {
   const schema = tool?.input_schema as
-    | { properties?: unknown; additionalProperties?: unknown }
+    | { properties?: unknown; additionalProperties?: unknown; required?: unknown }
     | undefined
     | null;
   if (!schema || typeof schema !== 'object') return false;
-  const { properties, additionalProperties } = schema;
+  const { properties, additionalProperties, required } = schema;
+  // A required argument with no property left is one the schema cleaning dropped (an
+  // untyped `Any`): the tool does take it.
+  if (Array.isArray(required) && required.length > 0) return false;
   return (
     typeof properties === 'object' &&
     properties !== null &&
