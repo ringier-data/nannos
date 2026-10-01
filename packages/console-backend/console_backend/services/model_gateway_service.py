@@ -181,6 +181,10 @@ class ModelGatewayError(Exception):
         self.status_code = status_code
 
 
+class ModelRenameRefused(ValueError):
+    """An edit that names another alias than the deployment serves: renames are not edits."""
+
+
 class ModelGatewayService:
     def __init__(self, base_url: str | None = None, master_key: str | None = None, timeout: float = 10.0):
         self._base_url = (base_url or config.model_gateway.url).rstrip("/")
@@ -334,14 +338,18 @@ class ModelGatewayService:
             return await self._patch_in_place(model_id, litellm_params, model_info)
         stored_params = previous.get("litellm_params") or {}
         stored_info = previous.get("model_info") or {}
+        if previous.get("model_name") != model_name:
+            # The alias is what the rate card, the defaults and the failover chains are keyed on; the
+            # edit form does not change it, and a rename here could land on an alias already served.
+            raise ModelRenameRefused(f"deployment {model_id} serves '{previous.get('model_name')}'; an edit cannot rename it")
         reasons = [f"clears {k}" for k in _CLEARABLE_LITELLM_PARAMS if stored_params.get(k) and not litellm_params.get(k)]
         reasons += [f"clears {k}" for k in _CLEARABLE_MODEL_INFO if stored_info.get(k) and not model_info.get(k)]
         if not _same_route(stored_params, {**stored_params, **litellm_params}):
             reasons.append("re-routes it")
+        if model_info.get("base_model") and model_info.get("base_model") != stored_info.get("base_model"):
+            reasons.append("changes its base model")  # the cost-map entry flags are derived from
         if model_info.get("mode", "chat") != stored_info.get("mode", "chat"):
             reasons.append("changes its mode")
-        if previous.get("model_name") != model_name:
-            reasons.append("renames it")
         if reasons:
             logger.info("update_model: the edit of '%s' %s; re-registering", model_name, ", ".join(reasons))
             return await self._reregister(model_id, model_name, litellm_params, model_info, previous)
@@ -369,8 +377,8 @@ class ModelGatewayService:
         private key, never serialized to the API client) so the endpoint can surface it rather
         than reporting a clean success.
         """
-        # Carry the probe record over while the deployment is still the same provider model in the
-        # same mode (an edit that only clears a field, or renames it).
+        # Carry the probe record over only while the deployment is still the same provider model in
+        # the same mode — in practice an edit that clears a field without changing the route.
         same_mode = previous and model_info.get("mode", "chat") == (previous.get("model_info") or {}).get("mode", "chat")
         if CAPABILITIES_KEY not in model_info and same_mode:
             if _same_route((previous.get("litellm_params") or {}), litellm_params):

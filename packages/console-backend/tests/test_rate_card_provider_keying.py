@@ -71,6 +71,7 @@ def _register_request(
     gateway = SimpleNamespace(
         register_model=AsyncMock(return_value={"model_info": {"id": "gw-1"}}),
         list_models=AsyncMock(return_value=registered or []),
+        get_model_by_id=AsyncMock(return_value=None),
         catalog_model=AsyncMock(side_effect=lambda mid: next((c for c in entries if c["model_id"] == mid), None)),
         # Readability is what separates "unknown model id" (422) from "catalog outage" (502).
         get_catalog=AsyncMock(return_value=entries),
@@ -344,6 +345,25 @@ async def test_editing_a_model_keeps_its_own_alias():
     assert result.status == "updated"
     assert result.stale_duplicate_model_id is None
     gateway.update_model.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_an_edit_cannot_rename_the_alias_and_writes_no_rate_card():
+    """The alias keys the rate card, defaults and chains, and the form does not offer a rename; a
+    rename could also land on an alias already served, leaving two deployments under it."""
+    import console_backend.routers.admin_model_gateway_router as router
+
+    request, rate_card_service, gateway = _register_request([1])
+    gateway.get_model_by_id = AsyncMock(return_value={"model_name": "claude-opus-4-7", "model_info": {"id": "gw-1"}})
+    gateway.update_model = AsyncMock()
+    body = _body({"model": "bedrock/us.anthropic.claude-opus-4-8-v1:0"})
+
+    with pytest.raises(HTTPException) as exc:
+        await router.edit_model("gw-1", request, body, AsyncMock(), user=SimpleNamespace(id="admin"))
+
+    assert exc.value.status_code == 422 and "cannot rename" in exc.value.detail
+    rate_card_service.create_model_rate_card.assert_not_awaited()
+    gateway.update_model.assert_not_awaited()
 
 
 @pytest.mark.asyncio

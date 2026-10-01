@@ -501,9 +501,9 @@ is served at once) — while the edit keeps the deployment the same model. Edits
 (new id, then delete the old), and any client still holding the old id — the form after a failed
 test, a second tab — re-registered again beside it (nannos#323). A merge can only add and overwrite,
 so an edit that re-routes the deployment (provider model, region, location, project, base URL),
-changes its mode, renames it or clears a field (`_CLEARABLE_*`; LiteLLM ignores a null except for
-cost fields) still re-registers: a different model must not keep the previous one's keys, flags or
-probe record. That is the only path that changes the id or can leave a
+changes its base model or mode, or clears a field (`_CLEARABLE_*`; LiteLLM ignores a null except
+for cost fields) still re-registers: a different model must not keep the previous one's keys, flags
+or probe record. An edit cannot rename the alias (422; the form does not offer it). That is the only path that changes the id or can leave a
 `updated_with_stale_duplicate`. The registration probe addresses its requests to the deployment
 id it records on, never the alias, so a duplicate behind an alias cannot make it measure a mix.
 

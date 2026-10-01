@@ -186,6 +186,52 @@ async def test_an_in_place_edit_keeps_the_probe_record(svc, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_an_edit_cannot_rename_the_alias(svc, monkeypatch):
+    from console_backend.services.model_gateway_service import ModelRenameRefused
+
+    gw = _Deployments(**{"dep-0": {"litellm_params": {"model": _SONNET}, "model_info": {"mode": "chat"}}})
+    monkeypatch.setattr(svc, "_request", gw.request)
+
+    with pytest.raises(ModelRenameRefused):
+        await svc.update_model("dep-0", "another-alias", {"model": _SONNET}, {"mode": "chat"})
+    assert list(gw.rows) == ["dep-0"] and gw.rows["dep-0"]["model_name"] == "m"
+
+
+@pytest.mark.asyncio
+async def test_a_changed_base_model_re_registers(svc, monkeypatch):
+    """The base model picks the cost-map entry the capability flags are derived from, so a new one
+    is another model, like a re-route (clearing it re-registers too, for the merge's sake)."""
+    gw = _Deployments(**{"dep-0": {"litellm_params": {"model": "azure/d"}, "model_info": {"mode": "chat", "base_model": "azure/gpt-4o"}}})
+    monkeypatch.setattr(svc, "_request", gw.request)
+
+    result = await svc.update_model("dep-0", "m", {"model": "azure/d"}, {"mode": "chat", "base_model": "azure/gpt-5"})
+
+    new_id = result["model_info"]["id"]
+    assert new_id != "dep-0" and gw.rows[new_id]["model_info"]["base_model"] == "azure/gpt-5"
+
+
+@pytest.mark.asyncio
+async def test_an_unlisted_deployment_is_edited_by_patch(svc, monkeypatch):
+    """Not listed even after the retries (a replica that has not loaded it): the PATCH reads the
+    gateway's database, so it edits the deployment, and nothing is registered beside it."""
+    gw = _Deployments(**{"dep-0": {"litellm_params": {"model": _SONNET}, "model_info": {"mode": "chat"}}})
+    real = gw.request
+
+    async def _lagging(method, path, **kwargs):
+        if path == "/model/info":
+            return {"data": []}
+        return await real(method, path, **kwargs)
+
+    monkeypatch.setattr(svc, "_request", _lagging)
+    monkeypatch.setattr("console_backend.services.model_gateway_service.asyncio.sleep", _noop_sleep)
+
+    result = await svc.update_model("dep-0", "m", {"model": _SONNET}, {"mode": "chat", "input_modes": ["text", "file"]})
+
+    assert result["model_info"]["id"] == "dep-0" and list(gw.rows) == ["dep-0"]
+    assert gw.rows["dep-0"]["model_info"]["input_modes"] == ["text", "file"]
+
+
+@pytest.mark.asyncio
 async def test_a_route_kept_from_outside_the_form_stays_in_place(svc, monkeypatch):
     """A stored key the form never sends (an api_base set on the gateway) survives the merge, so the
     route is unchanged — compared with what the merge stores, not with what the form sent."""
@@ -205,7 +251,6 @@ async def test_a_route_kept_from_outside_the_form_stays_in_place(svc, monkeypatc
         (dict(params={"model": "bedrock/eu.anthropic.claude-opus-5-5"}, info={"mode": "chat"}, name="m"), "another provider model"),
         (dict(params={"model": _SONNET, "aws_region_name": "us-east-1"}, info={"mode": "chat"}, name="m"), "another region"),
         (dict(params={"model": _SONNET}, info={"mode": "embedding"}, name="m"), "another mode"),
-        (dict(params={"model": _SONNET}, info={"mode": "chat"}, name="m-renamed"), "another alias"),
     ],
 )
 async def test_an_edit_that_makes_it_another_model_re_registers(svc, monkeypatch, edit, why):
@@ -221,7 +266,7 @@ async def test_an_edit_that_makes_it_another_model_re_registers(svc, monkeypatch
 
     new_id = result["model_info"]["id"]
     assert new_id != "dep-0" and list(gw.rows) == [new_id], why
-    assert "nannos_capabilities" not in gw.rows[new_id]["model_info"] or why == "another alias"
+    assert "nannos_capabilities" not in gw.rows[new_id]["model_info"], why
     assert "supports_reasoning" not in gw.rows[new_id]["model_info"], why
 
 
