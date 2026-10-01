@@ -208,7 +208,7 @@ export interface ProbeShapeResult {
 /** What the probe saw a chat model accept; absent for embedding models. */
 export interface ProbeReport {
   model: string;
-  /** The flags stored on the deployment: forced_tool_choice, response_format, thinking_off, thinking_replay. */
+  /** The flags stored on the deployment: forced_tool_choice, response_format, thinking_off, thinking_floor, thinking_replay. */
   capabilities: Record<string, unknown>;
   rejected: string[];
   results: ProbeShapeResult[];
@@ -297,7 +297,8 @@ export function recordedLimitations(model: GatewayModel): string[] {
   if (caps.forced_tool_choice === false) out.push('no forced tool choice');
   if (caps.response_format === false) out.push('no response_format');
   if (caps.thinking_off === 'between_tools') out.push('thinking off = between tools');
-  if (caps.thinking_off === 'always_on') out.push('always thinks');
+  if (caps.thinking_off === 'always_on')
+    out.push(typeof caps.thinking_floor === 'string' ? `always thinks (lowest: ${caps.thinking_floor})` : 'always thinks');
   if (caps.thinking_off === 'unsupported') out.push('no thinking-off switch');
   if (caps.thinking_replay === false) out.push('no thinking replay');
   return out;

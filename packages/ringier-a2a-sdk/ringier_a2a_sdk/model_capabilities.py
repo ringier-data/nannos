@@ -16,7 +16,7 @@ Three consumers read this module, and none of them may drift from the others:
 * **the gateway hook** (litellm-proxy ``custom_logger.py``) reads the stored flags off the
   deployment that actually serves a request — under failover that is not the alias the app
   asked for — and rewrites the request into a shape that deployment accepts
-  (``downgrade_forced_tool_choice``, ``thinking_off_switch``).
+  (``downgrade_forced_tool_choice``, ``apply_thinking_off``).
 * **agent-common** reads the same flags for the alias it is about to call and picks the
   non-forced structured-output path deliberately when forcing is known to fail.
 
@@ -65,10 +65,17 @@ RESPONSE_FORMAT = "response_format"
 #: str — how thinking goes off next to ``reasoning_effort: none`` and tools: an explicit
 #: ``thinking`` value (``"disabled"``, ``"between_tools"``), ``"none"`` (no explicit switch is
 #: taken; ``reasoning_effort: none`` alone turns it off), or ``"always_on"`` (nothing turns it
-#: off — Gemini 3's floor is ``thinkingLevel: minimal``/``low`` — so the console offers no
-#: thinking-off for the model and the gateway sends ``reasoning_effort: none`` alone, the lowest
-#: it goes), or ``"unsupported"`` (every off request was refused; see THINKING_OFF_UNSUPPORTED).
+#: off, so the console offers no thinking-off for the model and the gateway sends a thinking-off
+#: request as THINKING_FLOOR), or ``"unsupported"`` (every off request was refused; see
+#: THINKING_OFF_UNSUPPORTED).
 THINKING_OFF = "thinking_off"
+#: str — for an ``always_on`` deployment, the lowest ``reasoning_effort`` it accepted
+#: (``"minimal"`` or ``"low"``). The gateway sends a thinking-off request as this effort.
+#: ``reasoning_effort: none`` alone is not a floor everywhere: on Claude, LiteLLM turns it into
+#: no thinking parameter and no effort, so the model runs at its DEFAULT effort with its thinking
+#: text omitted (nannos#330). Absent when no level was accepted (or never measured): the gateway
+#: then sends ``none`` alone, as before the key existed.
+THINKING_FLOOR = "thinking_floor"
 #: bool | None — a signed thinking block from the model can be replayed with its tool result.
 #: ``None`` when the model returned no thinking block to replay (nothing to record).
 THINKING_REPLAY = "thinking_replay"
@@ -82,8 +89,12 @@ SHAPE_KEYS: dict[str, str] = {
     "named_tool_choice": FORCED_TOOL_CHOICE,
     "response_format": RESPONSE_FORMAT,
     "thinking_off": THINKING_OFF,
+    "thinking_floor": THINKING_FLOOR,
     "thinking_replay": THINKING_REPLAY,
 }
+
+#: The efforts tried as the floor of an always-on deployment, lowest first.
+THINKING_FLOOR_CANDIDATES: tuple[str, ...] = ("minimal", "low")
 
 THINKING_OFF_DISABLED = "disabled"
 THINKING_OFF_BETWEEN_TOOLS = "between_tools"
@@ -106,6 +117,7 @@ SHAPE_LABELS: dict[str, str] = {
     "named_tool_choice": "Named tool call",
     "response_format": "Structured output (response_format)",
     "thinking_off": "Thinking off",
+    "thinking_floor": "Lowest thinking level",
     "thinking_replay": "Thinking replay",
 }
 
@@ -115,6 +127,7 @@ STEP_LABELS: dict[str, str] = {
     "thinking_off:between_tools": "trying thinking: between_tools",
     "thinking_off:effort_only": "trying reasoning_effort: none alone",
     "thinking_off:control": "control turn with thinking on",
+    **{f"thinking_floor:{effort}": f"trying reasoning_effort: {effort}" for effort in THINKING_FLOOR_CANDIDATES},
     "thinking_replay:turn": "thinking turn",
     "thinking_replay:replay": "replaying the signed thinking block",
 }
@@ -412,6 +425,14 @@ def shape_thinking_off(model: str, switch: str | None) -> dict[str, Any]:
     )
     if switch is not None:
         body["thinking"] = {"type": switch}
+    return body
+
+
+def shape_thinking_floor(model: str, effort: str) -> dict[str, Any]:
+    """A thinking-off call as the gateway sends it to an always-on deployment: the thinking-off
+    question at a real, low ``effort`` instead of ``none``."""
+    body = shape_thinking_off(model, None)
+    body["reasoning_effort"] = effort
     return body
 
 
@@ -742,8 +763,7 @@ async def probe_model(
             continue
         if _reasoned(response):
             if switch is None:
-                # Nothing turns it off. The hook sends a thinking-off request as the floor: the
-                # effort alone where LiteLLM maps it there (Gemini 3), `low` on Claude (#330).
+                # Nothing turns it off: the floor is measured next (thinking_floor).
                 tried.append(f"{label}: {still_reasoned(response)}")
                 off_way = THINKING_OFF_ALWAYS_ON
                 off_error = "thinking cannot be turned off — " + "; ".join(tried)
@@ -759,6 +779,42 @@ async def probe_model(
     else:
         await add(ShapeResult("thinking_off", off_ok, off_error, note=off_note))
         report.capabilities[THINKING_OFF] = off_way
+
+    # Thinking floor: what a thinking-off request becomes where nothing turns thinking off -----
+    # The lowest effort the deployment accepts, measured rather than read off the model's name:
+    # `none` alone is the floor on some providers and the provider DEFAULT on others (Claude,
+    # where LiteLLM sends no thinking parameter and no effort — nannos#330), and an effort the
+    # gateway's own model map does not translate for this deployment is refused here, not on
+    # the first real turn.
+    if off_way is None:
+        # Only an always-on deployment has a floor, and that was not established.
+        await add(ShapeResult("thinking_floor", False, off_error, inconclusive=True))
+    elif off_way != THINKING_OFF_ALWAYS_ON:
+        await add(ShapeResult("thinking_floor", True, note="not needed: thinking can be turned off"))
+    else:
+        refused: list[str] = []
+        floor_inconclusive = ""
+        for effort in THINKING_FLOOR_CANDIDATES:
+            ok, _, err, transient = await attempt(shape_thinking_floor(model, effort), f"thinking_floor:{effort}")
+            if ok:
+                report.capabilities[THINKING_FLOOR] = effort
+                await add(ShapeResult("thinking_floor", True, note=f"thinking-off requests are sent as reasoning_effort: {effort}"))
+                break
+            if transient:
+                floor_inconclusive = err
+                break
+            refused.append(f"{effort}: {err}")
+        else:
+            await add(
+                ShapeResult(
+                    "thinking_floor",
+                    False,
+                    "no thinking level is accepted, so thinking-off requests keep the model's default effort — "
+                    + "; ".join(refused),
+                )
+            )
+        if floor_inconclusive:
+            await add(ShapeResult("thinking_floor", False, floor_inconclusive, inconclusive=True))
 
     # Thinking replay: only for models declared to think ---------------------------------
     if supports_reasoning:
@@ -827,22 +883,43 @@ def downgrade_forced_tool_choice(kwargs: dict[str, Any], caps: dict[str, Any]) -
     return True
 
 
-def thinking_off_switch(caps: dict[str, Any]) -> dict[str, str] | None:
-    """The explicit ``thinking`` value to send for thinking-off on a probed deployment:
-    ``{"type": "disabled"}``, ``{"type": "between_tools"}`` or ``None`` (send no ``thinking``,
-    the provider default for ``reasoning_effort: none`` is the best available). Returns
-    ``None`` also when unprobed — callers fall back to their own heuristic then, so tell the
-    two apart with ``THINKING_OFF in caps``."""
-    switch = caps.get(THINKING_OFF)
-    if switch in (THINKING_OFF_DISABLED, THINKING_OFF_BETWEEN_TOOLS):
-        return {"type": switch}
-    return None
+_ABSENT = object()
+
+
+def apply_thinking_off(kwargs: dict[str, Any], caps: dict[str, Any]) -> bool:
+    """Rewrite a thinking-off request (``reasoning_effort: none``) into the shape the serving
+    deployment's record says it takes. True when ``kwargs`` changed.
+
+    Clients ask for thinking off with the effort alone; the switch is the deployment's, never
+    the caller's, so any ``thinking`` a caller sent is dropped first (Gemini 3 400s on the pair).
+    Then, by the record:
+
+    * ``disabled`` / ``between_tools`` — that explicit ``thinking`` value is added;
+    * ``none`` — the effort goes alone;
+    * ``always_on`` — the effort becomes the measured THINKING_FLOOR (alone when none was);
+    * ``unsupported`` — the effort is removed too: a plain request, the provider's default;
+    * unprobed — nothing is guessed from the model's name: the effort goes alone.
+
+    Top-level keys only: each attempt gets its own shallow copy from the router, so the change
+    never leaks into a fallback attempt on another deployment — which reads its own record."""
+    if kwargs.get("reasoning_effort") != "none":
+        return False
+    before = (kwargs.get("reasoning_effort", _ABSENT), kwargs.get("thinking", _ABSENT))
+    kwargs.pop("thinking", None)
+    way = caps.get(THINKING_OFF)
+    if way in (THINKING_OFF_DISABLED, THINKING_OFF_BETWEEN_TOOLS):
+        kwargs["thinking"] = {"type": way}
+    elif way == THINKING_OFF_ALWAYS_ON and caps.get(THINKING_FLOOR):
+        kwargs["reasoning_effort"] = caps[THINKING_FLOOR]
+    elif way == THINKING_OFF_UNSUPPORTED:
+        del kwargs["reasoning_effort"]
+    return (kwargs.get("reasoning_effort", _ABSENT), kwargs.get("thinking", _ABSENT)) != before
 
 
 def thinking_off_sendable(caps: dict[str, Any]) -> bool:
     """Whether a thinking-off request (``reasoning_effort: none``) may be sent to this deployment
-    at all: the probe recorded a way it goes off (or that nothing does, where the effort alone
-    is its floor). False when unprobed — no opinion, so a caller sends no effort and the
+    at all: the probe recorded a way it goes off (or that nothing does, where the gateway sends
+    the measured floor instead). False when unprobed — no opinion, so a caller sends no effort and the
     provider default applies, as before any record existed — and False when every off request
     was refused (``unsupported``)."""
     return caps.get(THINKING_OFF) in (

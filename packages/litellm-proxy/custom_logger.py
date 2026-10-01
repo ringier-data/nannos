@@ -20,7 +20,6 @@ import asyncio
 import json
 import logging
 import os
-import re
 import sys
 
 import httpx
@@ -44,14 +43,11 @@ if _HERE not in sys.path:
 # reads them cannot drift. Unlike the span filter this is load-bearing — without it a
 # recorded limitation could not be honoured — so a missing module fails the proxy at startup.
 from nannos_model_capabilities import (  # noqa: E402
-    THINKING_OFF,
-    THINKING_OFF_ALWAYS_ON,
-    THINKING_OFF_UNSUPPORTED,
     THINKING_REPLAY,
+    apply_thinking_off,
     capabilities_of,
     downgrade_forced_tool_choice,
     is_probe_request,
-    thinking_off_switch,
 )
 
 CONSOLE_BACKEND_URL = os.environ.get("CONSOLE_BACKEND_URL", "").rstrip("/")
@@ -249,141 +245,20 @@ def _should_strip_cache_control(provider: str | None, model: str) -> bool:
     return bool(keep_markers) and not any(marker in model for marker in keep_markers)
 
 
-# Thinking off, per deployment. Clients ask for it with `reasoning_effort: "none"` alone; the
-# provider's own off switch is added here because only here is the deployment known.
-#
-# LiteLLM translates "none" into "send no thinking parameter". That turns thinking off where it
-# is opt-in, but on the Claude 5 family thinking is ON by default, so an omitted parameter
-# leaves it on: a small utility budget is spent thinking and the reply comes back empty at
-# finish_reason=length. Claude needs an explicit `thinking: {"type": "disabled"}`, which the
-# Anthropic translation keeps because it reads `reasoning_effort` before `thinking`.
-#
-# The same field must never reach anything else: on Gemini 3 LiteLLM maps `reasoning_effort`
-# to thinking_level and `thinking` to thinking_budget and refuses the pair with a 400 ("Cannot
-# specify both"). The clients used to add it themselves, which decided per alias — wrong for
-# an alias whose deployments or failover span families, and a guess when the alias is just a
-# name like "fast". So the hook sets it for Claude deployments and removes it everywhere else.
-#
-# A Claude deployment is recognised the way LiteLLM's own Anthropic handling does: "claude"
-# in the deployment's model string (bedrock/eu.anthropic.claude-…, vertex_ai/claude-…,
-# claude-… on the anthropic provider), or in `model_info.base_model` for a deployment that
-# names its model only through an ARN or other opaque id.
-_THINKING_DISABLED: dict[str, str] = {"type": "disabled"}
-#: Claude 5.5 and later reject `disabled` and turn thinking off with `between_tools` (measured
-#: by the registration probe on Sonnet 5.5). Used only where a deployment has no record.
-_THINKING_BETWEEN_TOOLS: dict[str, str] = {"type": "between_tools"}
-#: The lowest effort an always-thinking Claude takes, sent in place of a thinking-off "none".
-_CLAUDE_ALWAYS_ON_FLOOR = "low"
-# "claude-sonnet-5-5", "claude-opus-5", "claude-haiku-4-5-20251001", "claude-3-7-sonnet": the
-# first number after "claude-" (and an optional family word) is the major version, a single
-# digit right after it the minor. A date suffix is not a minor (it has more than one digit).
-_CLAUDE_VERSION = re.compile(r"claude-(?:[a-z]+-)?(\d+)(?:[-.](\d)(?!\d))?")
-_CLAUDE_FAMILY = re.compile(r"claude-([a-z]+)-\d")
-#: Families that think at every version and reject every off switch (`disabled` is a 400).
-_CLAUDE_ALWAYS_ON_FAMILIES = frozenset({"fable", "mythos"})
-
-
-def _claude_version(kwargs: dict) -> tuple[int, int] | None:
-    """(major, minor) of a Claude deployment, read the way _is_claude_deployment recognises one
-    (the model string, then `model_info.base_model`); None when neither names a version."""
-    base_model = (kwargs.get("model_info") or {}).get("base_model") or ""
-    for text in (str(kwargs.get("model") or ""), str(base_model)):
-        match = _CLAUDE_VERSION.search(text.lower())
-        if match:
-            return int(match.group(1)), int(match.group(2) or 0)
-    return None
-
-
-def _claude_family(kwargs: dict) -> str | None:
-    """The family word of a Claude deployment ("opus", "sonnet", "fable", …), read like
-    _claude_version; None for an id with none (e.g. "claude-3-7-sonnet")."""
-    base_model = (kwargs.get("model_info") or {}).get("base_model") or ""
-    for text in (str(kwargs.get("model") or ""), str(base_model)):
-        match = _CLAUDE_FAMILY.search(text.lower())
-        if match:
-            return match.group(1)
-    return None
-
-
-def _is_claude_deployment(kwargs: dict) -> bool:
-    base_model = (kwargs.get("model_info") or {}).get("base_model") or ""
-    return "claude" in f"{kwargs.get('model') or ''} {base_model}".lower()
-
-
-def _send_claude_floor(kwargs: dict) -> bool:
-    """Send a thinking-off request to an always-thinking Claude as its lowest effort.
-
-    On Claude the effort alone is not the floor: LiteLLM turns "none" into no thinking
-    parameter AND no `output_config.effort`, so the model runs at its default effort (medium
-    on Opus 5.5) with `display` at its default "omitted" — every thinking block comes back
-    empty and nothing streams (nannos#330). `low` is the floor, and LiteLLM sends it as
-    adaptive thinking with display "summarized"."""
-    kwargs["reasoning_effort"] = _CLAUDE_ALWAYS_ON_FLOOR
-    kwargs.pop("thinking", None)
-    return True
-
-
 def _apply_thinking_off(kwargs: dict) -> bool:
-    """Make a `reasoning_effort: "none"` request carry the deployment's thinking-off switch;
-    True when ``kwargs`` changed.
+    """Make a `reasoning_effort: "none"` request take the shape the serving deployment's probe
+    record says it accepts (nannos#318, #330); True when ``kwargs`` changed.
 
-    The switch is the deployment's, never the caller's: whatever `thinking` arrived is
-    replaced by the right one, or removed where none is accepted (Gemini 3 400s on the pair,
-    and an older client may still send it). Two sources, in order:
-
-    * A probed deployment (nannos#318) carries the answer in `model_info.nannos_capabilities`:
-      `disabled`, `between_tools` (Claude 5.5 and later reject `disabled` and want this),
-      `none` — no explicit switch is taken, so `reasoning_effort: none` goes alone — or
-      `always_on`: nothing turns thinking off. On Gemini 3 the effort alone is the lowest it
-      goes (LiteLLM maps it to the minimal thinking level), so it is sent the same way; on
-      Claude it is not, so the effort becomes `low` (nannos#330) — or `unsupported`: every off
-      request, the effort alone included, was refused (OpenAI-direct gpt-5 / o-series 400 on `none`), so both the
-      effort and any `thinking` are removed and the request goes out with the provider default.
-    * Unprobed: the family heuristic. Claude thinks by default and needs an explicit switch —
-      `disabled`, or `between_tools` on Sonnet 5.5 and later, which reject `disabled`; Opus
-      5.5+, Fable and Mythos take none and get the floor (`low`);
-      everything else gets no `thinking` at all.
+    Clients ask for thinking off with the effort alone; only here is the deployment known, so
+    only here can its switch be added — an explicit `thinking` value, the measured floor where
+    nothing turns thinking off, or neither. The decision is the record's alone
+    (``apply_thinking_off``); nothing is guessed from the model's name. An unprobed deployment
+    gets the effort alone: it has to be tested before the gateway knows more.
 
     Probe traffic (``is_probe_request``) is exempt — it sends each switch itself to learn
     which one the deployment takes, and rewriting it would make the probe measure this hook.
-
-    Top-level keys only: the router hands each attempt its own shallow copy of the caller's
-    request, so this never leaks into a fallback attempt on another deployment — which reads
-    its own record.
     """
-    if kwargs.get("reasoning_effort") != "none":
-        return False
-    caps = capabilities_of(kwargs.get("model_info"))
-    if caps.get(THINKING_OFF) == THINKING_OFF_UNSUPPORTED:
-        del kwargs["reasoning_effort"]
-        kwargs.pop("thinking", None)
-        return True
-    if THINKING_OFF in caps:
-        if caps[THINKING_OFF] == THINKING_OFF_ALWAYS_ON and _is_claude_deployment(kwargs):
-            return _send_claude_floor(kwargs)
-        wanted = thinking_off_switch(caps)
-    elif _is_claude_deployment(kwargs):
-        # Unprobed Claude, reached on a failover to an unprobed chain member or an unprobed twin
-        # deployment of a probed alias — the attempts the app did not decide for (review round
-        # 8). `disabled` is what Claude 5.0 needs (it thinks by default, #272). From 5.5 it is a
-        # 400: Sonnet turns thinking off with `between_tools`, and Opus — like Fable and Mythos
-        # at any version — takes no off switch at all, so it gets the floor.
-        version = _claude_version(kwargs)
-        family = _claude_family(kwargs)
-        if family in _CLAUDE_ALWAYS_ON_FAMILIES or (version and version >= (5, 5) and family != "sonnet"):
-            return _send_claude_floor(kwargs)
-        wanted = dict(_THINKING_BETWEEN_TOOLS if version and version >= (5, 5) else _THINKING_DISABLED)
-    else:
-        wanted = None
-    if wanted is None:
-        if "thinking" in kwargs:
-            del kwargs["thinking"]
-            return True
-        return False
-    if kwargs.get("thinking") == wanted:
-        return False
-    kwargs["thinking"] = wanted
-    return True
+    return apply_thinking_off(kwargs, capabilities_of(kwargs.get("model_info")))
 
 
 def _apply_forced_tool_choice(kwargs: dict) -> bool:
@@ -780,8 +655,8 @@ class NannosCostLogger(CustomLogger):
         no longer names the serving deployment, so this is the only place with a correct answer
         (ADR-0014).
 
-        * Thinking off: a `reasoning_effort: "none"` request gets the deployment's recorded
-          off-switch, or the family heuristic when unprobed. See ``_apply_thinking_off``.
+        * Thinking off: a `reasoning_effort: "none"` request takes the deployment's recorded
+          off-switch or floor; unprobed, the effort goes alone. See ``_apply_thinking_off``.
         * Forced tool_choice: downgraded to `auto` on a deployment recorded as rejecting it.
           See ``_apply_forced_tool_choice``.
         * thinking_blocks: also stripped on a deployment recorded as rejecting their replay.

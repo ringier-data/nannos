@@ -272,13 +272,14 @@ def reasoning_effort_for_choice(thinking_level: ThinkingLevel | str | None, mode
     Sending nothing inherits the provider default, which is thinking ON on the Claude 5
     family and Gemini 3 — a toggle that read "off" and did nothing. `REASONING_OFF` lets the
     gateway apply the serving deployment's recorded off switch (`between_tools` on Claude 5.5;
-    the lowest level where nothing turns it off, which the console then shows as always on).
+    the measured lowest level where nothing turns it off, which the console then shows as
+    always on).
 
     Only where the probe record of EVERY deployment behind the (resolved) alias says how thinking
     goes off (`thinking_off_sendable`).
-    Unprobed, the gateway would fall back to its family heuristic, which sends Claude 5.5 a
-    `thinking: disabled` it rejects; and where every off request was refused (`unsupported`)
-    sending one is that refusal. In both cases nothing is sent — the provider default, exactly
+    Unprobed, the gateway guesses nothing and sends the effort alone, which leaves thinking on
+    at the provider default on the Claude 5 family — no better than sending nothing; and where
+    every off request was refused (`unsupported`) sending one is that refusal. In both cases nothing is sent — the provider default, exactly
     as before the record existed. A failover attempt reads its own deployment's record in the
     gateway hook.
 
