@@ -421,6 +421,84 @@ async def test_chat_test_records_the_probe_on_the_deployment_and_returns_the_rep
 
 
 @pytest.mark.asyncio
+async def test_an_always_on_floor_is_tried_from_the_levels_the_picker_offers(svc, monkeypatch):
+    """nannos#330: the floor is one of the levels `thinking_levels_for` offers for the deployment
+    (here low/medium/high — no `minimal` flag), not the SDK's fixed pair."""
+    from ringier_a2a_sdk.model_capabilities import ProbeCallError
+
+    calls = _probe_gateway(svc, monkeypatch, deployment=_chat_deployment(supports_reasoning=True))
+
+    async def _always_on(body):
+        calls["probe_bodies"].append(body)
+        if "thinking" in body:
+            raise ProbeCallError("thinking.type is not supported for this model", status=400)
+        if body.get("stream"):
+            return 'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\ndata: [DONE]\n'
+        usage = {"completion_tokens_details": {"reasoning_tokens": 120}} if body.get("reasoning_effort") else {}
+        return {"choices": [{"message": {"role": "assistant", "content": "ok"}}], "usage": usage}
+
+    monkeypatch.setattr(svc, "_probe_call", _always_on)
+    await svc.test_model("m")
+    caps = calls["patched"][0][1]["model_info"]["nannos_capabilities"]
+    assert caps["thinking_off"] == "always_on"
+    assert caps["thinking_floor"] == "low"
+    assert not any(b.get("reasoning_effort") == "minimal" for b in calls["probe_bodies"])
+    # The LiteLLM-native flags ride along, so the effort is actually sent next time.
+    written = calls["patched"][0][1]["model_info"]
+    assert written["supports_low_reasoning_effort"] is True
+    assert "thinking_always_on" not in written  # not mirrored: it would strip the probe's `disabled`
+
+
+@pytest.mark.parametrize(
+    "info, expected",
+    [
+        # A reasoning model without a level flag: LiteLLM would drop every effort (nannos#330).
+        ({"supports_reasoning": True}, {"supports_low_reasoning_effort": True}),
+        # Already decided — by LiteLLM's map in the merged view (gpt-5.5-pro excludes low) or by
+        # the deployment itself: never overridden.
+        ({"supports_reasoning": True, "supports_low_reasoning_effort": False}, {}),
+        ({"supports_reasoning": True, "supports_low_reasoning_effort": True}, {}),
+        # Not a reasoning model: nothing to send an effort to.
+        ({}, {}),
+        ({"supports_reasoning": False}, {}),
+        # The record is never mirrored (thinking_always_on would strip the probe's `disabled`).
+        ({"supports_reasoning": True, "nannos_capabilities": {"thinking_off": "always_on"}}, {"supports_low_reasoning_effort": True}),
+    ],
+)
+def test_litellm_effort_flag_follows_the_merged_view(info, expected):
+    from console_backend.services.model_gateway_service import litellm_flags_for
+
+    assert litellm_flags_for(info) == expected
+
+
+@pytest.mark.asyncio
+async def test_registration_sends_the_form_model_info_unchanged(svc, monkeypatch):
+    """Round 3: the form has no level flags and no map, so a flag derived from it would override
+    LiteLLM's own `false` (gpt-5.5-pro) on every save. The flag is written at Test time instead."""
+    sent: list = []
+
+    async def _fake_request(method, path, **kwargs):
+        sent.append((method, path, kwargs.get("json")))
+        return {"model_info": {"id": "new"}}
+
+    monkeypatch.setattr(svc, "_request", _fake_request)
+    await svc.register_model("m", {"model": "openai/gpt-5.5-pro"}, {"supports_reasoning": True})
+    (_, path, body), = sent
+    assert path == "/model/new"
+    assert body["model_info"] == {"supports_reasoning": True}
+
+
+@pytest.mark.asyncio
+async def test_a_test_respects_a_map_that_excludes_low(svc, monkeypatch):
+    calls = _probe_gateway(
+        svc, monkeypatch, deployment=_chat_deployment(supports_reasoning=True, supports_low_reasoning_effort=False)
+    )
+    await svc.test_model("m")
+    written = calls["patched"][0][1]["model_info"]
+    assert "supports_low_reasoning_effort" not in written
+
+
+@pytest.mark.asyncio
 async def test_all_chains_are_declared_in_one_config_write(svc, monkeypatch):
     """Not LiteLLM's per-entry /fallback endpoints: they read-modify-write the row holding
     every chain through a 60 s cache they never invalidate, so a quick second edit worked on

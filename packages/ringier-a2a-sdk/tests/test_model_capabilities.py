@@ -97,6 +97,7 @@ async def test_a_permissive_model_records_every_capability_and_rejects_nothing()
         mc.FORCED_TOOL_CHOICE: True,
         mc.RESPONSE_FORMAT: True,
         mc.THINKING_OFF: mc.THINKING_OFF_DISABLED,
+        mc.THINKING_FLOOR: None,
         mc.THINKING_REPLAY: True,
     }
 
@@ -227,8 +228,103 @@ async def test_a_model_whose_effort_alone_still_reasons_is_always_on():
     assert not off.ok and not off.inconclusive and "cannot be turned off" in off.error
     # A reasoning reply is its own evidence: no control turn is needed.
     assert not any(b.get("reasoning_effort") == "high" for b in gw.bodies)
-    # The hook sends the effort alone — the lowest the model goes.
-    assert mc.thinking_off_switch(report.capabilities) is None
+    # The floor is measured, not assumed: the lowest effort it accepts becomes the record.
+    assert report.capabilities[mc.THINKING_FLOOR] == "minimal"
+    floor = next(r for r in report.results if r.shape == "thinking_floor")
+    assert floor.ok and "minimal" in floor.note
+
+
+@pytest.mark.asyncio
+async def test_an_always_on_floor_is_the_lowest_effort_accepted():
+    """Claude Opus 5.5: both switches 400, `none` alone still reasons (LiteLLM sends no effort,
+    so it runs at the DEFAULT one — nannos#330). The first candidate it accepts is the floor."""
+    refuse = lambda b: (
+        "not supported for this model" if "thinking" in b or b.get("reasoning_effort") == "minimal" else None
+    )
+    report = await mc.probe_model("opus", _Gateway(reject=refuse, floor=True))
+    assert report.capabilities[mc.THINKING_OFF] == mc.THINKING_OFF_ALWAYS_ON
+    assert report.capabilities[mc.THINKING_FLOOR] == "low"
+
+
+@pytest.mark.asyncio
+async def test_the_floor_is_tried_from_the_deployments_declared_levels():
+    """The console passes the levels its picker offers: the floor is the lowest of them that is
+    accepted, so it is always a level the admin also sees. Only the lowest two are tried."""
+    refuse = lambda b: "not supported" if "thinking" in b or b.get("reasoning_effort") == "low" else None
+    gw = _Gateway(reject=refuse, floor=True)
+    report = await mc.probe_model("opus", gw, floor_candidates=["low", "medium", "high"])
+    assert report.capabilities[mc.THINKING_FLOOR] == "medium"
+    tried = [b["reasoning_effort"] for b in gw.bodies if b.get("reasoning_effort") not in ("none", "high", None)]
+    assert "minimal" not in tried  # not a declared level, so never tried
+
+    refuse_all = lambda b: "not supported" if "thinking" in b or b.get("reasoning_effort") in ("low", "medium") else None
+    gw = _Gateway(reject=refuse_all, floor=True)
+    report = await mc.probe_model("opus", gw, floor_candidates=["low", "medium", "high"])
+    assert report.capabilities[mc.THINKING_FLOOR] is None
+    assert not any(b.get("reasoning_effort") == "high" and b.get("max_tokens") == 1024 for b in gw.bodies)
+
+
+@pytest.mark.asyncio
+async def test_no_declared_levels_falls_back_to_the_fixed_pair():
+    gw = _Gateway(reject=_GEMINI_3, floor=True)
+    report = await mc.probe_model("gemini", gw, floor_candidates=[])
+    assert report.capabilities[mc.THINKING_FLOOR] == "minimal"
+
+
+@pytest.mark.asyncio
+async def test_an_always_on_model_that_refuses_every_level_records_no_floor():
+    """A deployment the gateway's model map does not translate (a Bedrock ARN: every effort
+    becomes a `budget_tokens` the model rejects) has no floor to send; it is a limitation the
+    admin sees, and the gateway keeps sending `none` alone."""
+    refuse = lambda b: (
+        "budget_tokens is not supported" if "thinking" in b or b.get("reasoning_effort") in ("minimal", "low") else None
+    )
+    report = await mc.probe_model("arn", _Gateway(reject=refuse, floor=True))
+    # Written as None, not left out: a stored floor must not survive the merge (round 2).
+    assert report.capabilities[mc.THINKING_FLOOR] is None
+    floor = next(r for r in report.results if r.shape == "thinking_floor")
+    assert not floor.ok and not floor.inconclusive and "no thinking level is accepted" in floor.error
+    assert floor in report.limitations
+
+
+@pytest.mark.asyncio
+async def test_a_transient_floor_attempt_keeps_the_stored_floor():
+    gw = _Gateway(reject=_GEMINI_3, floor=True)
+
+    async def call(body):
+        if body.get("reasoning_effort") == "minimal":
+            raise mc.ProbeCallError("throttled", status=429)
+        return await gw(body)
+
+    report = await mc.probe_model("gemini", call)
+    assert mc.THINKING_FLOOR not in report.capabilities
+    assert mc.THINKING_FLOOR in report.inconclusive_keys
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_before_a_transient_failure_clears_the_stored_floor():
+    """Round 2: `minimal` refused outright, then `low` throttled. A stored `minimal` must not be
+    kept as inconclusive — it would 400 every thinking-off request."""
+    gw = _Gateway(reject=lambda b: "not supported" if "thinking" in b or b.get("reasoning_effort") == "minimal" else None, floor=True)
+
+    async def call(body):
+        if body.get("reasoning_effort") == "low":
+            raise mc.ProbeCallError("throttled", status=429)
+        return await gw(body)
+
+    report = await mc.probe_model("opus", call)
+    assert report.capabilities[mc.THINKING_FLOOR] is None
+    assert mc.THINKING_FLOOR in report.inconclusive_keys  # the row is still shown as unmeasured
+
+
+@pytest.mark.asyncio
+async def test_no_floor_is_measured_where_thinking_turns_off():
+    gw = _Gateway()
+    report = await mc.probe_model("m", gw)
+    assert report.capabilities[mc.THINKING_FLOOR] is None
+    floor = next(r for r in report.results if r.shape == "thinking_floor")
+    assert floor.ok and "not needed" in floor.note
+    assert not any(b.get("reasoning_effort") in mc.THINKING_FLOOR_CANDIDATES for b in gw.bodies if not b.get("thinking"))
 
 
 @pytest.mark.asyncio
@@ -537,11 +633,39 @@ def test_thinking_off_is_sendable_only_where_the_record_says_how_it_goes_off():
         assert mc.thinking_off_sendable({mc.THINKING_OFF: way}) is True
 
 
-def test_thinking_off_switch_follows_the_record():
-    assert mc.thinking_off_switch({}) is None
-    assert mc.thinking_off_switch({mc.THINKING_OFF: "none"}) is None
-    assert mc.thinking_off_switch({mc.THINKING_OFF: "disabled"}) == {"type": "disabled"}
-    assert mc.thinking_off_switch({mc.THINKING_OFF: "between_tools"}) == {"type": "between_tools"}
+def _off(**extra):
+    return {"model": "m", "reasoning_effort": "none", **extra}
+
+
+@pytest.mark.parametrize(
+    "caps, effort, thinking",
+    [
+        ({mc.THINKING_OFF: "disabled"}, "none", {"type": "disabled"}),
+        ({mc.THINKING_OFF: "between_tools"}, "none", {"type": "between_tools"}),
+        ({mc.THINKING_OFF: "none"}, "none", None),
+        ({mc.THINKING_OFF: "always_on", mc.THINKING_FLOOR: "low"}, "low", None),
+        # Probed before the floor was measured, or no level was accepted: the effort alone.
+        ({mc.THINKING_OFF: "always_on"}, "none", None),
+        ({mc.THINKING_OFF: "unsupported"}, None, None),
+        # Unprobed: nothing is guessed from the model's name.
+        ({}, "none", None),
+    ],
+)
+def test_apply_thinking_off_follows_the_record(caps, effort, thinking):
+    # A caller-sent switch never survives: the switch is the deployment's.
+    kwargs = _off(thinking={"type": "enabled"})
+    assert mc.apply_thinking_off(kwargs, caps) is True
+    assert kwargs.get("reasoning_effort") == effort
+    assert kwargs.get("thinking") == thinking
+
+
+def test_apply_thinking_off_leaves_other_requests_alone():
+    kwargs = {"model": "m", "reasoning_effort": "high", "thinking": {"type": "adaptive"}}
+    assert mc.apply_thinking_off(kwargs, {mc.THINKING_OFF: "disabled"}) is False
+    assert kwargs == {"model": "m", "reasoning_effort": "high", "thinking": {"type": "adaptive"}}
+    # Already in the deployment's shape: nothing changes.
+    assert mc.apply_thinking_off(_off(thinking={"type": "disabled"}), {mc.THINKING_OFF: "disabled"}) is False
+    assert mc.apply_thinking_off(_off(), {}) is False
 
 
 @pytest.mark.asyncio
@@ -555,4 +679,10 @@ async def test_every_routable_shape_maps_to_a_record_key():
     report = await mc.probe_model("m", transient, supports_reasoning=True)
     routable = {r.shape for r in report.inconclusive if not r.unavoidable}
     assert routable == set(mc.SHAPE_KEYS)
-    assert report.inconclusive_keys == {mc.FORCED_TOOL_CHOICE, mc.RESPONSE_FORMAT, mc.THINKING_OFF, mc.THINKING_REPLAY}
+    assert report.inconclusive_keys == {
+        mc.FORCED_TOOL_CHOICE,
+        mc.RESPONSE_FORMAT,
+        mc.THINKING_OFF,
+        mc.THINKING_FLOOR,
+        mc.THINKING_REPLAY,
+    }

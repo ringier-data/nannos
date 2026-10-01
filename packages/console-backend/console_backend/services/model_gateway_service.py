@@ -121,6 +121,30 @@ def thinking_levels_for(info: dict) -> list[str]:
     return levels or [e for e in _EFFORT_ORDER if e in _PORTABLE_EFFORTS]
 
 
+def litellm_flags_for(info: dict) -> dict:
+    """The LiteLLM-native flag a deployment's model_info must carry for LiteLLM's own request
+    translation to send the effort the console offers (nannos#330).
+
+    LiteLLM keeps ``output_config.effort`` for a model its own map does not list (Claude Opus 5.5
+    on v1.103) only when some ``supports_<level>_reasoning_effort`` flag is True; without one,
+    under ``drop_params``, every effort — a user's pick and the always-on floor alike — reaches
+    the model as its default. So ``supports_low_reasoning_effort: True`` is written where the
+    picker offers ``low`` and nothing has an opinion yet: ``info`` must be the gateway's MERGED
+    view (``/model/info``: the deployment's keys over LiteLLM's map), so a map that excludes
+    ``low`` (gpt-5.5-pro: ``False``) is respected and nothing is written. ``low`` is the one
+    portable tier LiteLLM has a flag for. LiteLLM registers the flag under the deployment's
+    backend model key, so it applies to every deployment of that provider model.
+
+    Nothing the probe measures is mirrored into LiteLLM's flags: ``supports_forced_tool_use`` is
+    not read from model_info, ``supports_response_schema: False`` would make LiteLLM rewrite
+    ``response_format`` into a forced tool call the same models reject, and
+    ``thinking_always_on`` would make LiteLLM strip the probe's own ``thinking: disabled``, so a
+    later Test could never see thinking turn off."""
+    if "low" in thinking_levels_for(info) and info.get("supports_low_reasoning_effort") is None:
+        return {"supports_low_reasoning_effort": True}
+    return {}
+
+
 # The litellm_params that decide which endpoint answers: a record measured on one of them says
 # nothing about another (a model's capabilities can differ by region or project).
 _ROUTE_PARAMS = ("model", "aws_region_name", "vertex_location", "vertex_project", "api_base")
@@ -559,7 +583,13 @@ class ModelGatewayService:
             shapes = planned_shapes(supports_reasoning=supports_reasoning)
             on_progress({"type": "plan", "shapes": [{"shape": sh, "label": SHAPE_LABELS[sh]} for sh in shapes]})
         report = await probe_model(
-            model_name, self._probe_call, supports_reasoning=supports_reasoning, on_progress=on_progress
+            model_name,
+            self._probe_call,
+            supports_reasoning=supports_reasoning,
+            # The floor of an always-on model is tried from the levels the picker offers for it,
+            # so it is always one of them (nannos#330).
+            floor_candidates=thinking_levels_for(info),
+            on_progress=on_progress,
         )
         if report.rejected:
             reasons = "; ".join(f"{r.shape}: {r.error}" for r in report.rejected)
@@ -604,7 +634,11 @@ class ModelGatewayService:
                     else:
                         kept = prior
                 await self.record_capabilities(
-                    target_id, {**kept, **report.capabilities, PROBED_AT: _utc_now_iso()}
+                    target_id,
+                    {**kept, **report.capabilities, PROBED_AT: _utc_now_iso()},
+                    # The levels are read off the deployment the probe ran on; on the alias
+                    # fallback that is another deployment, whose declaration says nothing here.
+                    model_info=info if info.get("id") == target_id else None,
                 )
                 recorded = True
             except ModelGatewayError as e:
@@ -649,14 +683,21 @@ class ModelGatewayService:
         except httpx.HTTPError as e:
             raise ProbeCallError(f"gateway unreachable: {type(e).__name__}") from e
 
-    async def record_capabilities(self, model_id: str, capabilities: dict) -> None:
-        """Store the probe's flags under ``model_info.nannos_capabilities`` on a deployment.
+    async def record_capabilities(self, model_id: str, capabilities: dict, model_info: dict | None = None) -> None:
+        """Store the probe's flags under ``model_info.nannos_capabilities`` on a deployment, with
+        the LiteLLM effort flag ``model_info`` calls for (the gateway's merged view of the
+        deployment the probe ran on; see ``litellm_flags_for``). Written here and not at
+        registration: only the merged view knows when LiteLLM's map already decided, and every
+        registration and edit runs Test anyway.
 
         ``PATCH /model/{id}/update`` merges ``model_info`` (stored ∪ patch) on the proxy
         version the gateway pins, so the deployment's other keys survive and its id is kept —
         unlike ``update_model``, which re-registers. The router picks the change up on its
         next DB reload, so a flag is live within the proxy's reload interval, not instantly."""
+        flags = litellm_flags_for(model_info or {})
         await self._request(
-            "PATCH", f"/model/{model_id}/update", json={"model_info": {"id": model_id, CAPABILITIES_KEY: capabilities}}
+            "PATCH",
+            f"/model/{model_id}/update",
+            json={"model_info": {"id": model_id, **flags, CAPABILITIES_KEY: capabilities}},
         )
         self._invalidate_list_cache()

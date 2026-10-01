@@ -66,7 +66,7 @@ class GatewayModel(BaseModel):
     supports_web_search: bool | None = None
     # What the registration probe saw the deployment accept (nannos#318,
     # ``ringier_a2a_sdk.model_capabilities``): ``forced_tool_choice``, ``response_format``,
-    # ``thinking_off``, ``thinking_replay``, ``probed_at``. ``None`` for a deployment that was
+    # ``thinking_off``, ``thinking_floor``, ``thinking_replay``, ``probed_at``. ``None`` for a deployment that was
     # registered before the probe existed or is defined in the proxy's config.
     capabilities: dict[str, Any] | None = None
 

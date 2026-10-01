@@ -87,15 +87,45 @@ around failing is **recorded, not refused**; the record is what lets the harness
   id and its other `model_info` keys. The router reads it on its next database reload, so a freshly
   written record is live within the proxy's reload interval rather than instantly.
 - The probe sends an explicit `thinking` value to learn which switch a deployment takes; for every
-  other caller the switch stays the deployment's, decided by the hook from the record (or the family
-  heuristic) and replacing whatever was sent.
+  other caller the switch stays the deployment's, decided by the hook from the record alone and
+  replacing whatever was sent. Nothing is guessed from a model's name: an unprobed deployment gets
+  the effort alone (nannos#330).
 - Thinking off is tried in order — `thinking: disabled`, `thinking: between_tools`, then
   `reasoning_effort: none` alone — and the first that shows no reasoning is recorded. When even the
   effort alone still reasons, nothing turns the deployment's thinking off (Gemini 3.1 Pro: LiteLLM
   maps `none` to its floor, `thinkingLevel: low`), and the record says `always_on`. The console then
   offers no "off" for that model: the Extended Thinking toggle is locked on in the user settings and
   the sub-agent form — as display only: a stored "off" is kept, the gateway sends it as the model's
-  floor, and it stays right if a later probe finds a way to turn thinking off. Gemini 3.5 Flash is
+  floor, and it stays right if a later probe finds a way to turn thinking off.
+- The floor of an `always_on` deployment is measured too (`thinking_floor`): the probe sends the
+  thinking-off question at the two lowest levels the console's picker offers for the deployment
+  (`thinking_levels_for`, from the gateway's `supports_<effort>_reasoning_effort` flags) —
+  `minimal`, then `low`, when it declares none — and records the first effort accepted, so the
+  floor is always a level the admin also sees; the hook sends a thinking-off request as that
+  effort. The trade-off is accepted: a model LiteLLM accepts `minimal` on but whose picker does not
+  offer it (no `supports_minimal_reasoning_effort` flag) gets `low` as its floor, a little more
+  thinking than `none` alone would map to. `none` alone is not a floor everywhere: on Claude,
+  LiteLLM turns it into no thinking parameter and no effort, so Opus 5.5 ran at its default effort
+  with its thinking text omitted and nothing streamed (nannos#330); a real effort comes back as
+  adaptive thinking with a readable summary. A deployment whose model map does not translate an
+  effort for it (a Bedrock ARN: every effort becomes a `budget_tokens` Opus 5.5 rejects) accepts no
+  level — a recorded limitation, and the hook keeps sending `none` alone. A record made before the
+  floor existed behaves the same until the deployment is re-tested. Known limit: with `modify_params`, LiteLLM drops
+  `thinking` on a tool turn whose history carries no thinking blocks (after a replay strip, a
+  cross-family failover, or a history from a non-thinking model); the turn keeps the floor effort
+  but its thinking text is omitted again.
+- One LiteLLM-native flag is written with every recorded Test (`litellm_flags_for`), because
+  LiteLLM's own request translation reads it and nothing else sets it for a model its map does not
+  list: `supports_low_reasoning_effort: true` where the picker offers `low` and the gateway's merged
+  view (the deployment over LiteLLM's map) has no opinion yet. Without some level flag, under
+  `drop_params`, LiteLLM drops `output_config.effort` and every effort — a user's pick and the floor
+  alike — runs at the model's default (Opus 5.5 on v1.103). It is not written at registration: the
+  form alone cannot see a map that excludes `low` (gpt-5.5-pro). LiteLLM registers it per backend
+  model, not per deployment. Nothing the probe measures is mirrored into LiteLLM's flags:
+  `supports_forced_tool_use` is not read from model_info, `supports_response_schema: false` would
+  make LiteLLM rewrite `response_format` into a forced tool call the same models reject, and
+  `thinking_always_on` would make LiteLLM strip the probe's own `thinking: disabled`, so a later
+  Test could never see thinking turn off. Gemini 3.5 Flash is
   *not* always-on: its floor, `minimal`, measured as no reasoning, so its "off" is real. When every
   off request is refused outright, the effort alone included (OpenAI-direct gpt-5 and the o-series
   400 on `none`), the record says `unsupported`: the hook strips the effort and the switch, so a
@@ -111,8 +141,8 @@ around failing is **recorded, not refused**; the record is what lets the harness
   turn so a re-run Test takes effect on the next one. Unprobed, or with an `unsupported` record,
   they keep sending nothing, the provider default, as before any record existed. The hook applies
   the serving deployment's recorded switch per attempt, a failover attempt included; an attempt
-  landing on an unprobed Claude deployment gets the family switch by version — `between_tools`
-  from Claude 5.5 on (which rejects `disabled`), `disabled` before. Utility calls (risk scoring,
+  landing on an unprobed deployment gets the effort alone — every deployment is tested before the
+  gateway knows more. Utility calls (risk scoring,
   HITL resume, indexing, tool selection) are not user choices and are unchanged.
 - A deployment recorded as rejecting the replay of its own signed thinking block has the blocks
   stripped by the hook per attempt, the way a non-Anthropic fallback does: the turn continues without

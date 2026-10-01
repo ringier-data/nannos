@@ -16,6 +16,17 @@
 # key come from AZURE_API_BASE / AZURE_OPENAI_API_KEY (start-local.sh sets both). A deployment
 # name that isn't a known model breaks LiteLLM cost tracking + max-tokens; map it with
 # model_info.base_model: azure/<known-model> (see gpt-6-sol below).
+#
+# Capability record (ADR-0015): the console's Test probes a deployment and stores what it
+# accepts under model_info.nannos_capabilities — but only for deployments the console created.
+# A deployment defined HERE can be tested, never recorded, so the gateway hook (which reads
+# model_info.nannos_capabilities whatever its source) knows nothing about it: a thinking-off
+# request goes out as `reasoning_effort: none` alone, a forced tool_choice is sent as is. For a
+# model that needs routing around — every Claude 5.x does — write the record by hand: run Test
+# on the same model registered through the console and copy the "capabilities" it reports (see
+# the commented claude-opus-5-5 entry below). Keys: forced_tool_choice, response_format,
+# thinking_off (disabled | between_tools | none | always_on | unsupported), thinking_floor
+# (always_on only), thinking_replay.
 
 model_list:
   # --- Chat (Bedrock) ---
@@ -23,6 +34,16 @@ model_list:
     litellm_params: {model: bedrock/eu.anthropic.claude-sonnet-4-6, aws_region_name: os.environ/AWS_BEDROCK_REGION, max_retries: 0}
   - model_name: claude-haiku-4-5
     litellm_params: {model: bedrock/eu.anthropic.claude-haiku-4-5-20251001-v1:0, aws_region_name: os.environ/AWS_BEDROCK_REGION, max_retries: 0}
+  # A Claude 5.x defined here, with the record its console Test reported. Opus 5.5 always thinks
+  # (no off switch) and rejects a forced tool_choice. A supports_<level>_reasoning_effort flag
+  # is needed while LiteLLM's model map has no entry for the model: under drop_params LiteLLM
+  # otherwise drops output_config.effort, and every effort runs at the model's default.
+  # - model_name: claude-opus-5-5
+  #   model_info:
+  #     supports_reasoning: true
+  #     supports_low_reasoning_effort: true
+  #     nannos_capabilities: {forced_tool_choice: false, response_format: true, thinking_off: always_on, thinking_floor: low, thinking_replay: true}
+  #   litellm_params: {model: bedrock/eu.anthropic.claude-opus-5-5, aws_region_name: os.environ/AWS_BEDROCK_REGION, max_retries: 0}
 
   # --- Chat (Azure AI Foundry) ---
   # The azure/ route (not azure_ai/): only it bridges tool calls with reasoning on to the

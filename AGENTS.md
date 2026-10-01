@@ -89,10 +89,12 @@ the same pgvector index and silently degrade search. See ADR-0014.
   - **Capability record** — what the registration probe *saw* a deployment accept
 (`model_info.nannos_capabilities`: forced tool choice, `response_format`, the thinking-off switch —
 `always_on` when nothing turns thinking off, which the console shows as a locked Extended
-Thinking toggle, or `unsupported` when every off request is refused — and thinking replay), as opposed to a Capability the admin declares or a provider map claims. The shapes
+Thinking toggle and the gateway sends at the measured `thinking_floor` effort, or `unsupported` when
+every off request is refused — and thinking replay), as opposed to a Capability the admin declares or a provider map claims. The shapes
 probed are the harness's own, defined once in `ringier_a2a_sdk.model_capabilities` and read by
 console-backend (writes the record), the gateway hook (rewrites a request for the deployment that
-serves it) and agent-common (picks the shape the alias accepts). An unavoidable shape failing refuses
+serves it — from the record alone, never from the model's name; an unprobed deployment is left
+as sent) and agent-common (picks the shape the alias accepts). An unavoidable shape failing refuses
 registration; a routable one failing is recorded. A model recorded as rejecting `response_format`
 cannot default `chat`/`chat:low` or join their chains. See ADR-0015.
   - **Failover** vs **alias degradation** — *failover* is runtime (a live alias's provider is

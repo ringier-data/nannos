@@ -835,47 +835,24 @@ def _thinking_kwargs(**overrides):
 
 
 @pytest.mark.parametrize(
-    "model,extra",
+    "model",
     [
-        ("bedrock/eu.anthropic.claude-sonnet-5", {}),
-        ("vertex_ai/claude-opus-5", {}),
-        ("claude-haiku-4-5", {"custom_llm_provider": "anthropic"}),
-        # A deployment addressed by an opaque id is recognised by its declared base model.
-        (
-            "bedrock/arn:aws:bedrock:eu-central-1:000000000000:application-inference-profile/x",
-            {"model_info": {"base_model": "anthropic.claude-sonnet-5"}},
-        ),
+        "bedrock/eu.anthropic.claude-sonnet-5",
+        "vertex_ai/claude-opus-5-5",
+        "vertex_ai/gemini-3.5-flash",
+        "bedrock/arn:aws:bedrock:eu-central-1:000000000000:application-inference-profile/x",
     ],
 )
-def test_thinking_off_adds_the_explicit_switch_on_claude(model, extra):
-    # Claude 5 thinks by default and LiteLLM turns "none" into "no thinking parameter",
-    # so without this a small utility budget is spent thinking and the reply is empty.
-    out = _run_deployment_hook(_off_kwargs(model, **extra))
-    assert out["thinking"] == {"type": "disabled"}
-    assert out["reasoning_effort"] == "none"
-
-
-@pytest.mark.parametrize(
-    "model", ["vertex_ai/gemini-3.5-flash", "gemini/gemini-3.5-flash", "azure/gpt-4o"]
-)
-def test_thinking_off_removes_the_switch_elsewhere(model):
-    # Gemini 3 refuses thinking + reasoning_effort together ("Cannot specify both"); an
-    # older client that still sends both must not get a 400.
+def test_an_unprobed_deployment_gets_the_effort_alone(model):
+    # nannos#330: nothing is guessed from the model's name. A switch the caller sent is still
+    # dropped — the switch is the deployment's (Gemini 3 400s on the pair, "Cannot specify both").
     out = _run_deployment_hook(_off_kwargs(model, thinking={"type": "disabled"}))
     assert "thinking" not in out
     assert out["reasoning_effort"] == "none"
 
 
-def test_a_client_sent_switch_is_replaced_by_the_deployments():
-    # The switch is the deployment's, never the caller's (decided here since #278).
-    out = _run_deployment_hook(
-        _off_kwargs("bedrock/eu.anthropic.claude-sonnet-5", thinking={"type": "between_tools"})
-    )
-    assert out["thinking"] == {"type": "disabled"}
-
-
-def test_thinking_off_leaves_a_clean_non_claude_request_alone():
-    assert _run_deployment_hook(_off_kwargs("vertex_ai/gemini-3.5-flash")) is None
+def test_thinking_off_leaves_a_clean_unprobed_request_alone():
+    assert _run_deployment_hook(_off_kwargs("bedrock/eu.anthropic.claude-sonnet-5")) is None
 
 
 def test_a_real_effort_is_not_touched():
@@ -887,9 +864,15 @@ def test_a_real_effort_is_not_touched():
 
 
 def test_thinking_off_and_cache_control_strip_compose():
-    # Both fixes apply to one request — a Claude deployment on a provider the allowlist does
-    # not know, which strips markers (fail-closed) and still needs the Claude off-switch.
-    out = _run_deployment_hook(_gemini_kwargs(model="some-new-provider/claude-x", reasoning_effort="none"))
+    # Both fixes apply to one request — a deployment on a provider the allowlist does not know,
+    # which strips markers (fail-closed) and still takes its recorded off-switch.
+    out = _run_deployment_hook(
+        _gemini_kwargs(
+            model="some-new-provider/claude-x",
+            reasoning_effort="none",
+            model_info={"nannos_capabilities": {"thinking_off": "disabled"}},
+        )
+    )
     assert out["thinking"] == {"type": "disabled"}
     assert out["messages"][0]["content"][0] == {"type": "text", "text": "sys"}
 
@@ -959,69 +942,27 @@ def _probed(model, caps, **overrides):
     return kwargs
 
 
-def test_thinking_off_follows_the_record_over_the_family_heuristic():
-    # Claude 5.5 rejects `disabled`; its record says between_tools, and that wins over "it's
-    # Claude, send disabled".
-    out = _run_deployment_hook(
-        _probed("bedrock/eu.anthropic.claude-sonnet-5-5", {"thinking_off": "between_tools"}, reasoning_effort="none")
-    )
-    assert out["thinking"] == {"type": "between_tools"}
-
-
-def test_thinking_off_recorded_as_none_sends_no_switch_even_on_claude():
-    kwargs = _probed("bedrock/eu.anthropic.claude-x", {"thinking_off": "none"}, reasoning_effort="none")
-    assert _run_deployment_hook(kwargs) is None
-    assert "thinking" not in kwargs
-
-
-def test_thinking_off_recorded_as_always_on_sends_the_effort_alone():
-    # Gemini 3: nothing turns thinking off; the effort alone is the lowest level, and a
-    # `thinking` a caller still sends would be the "Cannot specify both" 400.
-    kwargs = _probed(
-        "vertex_ai/gemini-3.5-flash", {"thinking_off": "always_on"}, reasoning_effort="none", thinking={"type": "disabled"}
-    )
-    _run_deployment_hook(kwargs)
-    assert "thinking" not in kwargs and kwargs["reasoning_effort"] == "none"
-
-
-def test_thinking_off_recorded_as_unsupported_strips_the_refused_effort():
-    # The probe saw every off request refused, the effort alone included (gpt-5 / o-series on
-    # OpenAI direct): forwarding reasoning_effort "none" would be that same 400 on every turn.
-    kwargs = _probed("openai/gpt-5", {"thinking_off": "unsupported"}, reasoning_effort="none", thinking={"type": "disabled"})
-    _run_deployment_hook(kwargs)
-    assert "reasoning_effort" not in kwargs and "thinking" not in kwargs
-
-
 @pytest.mark.parametrize(
-    "model, version",
+    "model, caps, effort, thinking",
     [
-        ("bedrock/global.anthropic.claude-sonnet-5-5", (5, 5)),
-        ("bedrock/eu.anthropic.claude-opus-5", (5, 0)),
-        ("bedrock/eu.anthropic.claude-haiku-4-5-20251001-v1:0", (4, 5)),
-        ("claude-3-7-sonnet-20250219", (3, 7)),
-        ("vertex_ai/claude-opus-5-5@default", (5, 5)),
-        ("vertex_ai/gemini-3.5-flash", None),
+        ("bedrock/eu.anthropic.claude-sonnet-5-5", {"thinking_off": "between_tools"}, "none", {"type": "between_tools"}),
+        ("bedrock/eu.anthropic.claude-sonnet-5", {"thinking_off": "disabled"}, "none", {"type": "disabled"}),
+        ("bedrock/eu.anthropic.claude-x", {"thinking_off": "none"}, "none", None),
+        # nannos#330: an always-on deployment gets its measured floor — on Claude, "none" alone
+        # would run at the DEFAULT effort with the thinking text omitted.
+        ("bedrock/eu.anthropic.claude-opus-5-5", {"thinking_off": "always_on", "thinking_floor": "low"}, "low", None),
+        ("vertex_ai/gemini-3.1-pro", {"thinking_off": "always_on", "thinking_floor": "minimal"}, "minimal", None),
+        # Recorded before the floor was measured, or no level was accepted: the effort alone.
+        ("vertex_ai/gemini-3.1-pro", {"thinking_off": "always_on"}, "none", None),
+        # Every off request was refused (gpt-5 / o-series on OpenAI direct): a plain request.
+        ("openai/gpt-5", {"thinking_off": "unsupported"}, None, None),
     ],
 )
-def test_the_claude_version_is_read_from_the_model_id(model, version):
-    assert cl._claude_version({"model": model}) == version
-
-
-@pytest.mark.parametrize(
-    "model, switch",
-    [
-        ("bedrock/global.anthropic.claude-sonnet-5-5", "between_tools"),
-        ("bedrock/eu.anthropic.claude-opus-5-5", "between_tools"),
-        ("bedrock/eu.anthropic.claude-sonnet-5", "disabled"),
-        ("bedrock/eu.anthropic.claude-sonnet-4-6", "disabled"),
-    ],
-)
-def test_an_unprobed_claude_gets_the_switch_its_version_accepts(model, switch):
-    """No record — a failover to an unprobed chain member, or an unprobed twin of a probed alias
-    (review round 8). Claude 5.5+ 400 on `disabled`; earlier Claude 5 needs it (#272)."""
-    kwargs = {"model": model, "messages": [{"role": "user", "content": "hi"}], "reasoning_effort": "none", "model_info": {}}
+def test_thinking_off_follows_the_serving_deployments_record(model, caps, effort, thinking):
+    kwargs = _probed(model, caps, reasoning_effort="none", thinking={"type": "enabled"})
     _run_deployment_hook(kwargs)
-    assert kwargs["thinking"] == {"type": switch}
+    assert kwargs.get("reasoning_effort") == effort
+    assert kwargs.get("thinking") == thinking
 
 
 def test_thinking_off_record_is_read_per_attempt():
