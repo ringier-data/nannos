@@ -105,7 +105,10 @@ around failing is **recorded, not refused**; the record is what lets the harness
   adaptive thinking with a readable summary. A deployment whose model map does not translate an
   effort for it (a Bedrock ARN: every effort becomes a `budget_tokens` Opus 5.5 rejects) accepts no
   level — a recorded limitation, and the hook keeps sending `none` alone. A record made before the
-  floor existed behaves the same until the deployment is re-tested. Gemini 3.5 Flash is
+  floor existed behaves the same until the deployment is re-tested. Known limit: with `modify_params`, LiteLLM drops
+  `thinking` on a tool turn whose history carries no thinking blocks (after a replay strip, a
+  cross-family failover, or a history from a non-thinking model); the turn keeps the floor effort
+  but its thinking text is omitted again. Gemini 3.5 Flash is
   *not* always-on: its floor, `minimal`, measured as no reasoning, so its "off" is real. When every
   off request is refused outright, the effort alone included (OpenAI-direct gpt-5 and the o-series
   400 on `none`), the record says `unsupported`: the hook strips the effort and the switch, so a
