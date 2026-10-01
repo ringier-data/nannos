@@ -539,9 +539,7 @@ async def start_impersonation(
     )
     await db.commit()
 
-    logger.info(
-        f"Impersonation started: {admin.email} (admin) -> {target_user.email} (target_user_id: {target_user.id})"
-    )
+    logger.info(f"Impersonation started: admin {admin.id} -> target user {target_user.id}")
 
 
 @router.post("/impersonate/stop")
@@ -586,4 +584,4 @@ async def stop_impersonation(
     )
     await db.commit()
 
-    logger.info(f"Impersonation stopped by {actor_user.email}")
+    logger.info(f"Impersonation stopped by {actor_user.id}")

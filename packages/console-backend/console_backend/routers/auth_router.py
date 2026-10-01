@@ -702,9 +702,7 @@ async def start_impersonation(
     )
     await db.commit()
 
-    logger.info(
-        f"Impersonation started: {user.email} (admin) -> {target_user.email} (target_user_id: {target_user.id})"
-    )
+    logger.info(f"Impersonation started: admin {user.id} -> target user {target_user.id}")
 
     return ImpersonateResponse(
         success=True,
@@ -761,7 +759,7 @@ async def stop_impersonation(
     )
     await db.commit()
 
-    logger.info(f"Impersonation stopped by {actor_user.email}")
+    logger.info(f"Impersonation stopped by {actor_user.id}")
 
     return ImpersonateResponse(
         success=True,

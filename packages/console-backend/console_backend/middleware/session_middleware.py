@@ -10,6 +10,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from ..config import config
 from ..db import get_async_session_factory
 from ..dependencies import get_admin_mode, get_impersonated_user_id
+from ..models.user import User
+from ..services.user_service import UserService
 from ..utils.cookie_signer import verify_cookie
 
 logger = logging.getLogger(__name__)
@@ -49,7 +51,9 @@ class SessionMiddleware(BaseHTTPMiddleware):
                     session_factory = get_async_session_factory()
                     async with session_factory() as db:
                         user = await user_service.get_user(db, stored_session.user_id)
-                        impersonated_user = await self._resolve_impersonation(request, db, user_service, user)
+                        impersonated_user = (
+                            await self._resolve_impersonation(request, db, user_service, user) if user else None
+                        )
                     if user:
                         request.state.session_id = session_id
                         request.state.session = stored_session
@@ -77,15 +81,16 @@ class SessionMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
     @staticmethod
-    async def _resolve_impersonation(request: Request, db: AsyncSession, user_service, user):
+    async def _resolve_impersonation(
+        request: Request, db: AsyncSession, user_service: UserService, user: User
+    ) -> User | None:
         """Return the user an admin asked to impersonate, or None.
 
         Runs inside the caller's session block: a closed AsyncSession silently checks out
-        a fresh connection on reuse and never returns it, so every impersonated request
-        leaked one pooled connection until the pool was exhausted.
+        a fresh connection on reuse and nothing checks it back in, so it stays out of the
+        pool until the garbage collector terminates it — impersonated requests exhausted
+        the pool faster than GC reclaimed them.
         """
-        if not user:
-            return None
         impersonated_user_id = get_impersonated_user_id(request)
         if not impersonated_user_id:
             logger.debug(f"No impersonation header for {user.id}")

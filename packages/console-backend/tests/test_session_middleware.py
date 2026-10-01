@@ -1,10 +1,12 @@
 """SessionMiddleware: every user lookup runs on an open DB session.
 
-A closed AsyncSession silently checks out a new pooled connection on reuse and never
-returns it. The impersonation lookup used to run after the session block had closed,
-leaking one connection per impersonated request until the pool was exhausted.
+A closed AsyncSession silently checks out a new pooled connection on reuse and nothing
+checks it back in until the garbage collector terminates it. The impersonation lookup
+used to run after the session block had closed, so impersonated requests exhausted the
+pool faster than GC reclaimed the connections.
 """
 
+import logging
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -45,9 +47,12 @@ class _UserService:
 
 
 class _SessionService:
+    def __init__(self, session_user_id: str) -> None:
+        self.session_user_id = session_user_id
+
     async def get_session(self, session_id):
         return SimpleNamespace(
-            user_id=ADMIN.id,
+            user_id=self.session_user_id,
             id_token=None,
             access_token=None,
             access_token_expires_at=None,
@@ -55,9 +60,9 @@ class _SessionService:
         )
 
 
-def _app(user_service: _UserService) -> FastAPI:
+def _app(user_service: _UserService, session_user_id: str) -> FastAPI:
     app = FastAPI()
-    app.state.session_service = _SessionService()
+    app.state.session_service = _SessionService(session_user_id)
     app.state.user_service = user_service
     app.add_middleware(SessionMiddleware)
 
@@ -70,15 +75,28 @@ def _app(user_service: _UserService) -> FastAPI:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("admin_mode", ["true", "false"])
-async def test_impersonation_lookups_run_on_open_session(admin_mode):
+@pytest.mark.parametrize(
+    ("session_user", "admin_mode", "expected_user", "expected_original", "expected_lookups"),
+    [
+        # Admin in admin mode: impersonation applies, both lookups on the open session.
+        (ADMIN, "true", TARGET, ADMIN, [(ADMIN.id, True), (TARGET.id, True)]),
+        # Admin without admin mode: refused.
+        (ADMIN, "false", ADMIN, None, [(ADMIN.id, True)]),
+        # Non-admin claiming admin mode: refused.
+        (TARGET, "true", TARGET, None, [(TARGET.id, True)]),
+    ],
+)
+async def test_impersonation_lookups_run_on_open_session(
+    caplog, session_user, admin_mode, expected_user, expected_original, expected_lookups
+):
+    caplog.set_level(logging.DEBUG, logger=session_middleware.logger.name)
     user_service = _UserService()
     with (
         patch.object(session_middleware, "get_async_session_factory", return_value=_TrackedSession),
         patch.object(session_middleware, "verify_cookie", return_value="sid"),
     ):
         async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=_app(user_service)), base_url="http://test"
+            transport=httpx.ASGITransport(app=_app(user_service, session_user.id)), base_url="http://test"
         ) as client:
             client.cookies.set(config.cookie_name, "signed")
             response = await client.get(
@@ -87,9 +105,12 @@ async def test_impersonation_lookups_run_on_open_session(admin_mode):
             )
 
     assert response.status_code == 200
-    if admin_mode == "true":
-        assert response.json() == {"user": TARGET.id, "original": ADMIN.id}
-        assert user_service.lookups == [(ADMIN.id, True), (TARGET.id, True)]
-    else:
-        assert response.json() == {"user": ADMIN.id, "original": None}
-        assert user_service.lookups == [(ADMIN.id, True)]
+    assert response.json() == {
+        "user": expected_user.id,
+        "original": expected_original.id if expected_original else None,
+    }
+    assert user_service.lookups == expected_lookups
+    # User identity is logged by id, never by email address.
+    assert caplog.records
+    assert ADMIN.email not in caplog.text
+    assert TARGET.email not in caplog.text
