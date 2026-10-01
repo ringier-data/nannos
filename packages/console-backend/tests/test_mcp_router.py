@@ -11,7 +11,7 @@ from fastapi import HTTPException
 # Prevent AWS/boto3 local credential path during imports
 os.environ.setdefault("ECS_CONTAINER_METADATA_URI", "true")
 
-from console_backend.routers.mcp_router import MCPToolsResponse, list_mcp_tools
+from console_backend.routers.mcp_router import MCPToolsResponse, _get_console_mcp_tools, list_mcp_tools
 
 
 class TestListMcpTools:
@@ -451,3 +451,34 @@ class TestListMcpTools:
                 result = await list_mcp_tools(mock_request, mock_user)
 
                 assert len(result.tools) == 0
+
+
+class TestConsoleMcpToolSchemas:
+    """Console tools are listed with the input schema /mcp serves them with."""
+
+    def test_console_tool_carries_the_served_input_schema(self):
+        # A console tool listed without its schema read as argument-less: the watch form
+        # drew no fields and the drafting model had only the prose to guess names from.
+        from types import SimpleNamespace
+
+        from ringier_a2a_sdk.utils.schema_cleaning import clean_gemini_schema
+
+        from app import app, mcp
+
+        tools = {t.name: t for t in _get_console_mcp_tools(SimpleNamespace(app=app), None)}
+        served = {t.name: t.inputSchema for t in mcp.tools}
+
+        listed = tools["console_list_bug_reports"]
+        assert listed.input_schema == clean_gemini_schema(served["console_list_bug_reports"])
+        assert {"page", "limit", "status_filter", "created_after"} <= set(listed.input_schema["properties"])
+
+    def test_no_served_instance_lists_tools_without_schemas(self):
+        from types import SimpleNamespace
+
+        from app import app
+
+        bare = SimpleNamespace(routes=app.routes, state=SimpleNamespace())
+        tools = _get_console_mcp_tools(SimpleNamespace(app=bare), None)
+
+        assert tools
+        assert all(t.input_schema is None for t in tools)
