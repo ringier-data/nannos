@@ -104,12 +104,14 @@ _VERSION_QUERY = text("""
             AND (EXISTS (SELECT 1 FROM user_sub_agent_activations a
                           WHERE a.user_id = u.id AND a.sub_agent_id = sa.id)
                  OR (sa.owner_user_id = 'system' AND sa.is_public = TRUE)))
-                                                AS served_agents
+                                                AS served_agents,
+        -- Not entitlement material: the separate settings version, digested by value in the
+        -- same statement so both stamps come from one snapshot (see "Settings version").
+        coalesce((SELECT md5(row_to_json(us)::text) FROM user_settings us WHERE us.user_id = u.id),
+                 md5(''))                       AS settings_digest
     FROM users u
     WHERE u.id = :user_id
 """)
-
-_SETTINGS_QUERY = text("SELECT row_to_json(us)::text FROM user_settings us WHERE us.user_id = :user_id")
 
 _TOUCH_GROUP_QUERY = text("""
     UPDATE users
@@ -118,27 +120,33 @@ _TOUCH_GROUP_QUERY = text("""
 """)
 
 
-async def compute_entitlement_version(db: AsyncSession, user_id: str) -> str | None:
-    """Return the user's current entitlement version, or None if the user does not exist.
+async def compute_user_stamps(db: AsyncSession, user_id: str) -> tuple[str, str] | None:
+    """Return ``(entitlement_version, settings_version)`` in one round trip, or None if the
+    user does not exist.
 
-    Opaque to callers: compare for equality only. Two calls return the same string as long
-    as none of the underlying rows changed.
+    Opaque to callers: compare for equality only. Each stays the same as long as none of its
+    underlying rows changed. A user who never saved settings has no ``user_settings`` row and
+    gets a fixed settings version, which moves on their first save.
     """
     row = (await db.execute(_VERSION_QUERY, {"user_id": user_id})).mappings().first()
     if row is None:
         return None
-    material = "|".join("" if v is None else str(v) for v in row.values())
-    return hashlib.sha256(material.encode()).hexdigest()[:32]
+    entitlement = dict(row)
+    settings_version = entitlement.pop("settings_digest")
+    material = "|".join("" if v is None else str(v) for v in entitlement.values())
+    return hashlib.sha256(material.encode()).hexdigest()[:32], settings_version
 
 
-async def compute_settings_version(db: AsyncSession, user_id: str) -> str:
-    """Return a version of the user's ``user_settings`` row; see "Settings version" above.
+async def compute_entitlement_version(db: AsyncSession, user_id: str) -> str | None:
+    """The entitlement half of ``compute_user_stamps``."""
+    stamps = await compute_user_stamps(db, user_id)
+    return stamps[0] if stamps else None
 
-    Opaque to callers: compare for equality only. A user who never saved settings has no
-    row and gets a fixed version, which moves on their first save.
-    """
-    row_json = (await db.execute(_SETTINGS_QUERY, {"user_id": user_id})).scalar_one_or_none()
-    return hashlib.sha256((row_json or "").encode()).hexdigest()[:32]
+
+async def compute_settings_version(db: AsyncSession, user_id: str) -> str | None:
+    """The settings half of ``compute_user_stamps``; see "Settings version" above."""
+    stamps = await compute_user_stamps(db, user_id)
+    return stamps[1] if stamps else None
 
 
 async def touch_group_member_entitlements(db: AsyncSession, group_id: int) -> int:
