@@ -160,8 +160,8 @@ def _same_route(a: dict, b: dict) -> bool:
 #: (A blank Vertex location is refilled with the deployment default before it gets here, so on a
 #: Vertex model it is never dropped; it is on a model re-routed away from Vertex, which re-registers
 #: anyway.)
-_CLEARABLE_LITELLM_PARAMS = ("aws_region_name", "vertex_location", "vertex_project")
-_CLEARABLE_MODEL_INFO = ("base_model",)
+_PATCH_UNCLEARABLE_LITELLM_PARAMS = ("aws_region_name", "vertex_location", "vertex_project")
+_PATCH_UNCLEARABLE_MODEL_INFO = ("base_model",)
 
 
 def _utc_now_iso() -> str:
@@ -343,8 +343,8 @@ class ModelGatewayService:
             # The alias is what the rate card, the defaults and the failover chains are keyed on; the
             # edit form does not change it, and a rename here could land on an alias already served.
             raise ModelRenameRefused(f"deployment {model_id} serves '{previous.get('model_name')}'; an edit cannot rename it")
-        reasons = [f"clears {k}" for k in _CLEARABLE_LITELLM_PARAMS if stored_params.get(k) and not litellm_params.get(k)]
-        reasons += [f"clears {k}" for k in _CLEARABLE_MODEL_INFO if stored_info.get(k) and not model_info.get(k)]
+        reasons = [f"clears {k}" for k in _PATCH_UNCLEARABLE_LITELLM_PARAMS if stored_params.get(k) and not litellm_params.get(k)]
+        reasons += [f"clears {k}" for k in _PATCH_UNCLEARABLE_MODEL_INFO if stored_info.get(k) and not model_info.get(k)]
         if not _same_route(stored_params, {**stored_params, **litellm_params}):
             reasons.append("re-routes it")
         if model_info.get("base_model") and model_info.get("base_model") != stored_info.get("base_model"):
