@@ -1170,7 +1170,7 @@ test-db-psql: test-db
 
 # ─── Local Development ────────────────────────────────────────────
 
-# Start all services locally (requires OPENAI_COMPATIBLE_BASE_URL)
+# Start all services locally — slot 0, in the process-compose TUI (requires an LLM source in .env)
 start-local *FLAGS:
   ./scripts/local-dev/env-sync.sh --quiet
   ./scripts/start-local.sh {{FLAGS}}
@@ -1180,32 +1180,35 @@ start-local *FLAGS:
 env-sync *FLAGS:
   ./scripts/local-dev/env-sync.sh {{FLAGS}}
 
-# Stop local infrastructure (PostgreSQL + Keycloak) and all services — shared by every slot
+# Stop slot 0 and the local infrastructure (PostgreSQL + Keycloak) — which every slot shares
 stop-local:
-  tmux kill-session -t nannos 2>/dev/null || true
+  -process-compose down -u "${NANNOS_SLOTS_DIR:-$HOME/.nannos/slots}/0/pc.sock" 2>/dev/null
   docker rm -f nannos-litellm-proxy-local 2>/dev/null || true
   cd scripts/local-dev && docker compose down
   @echo "⚠ The Postgres servers and Keycloak are shared: running slots ('just slots') lost them too."
 
 # Stop local infrastructure and delete all data — every slot's databases included
 reset-local:
-  tmux kill-session -t nannos 2>/dev/null || true
+  -process-compose down -u "${NANNOS_SLOTS_DIR:-$HOME/.nannos/slots}/0/pc.sock" 2>/dev/null
   docker rm -f nannos-litellm-proxy-local 2>/dev/null || true
   cd scripts/local-dev && docker compose down -v
-  @rm -rf "${NANNOS_SLOTS_DIR:-$HOME/.nannos/slots}"/db-s[0-8].*
   @echo "✓ Local infrastructure removed. Run 'just start-local' to start fresh."
   @echo "⚠ Every slot's databases went with it: release running slots with 'just down N' or 'just slots-gc'."
 
 # ── Stack slots (ADR-0016): side-by-side stacks, one per worktree ──
 # A slot is a full stack on its own ports (4N000-4N999), databases, gateway and cookies,
-# beside slot 0 (`just start-local`). `up` is headless: it returns once the slot is healthy
+# beside slot 0 (`just start-local`). `up` is headless: it returns once the slot is ready
 # and prints its URLs as JSON. Logs: ~/.nannos/slots/N/logs/.
 
-# Start this worktree's slot (or print it if it runs): --slot N, --local-idp, --debug, --from-slot0
+# Start this worktree's slot (or print it if it runs): --slot N, --local-idp, --debug
 up *FLAGS:
   ./scripts/local-dev/slot.sh up {{FLAGS}}
 
-# Stop a slot and drop its databases (default: this worktree's); --keep-db keeps them
+# Stop and start a slot again on its databases, applying new migrations (default: this worktree's)
+restart *ARGS:
+  ./scripts/local-dev/slot.sh restart {{ARGS}}
+
+# Stop a slot, drop its databases and release it (default: this worktree's)
 down *ARGS:
   ./scripts/local-dev/slot.sh down {{ARGS}}
 
@@ -1213,7 +1216,7 @@ down *ARGS:
 slots:
   ./scripts/local-dev/slot.sh list
 
-# Release every slot whose services are all gone (stops containers, drops databases)
+# Release every slot whose stack is gone (stops its gateway, drops its databases)
 slots-gc:
   ./scripts/local-dev/slot.sh gc
 
