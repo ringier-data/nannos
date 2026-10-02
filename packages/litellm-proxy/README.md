@@ -100,8 +100,8 @@ silently degrade similarity search for everything embedded during the outage.
 
 **Vertex auth is ADC, and the proxy is the authority.** Vertex credentials are resolved
 via `google.auth.default()` from `GOOGLE_APPLICATION_CREDENTIALS` (the `GCP_KEY` JSON written to a
-file): k8s projects the secret to `/secrets/gcp/sa.json`, and `scripts/start-local.sh` mounts the
-same file locally — so dev and prod authenticate identically. Consequently **model registrations
+file): k8s projects the secret to `/secrets/gcp/sa.json`, and locally `scripts/start-local.sh` writes
+the same file, which `scripts/local-dev/gateway.sh` mounts — so dev and prod authenticate identically. Consequently **model registrations
 must carry no per-model `vertex_credentials`** (console-backend sends none). Runtime-registered
 (DB) models do **not** resolve `os.environ/*` refs — the proxy config is settings-only with no
 `model_list` — so an injected `vertex_credentials: os.environ/GCP_KEY` reaches `json.loads()` and
