@@ -159,6 +159,9 @@ secrets. Each stack has a control socket, `~/.nannos/slots/N/pc.sock`:
 `process-compose process list -u ~/.nannos/slots/N/pc.sock` shows every process's state,
 `process-compose process restart <name> -u …` restarts one, and
 `process-compose attach -u …` opens the TUI on it — what the user runs to look into your stack.
+`just graph` draws the stack's dependency tree with each process's state, and `just startup` shows
+what held its start up (both: your slot, else slot 0). Processes are grouped into numbered startup
+stages (namespaces `1-setup` … `5-slot0`).
 
 - **Data:** a slot's databases start empty (all migrations applied) and live until `just down`.
 - **Migrations:** `just restart` applies a new migration (it stops and starts the slot on its

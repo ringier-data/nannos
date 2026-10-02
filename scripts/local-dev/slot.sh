@@ -262,8 +262,17 @@ cmd_gc() {
   slot_unlock 8
 }
 
+# The control socket of slot N (0-8), else this worktree's slot, else slot 0.
+cmd_sock() {
+  local n="${1:-}"
+  [[ -z "$n" || "$n" =~ ^[0-8]$ ]] || err "A slot is 0-8"
+  [[ -n "$n" ]] || n="$(_slot_of_worktree "$ROOT_DIR")"
+  slot_sock "${n:-0}"
+}
+
 case "${1:-}" in
   up) shift; cmd_up "$@" ;;
+  sock) shift; cmd_sock "$@" ;;
   restart) shift; cmd_restart "$@" ;;
   down) shift; cmd_down "$@" ;;
   list) shift; cmd_list ;;
