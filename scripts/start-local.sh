@@ -109,6 +109,26 @@ ok()   { printf "${GREEN}✓ %s${RESET}\n" "$*"; }
 warn() { printf "${YELLOW}⚠ %s${RESET}\n" "$*"; }
 err()  { printf "${RED}✗ %s${RESET}\n" "$*"; exit 1; }
 
+# Read SSM parameters in batches: `_ssm_load VAR=/ssm/name ...` sets each VAR whose parameter SSM
+# returns and leaves the others unset. `get-parameters` takes up to ten names per call; one call
+# per secret cost ~4 s each, fifteen times on every start.
+_ssm_load() {
+  local _pairs=("$@") _names=() _p _i=0 _out
+  for _p in "${_pairs[@]}"; do _names+=("${_p#*=}"); done
+  while [[ $_i -lt ${#_names[@]} ]]; do
+    _out=$(aws ssm get-parameters --names "${_names[@]:$_i:10}" --with-decryption --output json 2>/dev/null) || _out='{}'
+    eval "$(printf '%s' "$_out" | python3 -c '
+import json, shlex, sys
+values = {p["Name"]: p["Value"] for p in json.load(sys.stdin).get("Parameters", [])}
+for pair in sys.argv[1:]:
+    var, name = pair.split("=", 1)
+    if name in values:
+        print(f"{var}={shlex.quote(values[name])}")
+' "${_pairs[@]}")"
+    _i=$((_i + 10))
+  done
+}
+
 # ─── 1. Check prerequisites ───────────────────────────────────────
 
 log "Checking prerequisites..."
@@ -374,17 +394,41 @@ TWILIO_VERIFY_API_SECRET="${TWILIO_VERIFY_API_SECRET:-}"
 if [[ "$_HAS_AWS" == true ]]; then
   log "Fetching secrets from AWS SSM (profile: $AWS_PROFILE)..."
 
+  _SSM_PAIRS=(
+    _SSM_AZURE=/nannos/azure-ai-api-key
+    _SSM_GCP=/nannos/infrastructure-agents/gcp-key
+    _SSM_LANGSMITH=/nannos/infrastructure-agents/langsmith-api-key
+    _SSM_GOAUTH_ID=/nannos/infrastructure-agents/google-oauth-client-id
+    _SSM_GOAUTH_SECRET=/nannos/infrastructure-agents/google-oauth-client-secret
+    _SSM_TWILIO_SID=/nannos/twilio/account-sid
+    _SSM_TWILIO_KEY=/nannos/twilio/api-key
+    _SSM_TWILIO_SECRET=/nannos/twilio/api-secret
+    _SSM_TWILIO_VSID=/nannos/twilio/verify-service-sid
+    _SSM_TWILIO_VKEY=/nannos/twilio/verify-api-key
+    _SSM_TWILIO_VSECRET=/nannos/twilio/verify-api-secret
+  )
+  # The remote-OIDC client secrets ride in the same batch (read in "OIDC configuration" below).
+  if [[ "$_OIDC_MODE" == "remote-ssm" ]]; then
+    _SSM_PAIRS+=(
+      _SSM_KC_CONSOLE=/nannos/keycloak/agent-console-client-secret
+      _SSM_KC_ORCHESTRATOR=/nannos/keycloak/orchestrator-secret
+      _SSM_KC_ADMIN=/nannos/keycloak/nannos-admin-secret
+      _SSM_KC_RUNNER=/nannos/keycloak/agent-runner-secret
+    )
+  fi
+  _ssm_load "${_SSM_PAIRS[@]}"
+
   # One Azure resource: the Nannos AI Foundry one. A key already set (e.g. in .env) wins.
   if [[ -z "$AZURE_AI_API_KEY" && -z "$AZURE_OPENAI_API_KEY" ]]; then
-    if _AZURE_KEY=$(aws ssm get-parameter --name /nannos/azure-ai-api-key --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
-      AZURE_AI_API_KEY="$_AZURE_KEY"
+    if [[ -n "${_SSM_AZURE:-}" ]]; then
+      AZURE_AI_API_KEY="$_SSM_AZURE"
     else
       warn "Could not fetch /nannos/azure-ai-api-key from SSM — Azure models disabled"
     fi
   fi
 
-  if _GCP_KEY=$(aws ssm get-parameter --name /nannos/infrastructure-agents/gcp-key --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
-    GCP_KEY="$_GCP_KEY"
+  if [[ -n "${_SSM_GCP:-}" ]]; then
+    GCP_KEY="$_SSM_GCP"
     GCP_PROJECT_ID="rcplus-alloy-gcp"
     GCP_LOCATION="global"
     ok "GCP Vertex AI configured"
@@ -393,8 +437,8 @@ if [[ "$_HAS_AWS" == true ]]; then
   fi
 
   if [[ -z "${LANGSMITH_API_KEY:-}" ]]; then
-    if _LS_KEY=$(aws ssm get-parameter --name /nannos/infrastructure-agents/langsmith-api-key --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
-      LANGSMITH_API_KEY="$_LS_KEY"
+    if [[ -n "${_SSM_LANGSMITH:-}" ]]; then
+      LANGSMITH_API_KEY="$_SSM_LANGSMITH"
       LANGSMITH_TRACING="true"
       LANGSMITH_ENDPOINT="https://eu.api.smith.langchain.com"
       LANGSMITH_PROJECT="dev-nannos-agent-framework"
@@ -414,41 +458,31 @@ if [[ "$_HAS_AWS" == true ]]; then
   CATALOG_THUMBNAILS_S3_BUCKET="dev-nannos-infrastructure-agents-catalog-thumbnails"
 
   # Google OAuth for catalog Drive sync (optional)
-  if _GOAUTH_ID=$(aws ssm get-parameter --name /nannos/infrastructure-agents/google-oauth-client-id --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
-    GOOGLE_OAUTH_CLIENT_ID="$_GOAUTH_ID"
+  if [[ -n "${_SSM_GOAUTH_ID:-}" ]]; then
+    GOOGLE_OAUTH_CLIENT_ID="$_SSM_GOAUTH_ID"
     ok "Google OAuth client ID loaded from SSM"
   else
     warn "Could not fetch Google OAuth client ID from SSM — catalog Drive sync disabled"
   fi
-  if _GOAUTH_SECRET=$(aws ssm get-parameter --name /nannos/infrastructure-agents/google-oauth-client-secret --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
-    GOOGLE_OAUTH_CLIENT_SECRET="$_GOAUTH_SECRET"
+  if [[ -n "${_SSM_GOAUTH_SECRET:-}" ]]; then
+    GOOGLE_OAUTH_CLIENT_SECRET="$_SSM_GOAUTH_SECRET"
     ok "Google OAuth client secret loaded from SSM"
   else
     warn "Could not fetch Google OAuth client secret from SSM"
   fi
 
   # Twilio credentials (optional — needed for voice agent + phone verification)
-  if _TWILIO_SID=$(aws ssm get-parameter --name /nannos/twilio/account-sid --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
-    TWILIO_ACCOUNT_SID="$_TWILIO_SID"
+  if [[ -n "${_SSM_TWILIO_SID:-}" ]]; then
+    TWILIO_ACCOUNT_SID="$_SSM_TWILIO_SID"
     ok "Twilio Account SID loaded from SSM"
   else
     warn "Could not fetch Twilio Account SID from SSM — voice calls and phone verification disabled"
   fi
-  if _TWILIO_KEY=$(aws ssm get-parameter --name /nannos/twilio/api-key --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
-    TWILIO_API_KEY="$_TWILIO_KEY"
-  fi
-  if _TWILIO_SECRET=$(aws ssm get-parameter --name /nannos/twilio/api-secret --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
-    TWILIO_API_SECRET="$_TWILIO_SECRET"
-  fi
-  if _TWILIO_VSID=$(aws ssm get-parameter --name /nannos/twilio/verify-service-sid --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
-    TWILIO_VERIFY_SERVICE_SID="$_TWILIO_VSID"
-  fi
-  if _TWILIO_VKEY=$(aws ssm get-parameter --name /nannos/twilio/verify-api-key --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
-    TWILIO_VERIFY_API_KEY="$_TWILIO_VKEY"
-  fi
-  if _TWILIO_VSECRET=$(aws ssm get-parameter --name /nannos/twilio/verify-api-secret --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
-    TWILIO_VERIFY_API_SECRET="$_TWILIO_VSECRET"
-  fi
+  TWILIO_API_KEY="${_SSM_TWILIO_KEY:-$TWILIO_API_KEY}"
+  TWILIO_API_SECRET="${_SSM_TWILIO_SECRET:-$TWILIO_API_SECRET}"
+  TWILIO_VERIFY_SERVICE_SID="${_SSM_TWILIO_VSID:-$TWILIO_VERIFY_SERVICE_SID}"
+  TWILIO_VERIFY_API_KEY="${_SSM_TWILIO_VKEY:-$TWILIO_VERIFY_API_KEY}"
+  TWILIO_VERIFY_API_SECRET="${_SSM_TWILIO_VSECRET:-$TWILIO_VERIFY_API_SECRET}"
 
   ok "AWS resources configured (dev environment)"
 fi
@@ -480,33 +514,14 @@ if [[ "$_OIDC_MODE" == "remote-ssm" ]]; then
   _KC_BASE_URL="${OIDC_ISSUER%/realms/*}"
   _KC_REALM="${OIDC_ISSUER##*/realms/}"
 
-  log "Fetching OIDC secrets from AWS SSM..."
-
-  if _secret=$(aws ssm get-parameter --name /nannos/keycloak/agent-console-client-secret --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
-    _OIDC_SECRET_BACKEND="$_secret"
-  else
-    err "Failed to fetch agent-console OIDC secret from SSM"
-  fi
-
-  if _secret=$(aws ssm get-parameter --name /nannos/keycloak/orchestrator-secret --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
-    _OIDC_SECRET_ORCHESTRATOR="$_secret"
-  else
-    err "Failed to fetch orchestrator OIDC secret from SSM"
-  fi
-
-  if _secret=$(aws ssm get-parameter --name /nannos/keycloak/nannos-admin-secret --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
-    _OIDC_SECRET_ADMIN="$_secret"
-  else
-    warn "Could not fetch nannos-admin secret — Keycloak group sync disabled"
-    _OIDC_SECRET_ADMIN=""
-  fi
-
-  if _secret=$(aws ssm get-parameter --name /nannos/keycloak/agent-runner-secret --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
-    _OIDC_SECRET_AGENT_RUNNER="$_secret"
-  else
-    warn "Could not fetch agent-runner secret — agent runner will use backend secret"
-    _OIDC_SECRET_AGENT_RUNNER=""
-  fi
+  [[ -n "${_SSM_KC_CONSOLE:-}" ]] || err "Failed to fetch agent-console OIDC secret from SSM"
+  _OIDC_SECRET_BACKEND="$_SSM_KC_CONSOLE"
+  [[ -n "${_SSM_KC_ORCHESTRATOR:-}" ]] || err "Failed to fetch orchestrator OIDC secret from SSM"
+  _OIDC_SECRET_ORCHESTRATOR="$_SSM_KC_ORCHESTRATOR"
+  _OIDC_SECRET_ADMIN="${_SSM_KC_ADMIN:-}"
+  [[ -n "$_OIDC_SECRET_ADMIN" ]] || warn "Could not fetch nannos-admin secret — Keycloak group sync disabled"
+  _OIDC_SECRET_AGENT_RUNNER="${_SSM_KC_RUNNER:-}"
+  [[ -n "$_OIDC_SECRET_AGENT_RUNNER" ]] || warn "Could not fetch agent-runner secret — agent runner will use backend secret"
 
   ok "OIDC secrets loaded from SSM"
 
@@ -566,9 +581,13 @@ log "Running database migrations (Rambler)..."
 CONSOLE_MIGRATIONS_IMAGE="nannos-console-migrations:local"
 DOCSTORE_MIGRATIONS_IMAGE="nannos-docstore-migrations:local"
 
-# Build both migration images
-docker build -t "$CONSOLE_MIGRATIONS_IMAGE" "$ROOT_DIR/packages/console-backend/sqlmigrations" --quiet
-docker build -t "$DOCSTORE_MIGRATIONS_IMAGE" "$ROOT_DIR/packages/orchestrator-agent/sqlmigrations" --quiet
+# Build both migration images with the current context's own docker-driver builder, whatever
+# buildx builder is the default. A docker-container builder (needed for multi-platform pushes)
+# exports and re-loads the whole image on every build, even a full cache hit: ~70 s vs ~7 s.
+# These images are local-only; release builds keep the default builder.
+_LOCAL_BUILDER="$(docker context show)"
+docker build --builder "$_LOCAL_BUILDER" -t "$CONSOLE_MIGRATIONS_IMAGE" "$ROOT_DIR/packages/console-backend/sqlmigrations" --quiet
+docker build --builder "$_LOCAL_BUILDER" -t "$DOCSTORE_MIGRATIONS_IMAGE" "$ROOT_DIR/packages/orchestrator-agent/sqlmigrations" --quiet
 
 # Install pgvector extension on the docstore database
 docker run --rm \

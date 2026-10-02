@@ -1101,7 +1101,8 @@ _start-test-db:
 _build-migrations:
   #!/usr/bin/env bash
   set -e
-  docker build -t {{_migrations_image}} {{_migrations_dir}}
+  # Local-only image: the context's own builder skips a docker-container builder's export+load.
+  docker build --builder "$(docker context show)" -t {{_migrations_image}} {{_migrations_dir}}
 
 # Run migrations against a given port
 [private]
