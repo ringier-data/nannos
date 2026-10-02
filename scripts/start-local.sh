@@ -834,10 +834,11 @@ export AUTO_APPROVE_MAX_MCP_TOOLS_COUNT="${AUTO_APPROVE_MAX_MCP_TOOLS_COUNT:-3}"
 # bound. Set in the repo-root .env.
 export CODE_INTERPRETER_PTC="${CODE_INTERPRETER_PTC:-0}"
 export PUBLIC_URL="${PUBLIC_URL:-}"
-export SANDBOX_PROVIDER="${SANDBOX_PROVIDER:-}" SANDBOX_POOL_CAPACITY="${SANDBOX_POOL_CAPACITY:-}"
-export SANDBOX_WARM_TTL="${SANDBOX_WARM_TTL:-}"
-export GATANA_ORG_ID="${GATANA_ORG_ID:-}" GATANA_API_KEY="${GATANA_API_KEY:-}"
-export GATANA_ORG_CAPACITY="${GATANA_ORG_CAPACITY:-}"
+# Optional settings reach the services only when set: an empty one is not "unset" to them
+# (agent-runner's sandbox pool fails on int("") of an empty SANDBOX_POOL_CAPACITY).
+for _var in SANDBOX_PROVIDER SANDBOX_POOL_CAPACITY SANDBOX_WARM_TTL GATANA_ORG_ID GATANA_API_KEY GATANA_ORG_CAPACITY; do
+  if [[ -n "${!_var:-}" ]]; then export "${_var?}"; else unset "$_var"; fi
+done
 
 export NANNOS_ROOT="$ROOT_DIR" NANNOS_SLOT="$_SLOT" NANNOS_STACK_DIR="$_STACK_DIR" NANNOS_LOG_DIR="$_LOG_DIR"
 export NANNOS_FRONTEND_PORT="$_P_FRONTEND" NANNOS_ORCHESTRATOR_PORT="$_P_ORCHESTRATOR"
@@ -931,6 +932,7 @@ fi
 cd "$ROOT_DIR"
 # Each start begins its logs afresh (process-compose appends): a log shows this run only, not the
 # errors of the last one.
+rm -rf "$_STACK_DIR/ready"
 for _log in $(sed -n 's|^ *log_location: ${NANNOS_LOG_DIR}/||p' "$LOCAL_DEV_DIR/process-compose.yaml"); do
   : > "$_LOG_DIR/$_log"
 done

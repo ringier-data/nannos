@@ -35,9 +35,10 @@ x-log: &log
 x-once: &once
   restart: "no"
 
-# Any HTTP answer counts as up: the agents answer 401 without a token; curl prints 000 for none.
-# A probe that keeps failing kills the process, so the threshold covers a slow first boot (uv
-# syncing, a CPU-saturated machine) — a crash still shows at once as the process exiting.
+# Readiness: the service answers 2xx (the agents on their public agent card), checked by ready.sh,
+# which stops asking once it did. A probe that keeps failing kills the process, so the threshold
+# covers a slow first boot (uv syncing, a CPU-saturated machine) — a crash still shows at once as
+# the process exiting.
 x-probe: &probe
   initial_delay_seconds: 2
   period_seconds: 2
@@ -131,7 +132,8 @@ processes:
     depends_on:
       migrate-console: {condition: process_completed_successfully}
     readiness_probe:
-      http_get: {host: 127.0.0.1, port: ${LLM_GATEWAY_PORT:-4000}, path: /health/liveliness}
+      exec:
+        command: "'${NANNOS_ROOT}/scripts/local-dev/ready.sh' '${NANNOS_STACK_DIR}' gateway http://127.0.0.1:${LLM_GATEWAY_PORT:-4000}/health/liveliness"
       <<: *probe
     shutdown:
       command: "docker stop -t 10 '${NANNOS_GW_CONTAINER}'"
@@ -183,7 +185,8 @@ processes:
       keycloak-setup: {condition: process_completed_successfully}
       gateway: {condition: process_healthy}
     readiness_probe:
-      http_get: {host: 127.0.0.1, port: ${CONSOLE_BACKEND_PORT:-5001}, path: /api/v1/health}
+      exec:
+        command: "'${NANNOS_ROOT}/scripts/local-dev/ready.sh' '${NANNOS_STACK_DIR}' console-backend http://127.0.0.1:${CONSOLE_BACKEND_PORT:-5001}/api/v1/health"
       <<: *probe
 
   catalog-worker:
@@ -229,7 +232,8 @@ processes:
     depends_on:
       deps-soffice-worker: {condition: process_completed_successfully}
     readiness_probe:
-      http_get: {host: 127.0.0.1, port: ${NANNOS_SOFFICE_PORT:-8090}, path: /health}
+      exec:
+        command: "'${NANNOS_ROOT}/scripts/local-dev/ready.sh' '${NANNOS_STACK_DIR}' soffice-worker http://127.0.0.1:${NANNOS_SOFFICE_PORT:-8090}/health"
       <<: *probe
 
   orchestrator:
@@ -262,7 +266,7 @@ processes:
       console-backend: {condition: process_healthy}
     readiness_probe:
       exec:
-        command: "[ \"$$(curl -s -o /dev/null --max-time 3 -w '%{http_code}' http://127.0.0.1:${NANNOS_ORCHESTRATOR_PORT:-10001}/)\" != 000 ]"
+        command: "'${NANNOS_ROOT}/scripts/local-dev/ready.sh' '${NANNOS_STACK_DIR}' orchestrator http://127.0.0.1:${NANNOS_ORCHESTRATOR_PORT:-10001}/.well-known/agent-card.json"
       <<: *probe
 
   runner:
@@ -290,7 +294,7 @@ processes:
       console-backend: {condition: process_healthy}
     readiness_probe:
       exec:
-        command: "[ \"$$(curl -s -o /dev/null --max-time 3 -w '%{http_code}' http://127.0.0.1:${NANNOS_RUNNER_PORT:-5005}/)\" != 000 ]"
+        command: "'${NANNOS_ROOT}/scripts/local-dev/ready.sh' '${NANNOS_STACK_DIR}' runner http://127.0.0.1:${NANNOS_RUNNER_PORT:-5005}/.well-known/agent-card.json"
       <<: *probe
 
   voice-agent:
@@ -316,7 +320,7 @@ processes:
       console-backend: {condition: process_healthy}
     readiness_probe:
       exec:
-        command: "[ \"$$(curl -s -o /dev/null --max-time 3 -w '%{http_code}' http://127.0.0.1:${NANNOS_VOICE_PORT:-8002}/)\" != 000 ]"
+        command: "'${NANNOS_ROOT}/scripts/local-dev/ready.sh' '${NANNOS_STACK_DIR}' voice-agent http://127.0.0.1:${NANNOS_VOICE_PORT:-8002}/.well-known/agent-card.json"
       <<: *probe
 
   # 'dev:link', NOT 'build:watch'. The console dev server compiles the SDK's source directly, so
@@ -342,14 +346,16 @@ processes:
     working_dir: ${NANNOS_ROOT}/packages/console-frontend
     log_location: ${NANNOS_LOG_DIR}/frontend.log
     log_configuration: *log
-    # The console is nothing without its API: an open browser tab polls Socket.IO through the
-    # proxy, which only logs errors until the backend answers.
+    # The console is nothing without its API and the orchestrator: an open browser tab reconnects
+    # at once, and until both answer only produces proxy and agent-card errors.
     depends_on:
       deps-frontend: {condition: process_completed_successfully}
       embed-sdk-build: {condition: process_completed_successfully}
       console-backend: {condition: process_healthy}
+      orchestrator: {condition: process_healthy}
     readiness_probe:
-      http_get: {host: 127.0.0.1, port: ${NANNOS_FRONTEND_PORT:-5173}, path: /}
+      exec:
+        command: "'${NANNOS_ROOT}/scripts/local-dev/ready.sh' '${NANNOS_STACK_DIR}' frontend http://127.0.0.1:${NANNOS_FRONTEND_PORT:-5173}/"
       <<: *probe
 
   # ── Slot 0 only ──────────────────────────────────────────────────────────────────────────────
@@ -395,9 +401,11 @@ processes:
     log_location: ${NANNOS_LOG_DIR}/slack.log
     log_configuration: *log
     disabled: ${NANNOS_CHANNEL_CLIENTS_OFF:-false}
+    # It registers its delivery channel with console-backend on start.
     depends_on:
       deps-client-slack: {condition: process_completed_successfully}
       slack-migrate: {condition: process_completed_successfully}
+      console-backend: {condition: process_healthy}
 
   slack-frontend:
     command: "npm run dev"
