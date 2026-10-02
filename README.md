@@ -24,6 +24,9 @@ An enterprise-grade multi-agent AI platform built on the [Agent-to-Agent (A2A) p
 
 ## Quick-Start Local
 
+Needs Docker, `uv`, Node and [process-compose](https://f1bonacc1.github.io/process-compose/)
+(`brew install f1bonacc1/tap/process-compose`).
+
 ```bash
 export OPENAI_COMPATIBLE_BASE_URL=http://localhost:1234
 just start-local

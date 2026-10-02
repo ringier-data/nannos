@@ -134,39 +134,45 @@ unavailable, the gateway tries the next in the tier group); *alias degradation* 
 
 **Your stack is a slot (ADR-0016).** From your worktree, `just up` claims a slot (1–8) and starts a
 full stack of *your branch's* code on its own ports, databases, Model Gateway and cookies, beside
-every other stack. It needs no TTY and asks nothing: it returns once every service is healthy and
-prints the slot's URLs as JSON. Running it again from the same worktree just prints the running
-slot, so call it whenever you need the stack — do not probe ports and reuse whatever answers
-(slot 0 on `:5173`/`:5001` may be running another branch).
+every other stack. It needs no TTY and asks nothing: it returns once every service is ready (or
+fails at once, naming the step or service that failed) and prints the slot's URLs as JSON. Running
+it again from the same worktree just prints the running slot, so call it whenever you need the
+stack — do not probe ports and reuse whatever answers (slot 0 on `:5173`/`:5001` may be running
+another branch).
 
 ```bash
 aws sso login --profile "$AWS_PROFILE"   # if the SSO session expired (SSM secrets, Bedrock)
 just up                  # remote IdP from .env (needs the slot URIs registered there)
 just up --local-idp      # local Keycloak instead: test@local.dev / password
-just up --from-slot0     # start the slot's databases as a copy of slot 0's instead of empty
 ```
 
 Slot N: console `http://localhost:4N173`, backend `:4N001`, orchestrator `:4N010`, runner `:4N005`,
 gateway `:4N400`; databases `console_sN` / `docstore_sN` on the shared PostgreSQL (`:5401` /
-`:5402`); logs in `~/.nannos/slots/N/logs/<service>.log`. Services hot-reload on edit. What the stack
-talks to comes from `.env`: `AWS_PROFILE` → cloud models (Bedrock/Azure/Vertex) and SSM secrets,
-`OPENAI_COMPATIBLE_BASE_URL` → a local LLM, `OIDC_ISSUER` → the remote IdP (else the local Keycloak).
+`:5402`); logs in `~/.nannos/slots/N/logs/<service>.log` (setup steps too: `migrate-console.log`,
+`keycloak-setup.log`, …). Services hot-reload on edit. What the stack talks to comes from `.env`:
+`AWS_PROFILE` → cloud models (Bedrock/Azure/Vertex) and SSM secrets, `OPENAI_COMPATIBLE_BASE_URL` →
+a local LLM, `OIDC_ISSUER` → the remote IdP (else the local Keycloak).
 
-- **Data:** a slot's databases start empty (all migrations applied) and are kept until `just down`
-  drops them. Use `--from-slot0` when you need realistic data (agents, registered models, users):
-  every copied scheduled job is suspended so it cannot fire beside slot 0, IdP group/user sync and
-  outbound SCIM are off (they would change slot 0's real groups and downstream systems), and the
-  copy shares slot 0's S3 objects — deleting a file, conversation or catalog in it deletes slot 0's
-  too. The copy is
-  refused when slot 0 runs a branch with migrations yours lacks.
-- **Migrations:** a new migration is applied by `just down --keep-db && just up`. After editing an
-  already-applied one, `up` refuses to start; `just db-reset` rebuilds the databases.
+The stack is one process-compose definition, `scripts/local-dev/process-compose.yaml` (setup steps
+as one-shot processes, then the services); `scripts/start-local.sh` assembles its environment and
+secrets. Each stack has a control socket, `~/.nannos/slots/N/pc.sock`:
+`process-compose process list -u ~/.nannos/slots/N/pc.sock` shows every process's state,
+`process-compose process restart <name> -u …` restarts one, and
+`process-compose attach -u …` opens the TUI on it — what the user runs to look into your stack.
+
+- **Data:** a slot's databases start empty (all migrations applied) and live until `just down`.
+- **Migrations:** `just restart` applies a new migration (it stops and starts the slot on its
+  databases). After editing an already-applied one, the slot refuses to start; `just db-reset`
+  rebuilds the databases.
+- **A crashed service** stays exited: `just slots` shows the slot as `failed`, and `just up` names the
+  process. Fix it and `just restart` (or restart just that process, above).
 - **When you are done:** `just down` (stops it, drops its databases, frees the ports). `just slots`
-  lists every running stack, slot 0 included, with its branch and worktree; `just slots-gc` releases slots whose processes died.
+  lists every running stack, slot 0 included, with its state, branch and worktree; `just slots-gc`
+  releases slots whose stack is gone.
 - **One slot per worktree:** agents working in the same worktree share its slot.
-- **Slot 0 is the user's** `just start-local` (console `:5173`, mprocs, interactive). Only slot 0 runs
-  the Slack and Google Chat clients; for channel work, ask the user rather than starting it
-  yourself. `stop-local` / `reset-local` take the shared PostgreSQL and Keycloak away from every
+- **Slot 0 is the user's** `just start-local` (console `:5173`, process-compose TUI, interactive). Only
+  slot 0 runs the Slack and Google Chat clients; for channel work, ask the user rather than starting
+  it yourself. `stop-local` / `reset-local` take the shared PostgreSQL and Keycloak away from every
   slot — do not run them.
 
 **The env files are gitignored and per-checkout** — they exist in the main checkout, not in a fresh worktree. `just up` and `just start-local` first run `just env-sync`, which copies the files listed in `scripts/local-dev/worktree-env-files` (`.env`, `litellm-local-models.yaml`, `packages/client-slack/.env`, the orchestrator's `tests/integration/.env.integration`) from the main checkout when the worktree lacks them; it never overwrites one you changed (`just env-sync --force` refreshes them). If the main checkout has no `.env` either, or the stack reports no LLM provider / missing config, **STOP and ask the user to provide it — never fabricate secrets, AWS profiles, or OIDC URLs.** Ask only for the *minimal subset the task needs*, not the whole file. Variables group by what they unlock:
