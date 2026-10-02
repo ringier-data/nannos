@@ -45,25 +45,27 @@ x-probe: &probe
   timeout_seconds: 4
   failure_threshold: 450
 
-# Namespaces are the startup stages, numbered so the TUI sorted by namespace reads in order (and
-# `process-compose namespace restart 3-services -u …` restarts a stage). `just graph` draws the
-# dependency tree, `just startup` what held the start up.
+# Namespaces group the processes by role, numbered in startup order so the TUI sorted by namespace
+# (key C) reads top-down: 1-infra (shared infrastructure, migrations, Keycloak), 2-deps (package
+# installs), 3-backend (gateway, console-backend, workers), 4-agents, 5-frontend, 6-channels (Slack,
+# Google Chat — slot 0 only). `process-compose namespace restart 4-agents -u …` restarts a group;
+# `just graph` draws the dependency tree, `just startup` what held the start up.
 processes:
   # ── Setup ────────────────────────────────────────────────────────────────────────────────────
   info:
-    namespace: 1-setup
+    namespace: 1-infra
     command: "cat '${NANNOS_STACK_DIR}/info.txt'"
     availability: *once
 
   infra:
-    namespace: 1-setup
+    namespace: 1-infra
     command: "'${NANNOS_ROOT}/scripts/local-dev/infra.sh'"
     log_location: ${NANNOS_LOG_DIR}/infra-setup.log
     log_configuration: *log
     availability: *once
 
   migrate-console:
-    namespace: 1-setup
+    namespace: 1-infra
     command: "'${NANNOS_ROOT}/scripts/local-dev/migrate.sh' console"
     log_location: ${NANNOS_LOG_DIR}/migrate-console.log
     log_configuration: *log
@@ -72,7 +74,7 @@ processes:
       infra: {condition: process_completed_successfully}
 
   migrate-docstore:
-    namespace: 1-setup
+    namespace: 1-infra
     command: "'${NANNOS_ROOT}/scripts/local-dev/migrate.sh' docstore"
     log_location: ${NANNOS_LOG_DIR}/migrate-docstore.log
     log_configuration: *log
@@ -81,7 +83,7 @@ processes:
       infra: {condition: process_completed_successfully}
 
   keycloak-setup:
-    namespace: 1-setup
+    namespace: 1-infra
     command: "'${NANNOS_ROOT}/scripts/local-dev/keycloak-setup.sh'"
     log_location: ${NANNOS_LOG_DIR}/keycloak-setup.log
     log_configuration: *log
@@ -94,32 +96,32 @@ processes:
       infra: {condition: process_completed_successfully}
 
   deps-console-backend:
-    namespace: 1-setup
+    namespace: 2-deps
     command: "uv sync --quiet"
     working_dir: ${NANNOS_ROOT}/packages/console-backend
     availability: *once
   deps-orchestrator:
-    namespace: 1-setup
+    namespace: 2-deps
     command: "uv sync --quiet"
     working_dir: ${NANNOS_ROOT}/packages/orchestrator-agent
     availability: *once
   deps-runner:
-    namespace: 1-setup
+    namespace: 2-deps
     command: "uv sync --quiet"
     working_dir: ${NANNOS_ROOT}/packages/agent-runner
     availability: *once
   deps-voice-agent:
-    namespace: 1-setup
+    namespace: 2-deps
     command: "uv sync --quiet"
     working_dir: ${NANNOS_ROOT}/packages/voice-agent
     availability: *once
   deps-soffice-worker:
-    namespace: 1-setup
+    namespace: 2-deps
     command: "uv sync --quiet"
     working_dir: ${NANNOS_ROOT}/packages/soffice-worker
     availability: *once
   deps-frontend:
-    namespace: 1-setup
+    namespace: 2-deps
     command: "npm install --silent --no-save"
     working_dir: ${NANNOS_ROOT}/packages/console-frontend
     availability: *once
@@ -130,7 +132,7 @@ processes:
   # still bundles dist. Build once here so both are valid; the `embed-sdk` service then keeps only
   # the .d.ts and the stylesheet fresh.
   embed-sdk-build:
-    namespace: 1-setup
+    namespace: 2-deps
     command: "npm run build --silent"
     working_dir: ${NANNOS_ROOT}/packages/embed-sdk
     log_location: ${NANNOS_LOG_DIR}/embed-sdk-build.log
@@ -141,7 +143,7 @@ processes:
 
   # ── Model Gateway ────────────────────────────────────────────────────────────────────────────
   gateway:
-    namespace: 2-core
+    namespace: 3-backend
     command: "'${NANNOS_ROOT}/scripts/local-dev/gateway.sh'"
     log_location: ${NANNOS_LOG_DIR}/litellm.log
     log_configuration: *log
@@ -157,7 +159,7 @@ processes:
 
   # ── Services ─────────────────────────────────────────────────────────────────────────────────
   console-backend:
-    namespace: 2-core
+    namespace: 3-backend
     command: "uv run python ${NANNOS_DEBUGPY_BACKEND} -m uvicorn app:asgi_app --host 0.0.0.0 --port ${CONSOLE_BACKEND_PORT:-5001} --reload"
     working_dir: ${NANNOS_ROOT}/packages/console-backend
     log_location: ${NANNOS_LOG_DIR}/console-backend.log
@@ -207,7 +209,7 @@ processes:
       <<: *probe
 
   catalog-worker:
-    namespace: 3-services
+    namespace: 3-backend
     command: "uv run python ${NANNOS_MEMPROFILE_ARGS} catalog_worker.py"
     working_dir: ${NANNOS_ROOT}/packages/console-backend
     log_location: ${NANNOS_LOG_DIR}/catalog-worker.log
@@ -240,7 +242,7 @@ processes:
           exclude: ["**/.venv/**", "**/tests/**"]
 
   soffice-worker:
-    namespace: 3-services
+    namespace: 3-backend
     command: "uv run uvicorn main:app --host 127.0.0.1 --port ${NANNOS_SOFFICE_PORT:-8090} --reload"
     working_dir: ${NANNOS_ROOT}/packages/soffice-worker
     log_location: ${NANNOS_LOG_DIR}/soffice-worker.log
@@ -256,7 +258,7 @@ processes:
       <<: *probe
 
   orchestrator:
-    namespace: 3-services
+    namespace: 4-agents
     command: "uv run python ${NANNOS_DEBUGPY_ORCHESTRATOR} -m uvicorn main:app --host 0.0.0.0 --port ${NANNOS_ORCHESTRATOR_PORT:-10001} --reload --reload-dir . --reload-dir ../agent-common/agent_common --log-config log_conf.yml --no-access-log"
     working_dir: ${NANNOS_ROOT}/packages/orchestrator-agent
     log_location: ${NANNOS_LOG_DIR}/orchestrator.log
@@ -290,7 +292,7 @@ processes:
       <<: *probe
 
   runner:
-    namespace: 3-services
+    namespace: 4-agents
     command: "uv run python ${NANNOS_DEBUGPY_RUNNER} -m uvicorn main:app --host 0.0.0.0 --port ${NANNOS_RUNNER_PORT:-5005} --reload --reload-dir . --reload-dir ../agent-common/agent_common --log-config log_conf.yml --no-access-log"
     working_dir: ${NANNOS_ROOT}/packages/agent-runner
     log_location: ${NANNOS_LOG_DIR}/runner.log
@@ -319,7 +321,7 @@ processes:
       <<: *probe
 
   voice-agent:
-    namespace: 3-services
+    namespace: 4-agents
     command: "uv run python ${NANNOS_DEBUGPY_VOICE} main.py --reload"
     working_dir: ${NANNOS_ROOT}/packages/voice-agent
     log_location: ${NANNOS_LOG_DIR}/voice-agent.log
@@ -354,7 +356,7 @@ processes:
   # Tailwind's --watch exits when its stdin closes, and a process here gets /dev/null: feed it a
   # pipe that stays open while the command runs (and ends with it, $$$$ being its pid after exec).
   embed-sdk:
-    namespace: 4-console
+    namespace: 5-frontend
     # Its node children can outlive a SIGTERM to the group (mprocs stopped it with SIGKILL too).
     shutdown: {signal: 9}
     command: |
@@ -367,7 +369,7 @@ processes:
       embed-sdk-build: {condition: process_completed_successfully}
 
   frontend:
-    namespace: 4-console
+    namespace: 5-frontend
     command: "npx vite --host 0.0.0.0 --port ${NANNOS_FRONTEND_PORT:-5173} --strictPort"
     working_dir: ${NANNOS_ROOT}/packages/console-frontend
     log_location: ${NANNOS_LOG_DIR}/frontend.log
@@ -388,7 +390,7 @@ processes:
   # The channel clients each bind one external app (a Slack app, a Google Chat bot), which a
   # second stack cannot share; the shared infrastructure's logs are slot 0's to show.
   infra-logs:
-    namespace: 5-slot0
+    namespace: 1-infra
     command: "docker compose logs -f --tail 200"
     working_dir: ${NANNOS_ROOT}/scripts/local-dev
     log_location: ${NANNOS_LOG_DIR}/infra.log
@@ -399,26 +401,26 @@ processes:
 
   # --no-save: a start installs what the lockfiles say and never rewrites them.
   deps-client-slack:
-    namespace: 1-setup
+    namespace: 6-channels
     command: "npm install --silent --no-save"
     working_dir: ${NANNOS_ROOT}/packages/client-slack
     availability: *once
     disabled: ${NANNOS_CHANNEL_CLIENTS_OFF:-false}
   deps-client-slack-frontend:
-    namespace: 1-setup
+    namespace: 6-channels
     command: "npm install --silent --no-save"
     working_dir: ${NANNOS_ROOT}/packages/client-slack-frontend
     availability: *once
     disabled: ${NANNOS_CHANNEL_CLIENTS_OFF:-false}
   deps-client-google-chat:
-    namespace: 1-setup
+    namespace: 6-channels
     command: "npm install --silent --no-save"
     working_dir: ${NANNOS_ROOT}/packages/client-google-chat
     availability: *once
     disabled: ${NANNOS_CHANNEL_CLIENTS_OFF:-false}
 
   slack-migrate:
-    namespace: 1-setup
+    namespace: 6-channels
     command: "just migrate"
     working_dir: ${NANNOS_ROOT}/packages/client-slack
     log_location: ${NANNOS_LOG_DIR}/slack-migrate.log
@@ -427,7 +429,7 @@ processes:
     disabled: ${NANNOS_CHANNEL_CLIENTS_OFF:-false}
 
   slack:
-    namespace: 5-slot0
+    namespace: 6-channels
     # Its node children can outlive a SIGTERM to the group (mprocs stopped it with SIGKILL too).
     shutdown: {signal: 9}
     command: "./wait-for-postgres.sh postgres:password@localhost:4700/nannos -- npm run dev"
@@ -442,7 +444,7 @@ processes:
       console-backend: {condition: process_healthy}
 
   slack-frontend:
-    namespace: 5-slot0
+    namespace: 6-channels
     # Its node children can outlive a SIGTERM to the group (mprocs stopped it with SIGKILL too).
     shutdown: {signal: 9}
     command: "npm run dev"
@@ -454,7 +456,7 @@ processes:
       deps-client-slack-frontend: {condition: process_completed_successfully}
 
   google-chat:
-    namespace: 5-slot0
+    namespace: 6-channels
     # Its node children can outlive a SIGTERM to the group (mprocs stopped it with SIGKILL too).
     shutdown: {signal: 9}
     command: "npm run dev"
