@@ -803,8 +803,9 @@ class TestUntypedArguments:
         assert clean_gemini_schema(copy.deepcopy(schema))["required"] == ["a", "b"]
         nested = {"type": "object", "properties": {"w": copy.deepcopy(schema)}}
         assert clean_gemini_schema(nested)["properties"]["w"]["required"] == ["a", "b"]
+        # The binding path prunes names with no property: LiteLLM strips allOf before Vertex sees it
         params = validate_and_clean_tool_dict({"name": "t", "parameters": schema})["function"]["parameters"]
-        assert params["required"] == ["a", "b"]
+        assert params["required"] == ["a"]
 
     def test_malformed_required_does_not_raise(self):
         for required in (None, [["a"]], "a"):
@@ -812,7 +813,7 @@ class TestUntypedArguments:
             # clean_schema_node strips None-valued keywords, so required: None simply goes away there
             assert clean_gemini_schema(copy.deepcopy(schema)).get("required") == required
             params = validate_and_clean_tool_dict({"name": "t", "parameters": schema})["function"]["parameters"]
-            assert params["required"] == required
+            assert params.get("required") == ([["a"]] if isinstance(required, list) else None)
 
 
 class TestAnyOfNullableUnwrapping:

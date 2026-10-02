@@ -337,6 +337,13 @@ def validate_and_clean_tool_dict(
         dropped = _none_valued(params["properties"])
         params["properties"] = clean_schema_properties(params["properties"], level, tool_name, defs=defs)
         _prune_required(params, dropped)
+        # Binding path only (as before #328): a required name with no property behind it is refused
+        # by Gemini ("property is not defined"), and LiteLLM strips the allOf/patternProperties that
+        # could supply it. A non-list required is dropped, as clean_schema_node does for None.
+        if isinstance(params.get("required"), list):
+            params["required"] = [r for r in params["required"] if not isinstance(r, str) or r in params["properties"]]
+        else:
+            params.pop("required", None)
 
     return tool_dict
 

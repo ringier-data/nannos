@@ -79,7 +79,7 @@ async def test_an_untyped_argument_is_sent_with_its_value(
     # could still send an undeclared argument the prompt names and pass against a dropping cleaner.
     node = tool["function"]["parameters"]
     for key in path:
-        assert key in node["properties"] and key in node.get("required", []), f"cleaner dropped {key}: {node}"
+        assert key in node.get("properties", {}) and key in node.get("required", []), f"cleaner dropped {key}: {node}"
         node = node["properties"][key]
     t.log_inputs({"model": model_type, "parameters": tool["function"]["parameters"]})
 
