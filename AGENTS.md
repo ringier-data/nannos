@@ -132,47 +132,42 @@ unavailable, the gateway tries the next in the tier group); *alias degradation* 
 
 ### Local Development
 
-**Before starting anything, check whether the stack is already running** — `start-local` is slow and a running stack is the common case. Probe the well-known local ports and reuse them if up:
+**Your stack is a slot (ADR-0016).** From your worktree, `just up` claims a slot (1–8) and starts a
+full stack of *your branch's* code on its own ports, databases, Model Gateway and cookies, beside
+every other stack. It needs no TTY and asks nothing: it returns once every service is healthy and
+prints the slot's URLs as JSON. Running it again from the same worktree just prints the running
+slot, so call it whenever you need the stack — do not probe ports and reuse whatever answers
+(slot 0 on `:5173`/`:5001` may be running another branch).
 
 ```bash
-# NB: no `-f` — the backends answer non-2xx on `/` even when healthy (console-backend :5001 → 404,
-# orchestrator :10001 → 401 behind its JWT middleware), so `-f` would report them falsely "down".
-# This checks "is the port answering HTTP at all".
-for p in 5173 5001 10001 8180; do curl -s -o /dev/null --max-time 2 "http://localhost:$p" && echo "✓ :$p up" || echo "✗ :$p down"; done
+aws sso login --profile "$AWS_PROFILE"   # if the SSO session expired (SSM secrets, Bedrock)
+just up                  # remote IdP from .env (needs the slot URIs registered there)
+just up --local-idp      # local Keycloak instead: test@local.dev / password
+just up --from-slot0     # start the slot's databases as a copy of slot 0's instead of empty
 ```
 
-Local URLs/ports: Console `http://localhost:5173`, Backend API `:5001`, Orchestrator `:10001`, Keycloak `:8180`, PostgreSQL `:5401` (console) / `:5402` (docstore + checkpoints).
+Slot N: console `http://localhost:4N173`, backend `:4N001`, orchestrator `:4N010`, runner `:4N005`,
+gateway `:4N400`; databases `console_sN` / `docstore_sN` on the shared PostgreSQL (`:5401` /
+`:5402`); logs in `~/.nannos/slots/N/logs/<service>.log`. Services hot-reload on edit. What the stack
+talks to comes from `.env`: `AWS_PROFILE` → cloud models (Bedrock/Azure/Vertex) and SSM secrets,
+`OPENAI_COMPATIBLE_BASE_URL` → a local LLM, `OIDC_ISSUER` → the remote IdP (else the local Keycloak).
 
-**Starting the stack:** `just start-local` (→ `scripts/start-local.sh`) sources `.env` from the repo root, starts PostgreSQL + Keycloak, runs DB migrations, and launches every service via **mprocs** (services hot-reload on edit; `Ctrl+C`/`q` in mprocs stops everything; per-service logs in `logs/<service>.log`). Three scenarios, driven by env:
-1. **Full local**: `OPENAI_COMPATIBLE_BASE_URL` set → local LLM + local Keycloak
-2. **Local + AWS**: `AWS_PROFILE` set → cloud models (Bedrock/Azure/GCP) + local Keycloak
-3. **Local + AWS + Remote OIDC**: `AWS_PROFILE` + `OIDC_ISSUER` set → cloud models + remote Keycloak (skips local Keycloak)
+- **Data:** a slot's databases start empty (all migrations applied) and are kept until `just down`
+  drops them. Use `--from-slot0` when you need realistic data (agents, registered models, users):
+  every copied scheduled job is suspended so it cannot fire beside slot 0, and the copy shares slot
+  0's S3 objects — deleting a file, conversation or catalog in it deletes slot 0's too. The copy is
+  refused when slot 0 runs a branch with migrations yours lacks.
+- **Migrations:** a new migration is applied by `just down --keep-db && just up`. After editing an
+  already-applied one, `up` refuses to start; `just db-reset` rebuilds the databases.
+- **When you are done:** `just down` (stops it, drops its databases, frees the ports). `just slots`
+  lists every slot; `just slots-gc` releases slots whose processes died.
+- **One slot per worktree:** agents working in the same worktree share its slot.
+- **Slot 0 is the user's** `just start-local` (console `:5173`, mprocs, interactive). Only slot 0 runs
+  the Slack and Google Chat clients; for channel work, ask the user rather than starting it
+  yourself. `stop-local` / `reset-local` take the shared PostgreSQL and Keycloak away from every
+  slot — do not run them.
 
-**Starting it non-interactively (from an agent):** the script execs **mprocs** (a TUI) and has a `Proceed? [Y/n]` prompt, so it needs a real TTY — piping `yes |` fails with `Error: Stdin is not a tty`. Run it inside a detached tmux session and answer the prompt via send-keys, then poll for readiness:
-```bash
-aws sso login --profile "$AWS_PROFILE"   # if using AWS; SSO sessions expire
-tmux new-session -d -s nannos -x 220 -y 50 "./scripts/start-local.sh"
-sleep 4 && tmux send-keys -t nannos "y" Enter            # answer Proceed?
-# wait ~30s for frontend, ~2-3 min for full stack; inspect with: tmux capture-pane -t nannos -p
-```
-Service status is the left column of `tmux capture-pane -t nannos -p` (`UP`/`DOWN`).
-
-**Your own stack beside the others — slots (ADR-0016):** when the stack above belongs to someone
-else's work, or your branch changes migrations, run your own: `just up` from your worktree claims a
-slot (1–8), starts a full stack on its own ports, databases, gateway and cookies, waits until it
-is healthy and prints its URLs as JSON — no TTY, no prompt. Slot N's console is
-`http://localhost:4N173`, backend `:4N001`, orchestrator `:4N010` (shared Postgres `:5401`/`:5402`,
-databases `console_sN`/`docstore_sN`); logs in `~/.nannos/slots/N/logs/`. Running `up` again from
-the same worktree prints the running slot. `just down` stops it and drops its databases (always
-do this when you are done); `just slots` lists them; `just db-reset` re-migrates after you edit
-an already-applied migration (`up` refuses until you do). Slots have no Slack/Google Chat
-clients. A worktree without its own `.env` uses the main checkout's. `just up --local-idp` signs in
-against the local Keycloak (`test@local.dev` / `password`) instead of the remote IdP. A slot's
-databases start empty; `just up --from-slot0` starts them as a copy of slot 0's (agents, models,
-users) with every scheduled job suspended — deleting files or catalogs in such a copy deletes slot
-0's S3 objects too.
-
-**The `.env` file is gitignored and per-checkout** — it exists at the main repo root but **NOT in fresh git worktrees**. If `scripts/start-local.sh` reports no LLM provider / missing config, or `.env` is absent, **STOP and ask the user to provide it — never fabricate secrets, AWS profiles, or OIDC URLs.** Ask only for the *minimal subset the task needs*, not the whole file. Variables group by what they unlock:
+**The env files are gitignored and per-checkout** — they exist in the main checkout, not in a fresh worktree. `just up` and `just start-local` first run `just env-sync`, which copies the files listed in `scripts/local-dev/worktree-env-files` (`.env`, `litellm-local-models.yaml`, `packages/client-slack/.env`, the orchestrator's `tests/integration/.env.integration`) from the main checkout when the worktree lacks them; it never overwrites one you changed (`just env-sync --force` refreshes them). If the main checkout has no `.env` either, or the stack reports no LLM provider / missing config, **STOP and ask the user to provide it — never fabricate secrets, AWS profiles, or OIDC URLs.** Ask only for the *minimal subset the task needs*, not the whole file. Variables group by what they unlock:
 
 | Var(s) | Unlocks |
 |--------|---------|
@@ -184,9 +179,9 @@ users) with every scheduled job suspended — deleting files or catalogs in such
 
 So e.g. a UI change touching only the console needs just the **Minimum** rows; a sandbox/code-interpreter change additionally needs the Gatana + PTC rows.
 
-**End-to-end code review (incl. QA):** when reviewing or verifying a change that affects runtime behavior, don't stop at reading the diff — confirm the relevant service is up (probe above; if not, follow the start/`.env` steps), then exercise the change in the browser. For frontend/UI behavior, drive live QA against `http://localhost:5173` (e.g. the `frontend-qa-chrome-observer` agent, or `@browser` directly) to capture screenshots / console / network evidence before sign-off.
+**End-to-end code review (incl. QA):** when reviewing or verifying a change that affects runtime behavior, don't stop at reading the diff — bring up your slot (`just up`, which prints its URLs), then exercise the change in the browser. For frontend/UI behavior, drive live QA against your slot's console URL (e.g. the `frontend-qa-chrome-observer` agent, or `@browser` directly) to capture screenshots / console / network evidence before sign-off.
 
-**Verifying server-to-server / log-only effects:** some behaviors aren't visible in the browser's network panel because they originate server-side. Verify these in `logs/<service>.log`. For the discovery cache specifically: run a chat turn for the user so their cache is populated (`orchestrator.log`: `[DISCOVERY-CACHE] miss → discovered … for user_sub=…`), trigger an entitlement change in the Console (e.g. enable a sub-agent for the orchestrator), then run another turn and expect a fresh `[DISCOVERY-CACHE] miss` (the entitlement version moved, so the old key is unreachable); an unchanged entitlement yields `[DISCOVERY-CACHE] hit`. A `[USER-STAMPS] fetch failed … reusing last known stamps` warning means console-backend was unreachable for the per-turn stamp fetch and the turn fell back to the TTL-bounded entry.
+**Verifying server-to-server / log-only effects:** some behaviors aren't visible in the browser's network panel because they originate server-side. Verify these in your slot's `~/.nannos/slots/N/logs/<service>.log` (slot 0: `logs/<service>.log`). For the discovery cache specifically: run a chat turn for the user so their cache is populated (`orchestrator.log`: `[DISCOVERY-CACHE] miss → discovered … for user_sub=…`), trigger an entitlement change in the Console (e.g. enable a sub-agent for the orchestrator), then run another turn and expect a fresh `[DISCOVERY-CACHE] miss` (the entitlement version moved, so the old key is unreachable); an unchanged entitlement yields `[DISCOVERY-CACHE] hit`. A `[USER-STAMPS] fetch failed … reusing last known stamps` warning means console-backend was unreachable for the per-turn stamp fetch and the turn fell back to the TTL-bounded entry.
 
 ### K8s Deployment
 

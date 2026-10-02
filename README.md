@@ -29,6 +29,10 @@ export OPENAI_COMPATIBLE_BASE_URL=http://localhost:1234
 just start-local
 ```
 
+To run another branch beside it (one stack per git worktree, e.g. for coding agents), `just up`
+from that worktree starts a separate, headless stack on its own ports and databases and prints its
+URLs; `just down` removes it. See [ADR-0016](docs/adr/0016-a-local-stack-is-a-numbered-slot.md).
+
 ---
 
 ## Deployment Scopes

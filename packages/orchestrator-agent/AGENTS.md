@@ -520,14 +520,14 @@ of complexity — budget ~20k tokens per scenario per model.
 ### Setting up the real tier
 
 ```bash
-./scripts/start-local.sh          # local LiteLLM gateway on :4000
+just up                           # your slot N's gateway on :4N400 (slot 0, `just start-local`: :4000)
 ```
 
 Then two lines in `packages/orchestrator-agent/.env` (gitignored — verify with
-`git check-ignore` before adding anything, this is a public repo):
+`git check-ignore` before adding anything, this is a public repo), with your slot's gateway port:
 
 ```
-LLM_GATEWAY_URL=http://localhost:4000
+LLM_GATEWAY_URL=http://localhost:4N400
 LLM_GATEWAY_API_KEY=sk-nannos-local
 ```
 
