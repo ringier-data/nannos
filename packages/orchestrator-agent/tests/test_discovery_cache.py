@@ -7,8 +7,9 @@ import time
 from app.core import discovery_cache as dc
 from app.core.discovery_cache import (
     TtlTokenCache,
+    UserStamps,
     cache_key,
-    resolve_entitlement_version,
+    resolve_user_stamps,
     token_exp,
 )
 
@@ -53,25 +54,35 @@ class TestCacheKey:
         )
         assert cache_key("u", [], None, "0") != cache_key("u", [], None, "0", entitlement_version="v1")
 
+    def test_changes_with_settings_version(self):
+        # The user cache keys on it: a preference change (model, thinking) must reach the
+        # next turn. A key built without it (discovery) is the same as one with an unknown.
+        assert cache_key("u", [], None, "0", "v1", settings_version="s1") != cache_key(
+            "u", [], None, "0", "v1", settings_version="s2"
+        )
+        assert cache_key("u", [], None, "0", "v1") == cache_key("u", [], None, "0", "v1", settings_version=None)
 
-class TestResolveEntitlementVersion:
+
+class TestResolveUserStamps:
+    V1 = UserStamps(entitlement="v1", settings="s1")
+
     def setup_method(self):
-        dc._last_entitlement_version = None
+        dc._last_user_stamps = None
 
     def test_fetched_wins_and_is_remembered(self):
-        assert resolve_entitlement_version("alice", "v1") == "v1"
-        assert dc._last_stamps().get("alice") == "v1"
+        assert resolve_user_stamps("alice", self.V1) == self.V1
+        assert dc._last_stamps().get("alice") == self.V1
 
     def test_fetch_failure_falls_back_to_last_known(self):
-        resolve_entitlement_version("alice", "v1")
-        assert resolve_entitlement_version("alice", None) == "v1"
+        resolve_user_stamps("alice", self.V1)
+        assert resolve_user_stamps("alice", None) == self.V1
 
     def test_fetch_failure_without_history_is_none(self):
-        assert resolve_entitlement_version("nobody", None) is None
+        assert resolve_user_stamps("nobody", None) is None
 
     def test_fallback_is_per_user(self):
-        resolve_entitlement_version("alice", "v1")
-        assert resolve_entitlement_version("bob", None) is None
+        resolve_user_stamps("alice", self.V1)
+        assert resolve_user_stamps("bob", None) is None
 
     def test_remembered_stamps_are_bounded(self):
         # Same bounding policy as every other store in the module: size-capped, TTL-aged.

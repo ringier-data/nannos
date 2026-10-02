@@ -11,6 +11,7 @@ from sqlalchemy import text
 
 from console_backend.services.entitlement_version import (
     compute_entitlement_version,
+    compute_settings_version,
     touch_group_member_entitlements,
 )
 
@@ -224,6 +225,61 @@ class TestComputeEntitlementVersion:
 
 
 @pytest.mark.asyncio
+class TestComputeSettingsVersion:
+    """The cached user record's preferences: moves on any settings write, stable otherwise."""
+
+    async def test_stable_when_nothing_changes(self, pg_session, test_user_db):
+        assert await compute_settings_version(pg_session, test_user_db.id) == await compute_settings_version(
+            pg_session, test_user_db.id
+        )
+
+    async def test_moves_on_first_save_and_on_preference_change(self, pg_session, test_user_db):
+        never_saved = await compute_settings_version(pg_session, test_user_db.id)
+        await pg_session.execute(
+            text("INSERT INTO user_settings (user_id, preferred_model) VALUES (:u, 'model-a')"),
+            {"u": test_user_db.id},
+        )
+        saved = await compute_settings_version(pg_session, test_user_db.id)
+        assert saved != never_saved
+
+        for column, value in (
+            ("preferred_model", "'model-b'"),
+            ("enable_thinking", "TRUE"),
+            ("thinking_level", "'high'"),
+            ("custom_prompt", "'be brief'"),
+            ("language", "'de'"),
+        ):
+            await pg_session.execute(
+                text(f"UPDATE user_settings SET {column} = {value} WHERE user_id = :u"),
+                {"u": test_user_db.id},
+            )
+            changed = await compute_settings_version(pg_session, test_user_db.id)
+            assert changed != saved, column
+            saved = changed
+
+    async def test_preference_change_leaves_entitlement_version_alone(self, pg_session, test_user_db):
+        # The whole point of a separate stamp: a model switch must not evict discovery.
+        await pg_session.execute(
+            text("INSERT INTO user_settings (user_id) VALUES (:u)"),
+            {"u": test_user_db.id},
+        )
+        before = await compute_entitlement_version(pg_session, test_user_db.id)
+        await pg_session.execute(
+            text("UPDATE user_settings SET preferred_model = 'model-b', enable_thinking = FALSE WHERE user_id = :u"),
+            {"u": test_user_db.id},
+        )
+        assert await compute_entitlement_version(pg_session, test_user_db.id) == before
+
+    async def test_scoped_to_the_user(self, pg_session, test_user_db, test_admin_user_db):
+        outsider_before = await compute_settings_version(pg_session, test_admin_user_db.id)
+        await pg_session.execute(
+            text("INSERT INTO user_settings (user_id, preferred_model) VALUES (:u, 'model-a')"),
+            {"u": test_user_db.id},
+        )
+        assert await compute_settings_version(pg_session, test_admin_user_db.id) == outsider_before
+
+
+@pytest.mark.asyncio
 class TestEntitlementVersionEndpoint:
     async def test_returns_opaque_version(self, client_with_db, pg_session, test_user_model):
         response = await client_with_db.get("/api/v1/auth/me/entitlement-version")
@@ -231,3 +287,4 @@ class TestEntitlementVersionEndpoint:
         version = response.json()["version"]
         assert isinstance(version, str) and version
         assert version == await compute_entitlement_version(pg_session, test_user_model.id)
+        assert response.json()["settings_version"] == await compute_settings_version(pg_session, test_user_model.id)

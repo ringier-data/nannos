@@ -21,14 +21,20 @@ derives from every row that decides the user's entitlements — role, settings (
 whitelist, bypass rules), group memberships, group default agents, sub-agent activations
 and their approved versions, plus a marker the console bumps for gateway-held state such
 as group → MCP-server access. The executor fetches it once per turn (one cheap in-cluster
-call, ``RegistryService.get_entitlement_version``) *before* the cache lookup, so any
+call, ``RegistryService.get_user_stamps``) *before* the cache lookup, so any
 entitlement change makes the stale entry unreachable on the user's next turn — on every
 replica, with no push-based invalidation and nothing for a mutation site to remember.
 See console-backend ``services/entitlement_version.py`` for what the stamp covers.
 
-If the stamp cannot be fetched (console-backend blip), ``resolve_entitlement_version``
-falls back to the last one seen for that user, so the turn degrades to a TTL-bounded
+If the stamps cannot be fetched (console-backend blip), ``resolve_user_stamps``
+falls back to the last ones seen for that user, so the turn degrades to a TTL-bounded
 entry rather than a cold miss or an error.
+
+The same call also returns a *settings* stamp (``UserStamps.settings``), a digest of the
+user's preferences row: preferred model, thinking, custom prompt, language. Only the user
+cache keys on it (``settings_version``), because the cached ``User`` carries those
+preferences and discovery does not depend on them, so a model switch applies on the next
+turn without forcing a cold capability discovery.
 
 ``groups`` (free, from the JWT) are kept in the key as belt-and-braces: a membership
 change moves the stamp too, but the JWT view is the one that gates authorization.
@@ -85,18 +91,21 @@ def cache_key(
     sub_agent_config_hash: str | None,
     policy_version: str = "0",
     entitlement_version: str | None = None,
+    settings_version: str | None = None,
 ) -> str:
     """Build a cache key from the inputs the cached value actually depends on.
 
     Shared by the discovery, user and embedded-runnable caches (they live in separate
     stores, so an identical key string never collides across them). ``tool_names`` is
-    intentionally excluded — see the module docstring.
+    intentionally excluded — see the module docstring. ``settings_version`` is passed by
+    the user cache only.
     """
     payload = json.dumps(
         {
             "u": user_sub,
             "g": sorted(groups or []),
             "e": entitlement_version or "",
+            "s": settings_version or "",
             "c": sub_agent_config_hash or "",
             "v": policy_version,
         },
@@ -105,36 +114,49 @@ def cache_key(
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
-# Last entitlement version successfully fetched per user_sub. Only consulted when the
-# per-turn fetch fails, so a console-backend blip degrades to "reuse the current entry
-# until the TTL" instead of a cold re-discovery (or an error) on every turn. Bounded in
-# size like every store here, and in age: a day-old stamp is not worth falling back to.
+@dataclass(frozen=True)
+class UserStamps:
+    """The per-turn stamps console-backend serves for a user (``/me/entitlement-version``).
+
+    ``entitlement`` keys every per-user cache; ``settings`` keys only the user cache. An
+    older console-backend serves no settings stamp, so ``settings`` may be None and the user
+    entry is then TTL-bounded for preference changes, as it was before the stamp existed.
+    """
+
+    entitlement: str
+    settings: str | None = None
+
+
+# Last stamps successfully fetched per user_sub. Only consulted when the per-turn fetch
+# fails, so a console-backend blip degrades to "reuse the current entry until the TTL"
+# instead of a cold re-discovery (or an error) on every turn. Bounded in size like every
+# store here, and in age: a day-old stamp is not worth falling back to.
 _LAST_STAMP_TTL_S = 24 * 3600.0
-_last_entitlement_version: "TtlTokenCache | None" = None
+_last_user_stamps: "TtlTokenCache | None" = None
 
 
 def _last_stamps() -> "TtlTokenCache":
-    global _last_entitlement_version
-    if _last_entitlement_version is None:
-        _last_entitlement_version = TtlTokenCache(_LAST_STAMP_TTL_S, name="ENTITLEMENT-VERSION")
-    return _last_entitlement_version
+    global _last_user_stamps
+    if _last_user_stamps is None:
+        _last_user_stamps = TtlTokenCache(_LAST_STAMP_TTL_S, name="USER-STAMPS")
+    return _last_user_stamps
 
 
-def resolve_entitlement_version(user_sub: str, fetched: str | None) -> str | None:
-    """Return the stamp to key on this turn: ``fetched`` if present, else the last one seen.
+def resolve_user_stamps(user_sub: str, fetched: UserStamps | None) -> UserStamps | None:
+    """Return the stamps to key on this turn: ``fetched`` if present, else the last ones seen.
 
     Remembers a successful fetch for the fallback. Returns None only when the fetch failed
-    and the user has no recent stamp in this process — the key then carries an empty
-    stamp and the entry is simply TTL-bounded, exactly the pre-stamp behaviour.
+    and the user has no recent stamps in this process — the keys then carry empty stamps
+    and the entries are simply TTL-bounded, exactly the pre-stamp behaviour.
     """
-    if fetched:
+    if fetched is not None:
         _last_stamps().put(user_sub, fetched, None)
         return fetched
     last = _last_stamps().get(user_sub)
     logger.warning(
-        "[ENTITLEMENT-VERSION] fetch failed for user_sub=%s; %s",
+        "[USER-STAMPS] fetch failed for user_sub=%s; %s",
         user_sub,
-        "reusing last known stamp" if last is not None else "no known stamp, entry will be TTL-bounded only",
+        "reusing last known stamps" if last is not None else "no known stamps, entries will be TTL-bounded only",
     )
     return last
 

@@ -12,6 +12,7 @@ from agent_common.core.tool_catalogue import sanitize_tool_name
 from agent_common.models.base import ThinkingLevel
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
+from .discovery_cache import UserStamps
 from .prompt_placeholders import resolve_prompt_placeholders
 
 logger = logging.getLogger(__name__)
@@ -323,14 +324,15 @@ class RegistryService:
             logger.error(f"Unexpected error fetching sub-agents for user sub {user_sub}: {e}", exc_info=True)
             return None
 
-    async def get_entitlement_version(self, access_token: str | None) -> str | None:
-        """Fetch the user's opaque entitlement version from the console backend.
+    async def get_user_stamps(self, access_token: str | None) -> UserStamps | None:
+        """Fetch the user's opaque entitlement and settings versions from the console backend.
 
-        Called once per turn *before* the per-user cache lookups and folded into their key
-        (see ``discovery_cache``), so an entitlement change is picked up on the next turn
-        without any push-based invalidation. It sits on the time-to-first-token path, so the
-        timeout is tight and it never raises: None means "unknown this turn" and the caller
-        falls back to the last known stamp (a degraded console costs at most this budget).
+        Called once per turn *before* the per-user cache lookups and folded into their keys
+        (see ``discovery_cache``), so an entitlement or settings change is picked up on the
+        next turn without any push-based invalidation. It sits on the time-to-first-token
+        path, so the timeout is tight and it never raises: None means "unknown this turn" and
+        the caller falls back to the last known stamps (a degraded console costs at most this
+        budget).
         """
         if not access_token:
             return None
@@ -344,8 +346,15 @@ class RegistryService:
             if response.status_code != 200:
                 logger.warning(f"Failed to fetch entitlement version: status={response.status_code}")
                 return None
-            version = response.json().get("version")
-            return version if isinstance(version, str) and version else None
+            body = response.json()
+            version = body.get("version")
+            if not (isinstance(version, str) and version):
+                return None
+            settings_version = body.get("settings_version")
+            return UserStamps(
+                entitlement=version,
+                settings=settings_version if isinstance(settings_version, str) and settings_version else None,
+            )
         except Exception as e:
             logger.warning(f"Error fetching entitlement version: {e}")
             return None

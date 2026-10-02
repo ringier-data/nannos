@@ -75,7 +75,7 @@ from .discovery_cache import (
     get_discovery_cache,
     get_embedded_runnable_cache,
     get_user_cache,
-    resolve_entitlement_version,
+    resolve_user_stamps,
 )
 from .interrupt_owner import foreign_interrupt_message, interrupt_owner
 from .registry import RegistryService, User
@@ -713,19 +713,20 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         if sub_agent_config_hash:
             logger.info(f"[CONSOLE] Console mode enabled for sub-agent config hash: {sub_agent_config_hash}")
 
-        # One cheap call per turn: the user's entitlement version. It goes into every per-user
-        # cache key below, so a changed entitlement (activated sub-agent, whitelist, role,
-        # group default, gateway server access, ...) makes the stale entries unreachable on
-        # this turn — on every replica, with no push-based invalidation. Awaited inline: the
-        # only awaits it could overlap (turn registration) are in-memory, and an inline call
-        # has no lifetime to manage across the raise paths above.
-        entitlement_version = resolve_entitlement_version(
-            user_sub, await self.registry_service.get_entitlement_version(user_token)
-        )
+        # One cheap call per turn: the user's entitlement and settings stamps. The entitlement
+        # stamp goes into every per-user cache key below, so a changed entitlement (activated
+        # sub-agent, whitelist, role, group default, gateway server access, ...) makes the
+        # stale entries unreachable on this turn — on every replica, with no push-based
+        # invalidation. The settings stamp keys only the user cache: the cached User carries
+        # the user's preferences (model, thinking, custom prompt), discovery does not. Awaited
+        # inline: the only awaits it could overlap (turn registration) are in-memory, and an
+        # inline call has no lifetime to manage across the raise paths above.
+        stamps = resolve_user_stamps(user_sub, await self.registry_service.get_user_stamps(user_token))
+        entitlement_version = stamps.entitlement if stamps else None
 
         # Fetch user from registry to get stable database ID (user.id). Memoized per-user
-        # (keyed incl. groups + entitlement version + policy_version) to avoid the ~1s of
-        # console-backend calls on every turn; entry bounded by the user token's expiry.
+        # (keyed incl. groups + entitlement and settings stamps + policy_version) to avoid the
+        # ~1s of console-backend calls on every turn; entry bounded by the user token's expiry.
         ucache = get_user_cache(AgentSettings.AGENT_DISCOVERY_CACHE_TTL)
         ukey = cache_key(
             user_sub=user_sub,
@@ -733,6 +734,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             sub_agent_config_hash=sub_agent_config_hash,
             policy_version=AgentSettings.ENTITLEMENT_POLICY_VERSION,
             entitlement_version=entitlement_version,
+            settings_version=stamps.settings if stamps else None,
         )
         user = ucache.get(ukey)
         if user is not None:

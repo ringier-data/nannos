@@ -36,6 +36,15 @@ repository pattern (the admin action that triggers it is audited on its own).
 
 Gateway-side catalogue changes made outside the console are not visible here and remain
 bounded by the orchestrator's cache TTL, which is that TTL's only remaining job.
+
+Settings version
+----------------
+The cached registry user also carries the user's *preferences* from ``user_settings``
+(preferred model, thinking, custom prompt, language, ...). Those are deliberately not in
+the entitlement version — a model switch must not cost the user a cold capability
+discovery — so they get a stamp of their own, ``compute_settings_version``, served by the
+same endpoint. The orchestrator keys only its user cache on it. It digests the whole row by
+value, so a column added later is covered without anyone remembering to list it here.
 """
 
 from __future__ import annotations
@@ -99,6 +108,8 @@ _VERSION_QUERY = text("""
     WHERE u.id = :user_id
 """)
 
+_SETTINGS_QUERY = text("SELECT row_to_json(us)::text FROM user_settings us WHERE us.user_id = :user_id")
+
 _TOUCH_GROUP_QUERY = text("""
     UPDATE users
        SET entitlements_touched_at = NOW()
@@ -117,6 +128,16 @@ async def compute_entitlement_version(db: AsyncSession, user_id: str) -> str | N
         return None
     material = "|".join("" if v is None else str(v) for v in row.values())
     return hashlib.sha256(material.encode()).hexdigest()[:32]
+
+
+async def compute_settings_version(db: AsyncSession, user_id: str) -> str:
+    """Return a version of the user's ``user_settings`` row; see "Settings version" above.
+
+    Opaque to callers: compare for equality only. A user who never saved settings has no
+    row and gets a fixed version, which moves on their first save.
+    """
+    row_json = (await db.execute(_SETTINGS_QUERY, {"user_id": user_id})).scalar_one_or_none()
+    return hashlib.sha256((row_json or "").encode()).hexdigest()[:32]
 
 
 async def touch_group_member_entitlements(db: AsyncSession, group_id: int) -> int:
