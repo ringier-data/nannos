@@ -667,7 +667,9 @@ async def delete_model(model_id: str, request: Request, db: DbSession, user: Use
     The alias is also dropped from any tier's failover chain: leaving it there would have the
     gateway fail over to a model it no longer serves, breaking at exactly the moment the primary
     is down. Read the alias *before* deleting — afterwards the deployment is gone and there is
-    nothing left to map the id to a name.
+    nothing left to map the id to a name. Only when no other deployment still serves the alias
+    (a leftover duplicate, a config-defined twin): it is still live then, and dropping it would
+    silently stop the tier failing over to it (nannos#339).
     """
     gateway = get_model_gateway_service(request)
     # Inside the try: this lookup hits the proxy on a cold cache, so an unreachable gateway must
@@ -684,7 +686,16 @@ async def delete_model(model_id: str, request: Request, db: DbSession, user: Use
     # deletion as failed. It is logged, and the tier page's drift state shows the consequence.
     if alias:
         try:
-            await get_model_defaults_service(request).drop_alias_from_chains(db, user, alias, gateway=gateway)
+            # The delete dropped the listing cache, so this is a fresh read; the deleted id is
+            # excluded in case a lagging replica still lists it.
+            still_served = any(
+                m.get("model_name") == alias and (m.get("model_info") or {}).get("id") != model_id
+                for m in await gateway.list_models()
+            )
+            if still_served:
+                logger.info("Deleted a deployment of '%s'; another still serves it, chains kept", alias)
+            else:
+                await get_model_defaults_service(request).drop_alias_from_chains(db, user, alias, gateway=gateway)
         except Exception as e:  # noqa: BLE001 - cleanup is best-effort; the delete already happened
             logger.error("Deleted '%s' but failed to clean its failover-chain entries: %s", alias, e)
 
