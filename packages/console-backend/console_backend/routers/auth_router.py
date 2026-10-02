@@ -316,7 +316,7 @@ async def get_current_user_entitlement_version(
     The orchestrator fetches this once per turn and folds ``version`` into its per-user
     cache keys, so any entitlement change (tools, sub-agents, role) is picked up on the
     user's next turn on every replica without a push-based invalidation. ``settings_version``
-    keys only its cached user record, so a preference change (model, thinking, custom
+    keys its cached user record and embedded runnable, so a preference change (model, thinking, custom
     prompt) applies on the next turn without evicting capability discovery. Compare for
     equality only; the values have no other meaning. See ``services.entitlement_version``.
     """

@@ -42,10 +42,10 @@ Settings version
 The cached registry user also carries the user's *preferences* from ``user_settings``
 (preferred model, thinking, custom prompt, language, ...). Those are deliberately not in
 the entitlement version — a model switch must not cost the user a cold capability
-discovery — so they get a stamp of their own, ``compute_settings_version``, served by the
-same endpoint. The orchestrator keys its user and embedded-runnable caches on it, never
-discovery. It digests the whole row by
-value, so a column added later is covered without anyone remembering to list it here.
+discovery — so they get a stamp of their own, computed in the same query
+(``compute_user_stamps``) and served by the same endpoint. The orchestrator keys its user
+and embedded-runnable caches on it, never discovery. It digests the whole row by value, so
+a column added later is covered without anyone remembering to list it here.
 """
 
 from __future__ import annotations
@@ -107,8 +107,11 @@ _VERSION_QUERY = text("""
                                                 AS served_agents,
         -- Not entitlement material: the separate settings version, digested by value in the
         -- same statement so both stamps come from one snapshot (see "Settings version").
-        coalesce((SELECT md5(row_to_json(us)::text) FROM user_settings us WHERE us.user_id = u.id),
-                 md5(''))                       AS settings_digest
+        -- sha256, not md5: md5() errors on a FIPS-mode server and would take the
+        -- entitlement stamp down with it.
+        left(encode(sha256(convert_to(coalesce((SELECT row_to_json(us)::text FROM user_settings us
+                                                 WHERE us.user_id = u.id), ''), 'UTF8')), 'hex'), 32)
+                                                AS settings_digest
     FROM users u
     WHERE u.id = :user_id
 """)
