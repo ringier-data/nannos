@@ -507,6 +507,29 @@ async def test_every_probe_request_is_marked_and_pinned_to_the_alias():
         assert body["disable_fallbacks"] is True
 
 
+@pytest.mark.asyncio
+async def test_a_pinned_deployment_receives_every_request_and_the_report_names_the_alias():
+    """An alias with two deployments load-balances, so only an id-addressed probe measures the
+    deployment it records on (nannos#323)."""
+    gw = _Gateway(thinking_blocks=True)
+    report = await mc.probe_model("m", gw, deployment="dep-1", supports_reasoning=True)
+    assert {body["model"] for body in gw.bodies} == {"dep-1"}
+    assert report.model == "m"
+
+
+@pytest.mark.asyncio
+async def test_the_thinking_floor_steps_are_pinned_too():
+    """The always-on floor steps (nannos#330) must reach the pinned deployment as well, or the
+    recorded floor is the other deployment's."""
+    def refuse(b):
+        return "not supported for this model" if "thinking" in b or b.get("reasoning_effort") == "minimal" else None
+
+    gw = _Gateway(reject=refuse, floor=True)
+    report = await mc.probe_model("opus", gw, deployment="dep-1")
+    assert report.capabilities[mc.THINKING_FLOOR] == "low"  # the floor steps ran
+    assert {body["model"] for body in gw.bodies} == {"dep-1"}
+
+
 def test_is_probe_request_reads_either_metadata_bucket():
     assert mc.is_probe_request({}) is False
     assert mc.is_probe_request({"metadata": {"user_api_key": "x"}}) is False

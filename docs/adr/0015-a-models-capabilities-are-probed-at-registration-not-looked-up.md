@@ -147,8 +147,10 @@ around failing is **recorded, not refused**; the record is what lets the harness
 - A deployment recorded as rejecting the replay of its own signed thinking block has the blocks
   stripped by the hook per attempt, the way a non-Anthropic fallback does: the turn continues without
   extended thinking rather than not at all.
-- An edit re-registers the deployment from the form; the record is carried over while the edit keeps
-  the same provider model, and the edit's own re-test rewrites it. A re-test that newly records
+- An edit that keeps the deployment the same model is applied in place (its id and record stay);
+  one that re-routes it, changes its mode or clears a field re-registers it from the form, carrying
+  the record over only while the provider model is the same (nannos#323). Either way the edit's own
+  re-test rewrites it. A re-test that newly records
   `response_format` as rejected on a model that already serves `chat` or `chat:low` cannot be
   refused after the fact; it is reported as a warning naming the affected tiers.
 - Config-defined deployments cannot be written through the management API, so they are probed and

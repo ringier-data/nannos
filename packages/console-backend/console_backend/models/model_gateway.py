@@ -260,6 +260,13 @@ class ModelRegistrationResponse(BaseModel):
     rate_card_entry_ids: list[int]
     gateway_model_id: str | None = None
     status: str = "registered"
+    stale_duplicate_model_id: str | None = Field(
+        None,
+        description=(
+            "Edit only, with status `updated_with_stale_duplicate`: the replaced deployment that could "
+            "not be deleted and still serves the alias next to `gateway_model_id`, until it is removed."
+        ),
+    )
     provider: str | None = Field(
         None,
         description=(

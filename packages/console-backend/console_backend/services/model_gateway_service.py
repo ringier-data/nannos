@@ -154,6 +154,16 @@ def _same_route(a: dict, b: dict) -> bool:
     return all(a.get(k) == b.get(k) for k in _ROUTE_PARAMS)
 
 
+#: Keys an edit removes by leaving a field blank. ``PATCH /model/{id}/update`` merges and ignores a
+#: null for them (LiteLLM v1.103.0 honours nulls for cost fields only), so an edit that drops one
+#: re-registers instead (``update_model``). The rest of the edit form is always sent with a value.
+#: (A blank Vertex location is refilled with the deployment default before it gets here, so on a
+#: Vertex model it is never dropped; it is on a model re-routed away from Vertex, which re-registers
+#: anyway.)
+_PATCH_UNCLEARABLE_LITELLM_PARAMS = ("aws_region_name", "vertex_location", "vertex_project")
+_PATCH_UNCLEARABLE_MODEL_INFO = ("base_model",)
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
@@ -169,6 +179,10 @@ class ModelGatewayError(Exception):
     def __init__(self, message: str, status_code: int | None = None):
         super().__init__(message)
         self.status_code = status_code
+
+
+class ModelRenameRefused(ValueError):
+    """An edit that names another alias than the deployment serves: renames are not edits."""
 
 
 class ModelGatewayService:
@@ -299,36 +313,79 @@ class ModelGatewayService:
     async def update_model(
         self, model_id: str, model_name: str, litellm_params: dict, model_info: dict | None = None
     ) -> dict:
-        """Edit a registered deployment by re-creating it (register new, then delete old).
+        """Edit a registered deployment — in place, keeping its id, while it stays the same model.
 
-        LiteLLM's /model/update does NOT persist custom model_info keys (input_modes, mode,
-        the default flag, …) — only /model/new does (see model_defaults_service). So a plain
-        /model/update silently drops our capability metadata, leaving edits (e.g. adding the
-        'file' input mode) with no runtime effect. Re-registering forces model_info to stick.
+        In place is LiteLLM's ``PATCH /model/{id}/update``: it merges ``litellm_params`` and
+        ``model_info`` into the stored deployment, persists custom ``model_info`` keys and the router
+        serves the edit at once (verified on v1.103.0). Keeping the id is the point: the form, the
+        cards and a retried request all hold it, and an edit that changed it left the previous
+        deployment live beside the next one whenever one of them still held the old id (nannos#323).
+        The probe record, which is not part of the edit form, simply stays.
+
+        A merge can only add and overwrite, so it is used only for an edit that keeps the deployment
+        the same model: same route (provider model, region, location, project, base URL — compared
+        with what the merge would store), same base model, same mode, and no field cleared (LiteLLM
+        ignores a null there except for cost fields). Anything else replaces the deployment the way
+        every edit used to (``_reregister``): register new, then delete old, which changes the id —
+        a different model must not keep keys, flags or a probe record that described the previous
+        one. The returned dict carries the deployment id either way. A rename is refused
+        (``ModelRenameRefused``): the alias is not an editable field.
+        """
+        model_info = dict(model_info or {})
+        previous = await self.find_model_by_id(model_id)
+        if previous is None:
+            # Not listed (a replica that has not loaded it, or gone): the PATCH reads the gateway's
+            # database, so it edits a lagging deployment and refuses a deleted one — never a duplicate.
+            return await self._patch_in_place(model_id, litellm_params, model_info)
+        stored_params = previous.get("litellm_params") or {}
+        stored_info = previous.get("model_info") or {}
+        if previous.get("model_name") != model_name:
+            # The alias is what the rate card, the defaults and the failover chains are keyed on; the
+            # edit form does not change it, and a rename here could land on an alias already served.
+            raise ModelRenameRefused(f"deployment {model_id} serves '{previous.get('model_name')}'; an edit cannot rename it")
+        reasons = [f"clears {k}" for k in _PATCH_UNCLEARABLE_LITELLM_PARAMS if stored_params.get(k) and not litellm_params.get(k)]
+        reasons += [f"clears {k}" for k in _PATCH_UNCLEARABLE_MODEL_INFO if stored_info.get(k) and not model_info.get(k)]
+        if not _same_route(stored_params, {**stored_params, **litellm_params}):
+            reasons.append("re-routes it")
+        if model_info.get("base_model") and model_info.get("base_model") != stored_info.get("base_model"):
+            reasons.append("changes its base model")  # it picks the cost-map entry flags come from
+        if model_info.get("mode", "chat") != stored_info.get("mode", "chat"):
+            reasons.append("changes its mode")
+        if reasons:
+            logger.info("update_model: the edit of '%s' %s; re-registering", model_name, ", ".join(reasons))
+            return await self._reregister(model_id, model_name, litellm_params, model_info, previous)
+        return await self._patch_in_place(model_id, litellm_params, model_info)
+
+    async def _patch_in_place(self, model_id: str, litellm_params: dict, model_info: dict) -> dict:
+        await self._request(
+            "PATCH",
+            f"/model/{model_id}/update",
+            json={"litellm_params": litellm_params, "model_info": {**model_info, "id": model_id}},
+        )
+        self._invalidate_list_cache()
+        return {"model_info": {"id": model_id}}
+
+    async def _reregister(
+        self, model_id: str, model_name: str, litellm_params: dict, model_info: dict, previous: dict | None
+    ) -> dict:
+        """Replace a deployment by registering a new one, then deleting the old (new id).
 
         Register-before-delete avoids a window where the alias has no live deployment; LiteLLM
-        allows multiple deployments per public model_name, so the brief overlap is safe. Returns
-        the newly registered deployment (carrying the NEW gateway model id).
-
-        If deleting the old deployment fails, the re-registration still stands but a stale
-        duplicate remains live under the same public model_name — the gateway will load-balance
-        across both, so the edit is only partially applied until the old one is removed. That is
+        allows multiple deployments per public model_name, so the brief overlap is safe. If deleting
+        the old deployment fails, the re-registration still stands but a stale duplicate remains
+        live under the same public model_name — the gateway will load-balance across both. That is
         signalled to the caller via ``_stale_duplicate_deployment_id`` on the returned dict (a
         private key, never serialized to the API client) so the endpoint can surface it rather
         than reporting a clean success.
         """
-        # The registration probe's record (nannos#318) is not part of the edit form, so a
-        # rebuilt model_info would silently drop it — and every reader would then treat a model
-        # known to reject `response_format` as unprobed. Carry it over while the deployment
-        # still points at the same provider model; a re-routed edit is a different model, and
-        # the edit flow re-tests anyway.
-        model_info = dict(model_info or {})
-        if CAPABILITIES_KEY not in model_info:
-            previous = await self.get_model_by_id(model_id)
-            if previous and _same_route((previous.get("litellm_params") or {}), litellm_params):
+        # Carry the probe record over only while the deployment is still the same provider model in
+        # the same mode — in practice an edit that clears a field without changing the route.
+        same_mode = previous and model_info.get("mode", "chat") == (previous.get("model_info") or {}).get("mode", "chat")
+        if CAPABILITIES_KEY not in model_info and same_mode:
+            if _same_route((previous.get("litellm_params") or {}), litellm_params):
                 inherited = capabilities_of(previous.get("model_info"))
                 if inherited:
-                    model_info[CAPABILITIES_KEY] = inherited
+                    model_info = {**model_info, CAPABILITIES_KEY: inherited}
         result = await self.register_model(model_name, litellm_params, model_info)
         try:
             await self.delete_model(model_id)
@@ -544,8 +601,9 @@ class ModelGatewayService:
         recorded on the deployment's ``model_info`` under ``nannos_capabilities`` for the
         gateway hook and the app to act on, and the report is returned for the admin.
 
-        ``model_id`` pins the deployment the record is written to (the caller has it right
-        after register/edit); otherwise the alias's listed deployment is used. The gateway
+        ``model_id`` pins the deployment that is probed and that the record is written to (the
+        caller has it right after register/edit); otherwise the alias's listed deployment is used.
+        Either way the requests address that deployment by id, never the alias. The gateway
         serves ``/model/info`` from per-replica memory, so a just-registered alias can be
         missing from one replica's list for a moment — the lookup retries briefly.
 
@@ -568,11 +626,15 @@ class ModelGatewayService:
                 logger.warning("[probe] %s: pinned deployment %s not listed; falling back to the alias", model_name, model_id)
             model = await self._get_model_with_retry(model_name)
         info = (model or {}).get("model_info") or {}
+        # Every request goes to the deployment the record is written to, by id: LiteLLM routes an
+        # id to that deployment alone, while the alias load-balances across every deployment under
+        # it — a duplicate behind the alias had the probe record a mix of both (nannos#323).
+        target_id = model_id or info.get("id")
         mode = info.get("mode", "chat")
         if mode == "embedding":
             litellm_model = ((model or {}).get("litellm_params") or {}).get("model")
             provider = info.get("litellm_provider")
-            body: dict = {"model": model_name, "input": ["ping"]}
+            body: dict = {"model": target_id or model_name, "input": ["ping"]}
             if profile_for(litellm_model, provider).send_dimensions:
                 body["dimensions"] = _DEFAULT_DIMENSION
             await self._request("POST", "/v1/embeddings", json=body, timeout=30.0, expose_error=True)
@@ -585,6 +647,7 @@ class ModelGatewayService:
         report = await probe_model(
             model_name,
             self._probe_call,
+            deployment=target_id,
             supports_reasoning=supports_reasoning,
             # The floor of an always-on model is tried from the levels the picker offers for it,
             # so it is always one of them (nannos#330).
@@ -598,7 +661,6 @@ class ModelGatewayService:
             reasons = "; ".join(f"{r.shape}: {r.error}" for r in report.inconclusive_unavoidable)
             raise ModelGatewayError(f"inconclusive — the probe could not reach the model; re-run the test ({reasons})")
 
-        target_id = model_id or info.get("id")
         # Only a DB deployment can be written (LiteLLM rejects /model/update on config-defined
         # ones) — judged on the looked-up deployment, not on whether an id was passed. `None`
         # = not recordable at all (the console shows no warning); False = a write that failed.
@@ -654,6 +716,11 @@ class ModelGatewayService:
     async def _get_model_by_id_with_retry(self, model_id: str, attempts: int = 4, delay: float = 0.75) -> dict | None:
         return await self._retry_lookup(lambda: self.get_model_by_id(model_id), attempts, delay)
 
+    async def find_model_by_id(self, model_id: str) -> dict | None:
+        """``get_model_by_id`` that rides out a replica not listing the deployment yet (briefly
+        retried, cache dropped between attempts) — for a caller that decides on the answer."""
+        return await self._get_model_by_id_with_retry(model_id)
+
     async def _retry_lookup(self, lookup, attempts: int, delay: float) -> dict | None:
         for i in range(attempts):
             model = await lookup()
@@ -692,8 +759,8 @@ class ModelGatewayService:
 
         ``PATCH /model/{id}/update`` merges ``model_info`` (stored ∪ patch) on the proxy
         version the gateway pins, so the deployment's other keys survive and its id is kept —
-        unlike ``update_model``, which re-registers. The router picks the change up on its
-        next DB reload, so a flag is live within the proxy's reload interval, not instantly."""
+        the same call ``update_model`` uses for an in-place edit. The router picks the change up
+        on its next DB reload, so a flag is live within the proxy's reload interval, not instantly."""
         flags = litellm_flags_for(model_info or {})
         await self._request(
             "PATCH",

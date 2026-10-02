@@ -36,7 +36,7 @@ from ..models.usage import RateCardPricingEntry
 from ..models.user import User
 from ..services.bedrock_availability_service import model_regions, probed_regions
 from ..services.model_defaults_service import ModelDefaultsService
-from ..services.model_gateway_service import ModelGatewayError, ModelGatewayService
+from ..services.model_gateway_service import ModelGatewayError, ModelGatewayService, ModelRenameRefused
 from ..services.rate_card_service import resolve_deployment_provider, route_family
 from ..services.rate_card_service import runtime_billing_provider as _billing_provider
 from ringier_a2a_sdk.model_capabilities import RESPONSE_FORMAT, capabilities_of
@@ -473,18 +473,32 @@ async def edit_model(
     """
     svc = get_model_gateway_service(request)
 
+    # An edit cannot rename the alias (the form does not offer it; update_model refuses it too).
+    # Checked here first so a refused rename writes no rate card under the other name.
+    try:
+        current = await svc.find_model_by_id(model_id)
+    except ModelGatewayError as e:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
+    if current is not None and current.get("model_name") != body.model_name:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Deployment {model_id} serves '{current.get('model_name')}'; an edit cannot rename it.",
+        )
+
     # Same runtime-provider keying (and auto-prefixing) as register_model — an edit must
     # not re-key the rate card to a catalog tag the cost logger never emits.
     entry_ids, provider, litellm_params, model_info = await _write_rate_card_and_routing(request, body, db, user)
 
     try:
         result = await svc.update_model(model_id, body.model_name, litellm_params, model_info)
+    except ModelRenameRefused as e:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Rate card updated, but {e}.")
     except ModelGatewayError as e:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Rate card updated but gateway update failed ({e}); retry.",
         )
-    # update_model re-creates the deployment, so the gateway id changes.
+    # In place the id is kept; an edit that re-registers (it drops a key) returns a new one.
     new_model_id = _gateway_model_id(result)
     # If the old deployment couldn't be deleted it lingers under the same model_name and the
     # gateway load-balances across both — the edit is only partially applied. Surface that as a
@@ -500,10 +514,10 @@ async def edit_model(
         )
     else:
         logger.info(
-            "Updated model %s (old gateway id=%s, new gateway id=%s) by %s",
+            "Updated model %s (gateway id=%s%s) by %s",
             body.model_name,
-            model_id,
             new_model_id,
+            "" if new_model_id == model_id else f", replaced {model_id}",
             user.id,
         )
     return ModelRegistrationResponse(
@@ -511,6 +525,7 @@ async def edit_model(
         rate_card_entry_ids=entry_ids,
         gateway_model_id=new_model_id,
         status="updated_with_stale_duplicate" if stale_duplicate_id else "updated",
+        stale_duplicate_model_id=stale_duplicate_id,
         provider=provider,
     )
 

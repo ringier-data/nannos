@@ -3680,6 +3680,12 @@ export type ModelRegistrationResponse = {
      */
     status?: string;
     /**
+     * Stale Duplicate Model Id
+     *
+     * Edit only, with status `updated_with_stale_duplicate`: the replaced deployment that could not be deleted and still serves the alias next to `gateway_model_id`, until it is removed.
+     */
+    stale_duplicate_model_id?: string | null;
+    /**
      * Provider
      *
      * The provider the rate card was actually keyed on — derived server-side from the routing params, so it may differ from the request's `provider` (a catalog tag). Clients should display THIS value, never what they sent, or the UI shows a key that doesn't bill.

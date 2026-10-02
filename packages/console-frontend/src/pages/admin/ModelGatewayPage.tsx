@@ -130,6 +130,16 @@ function probeNotes(
   return notes;
 }
 
+/** A re-registering edit whose replaced deployment survived (`updated_with_stale_duplicate`). */
+function staleDuplicateNote(name: string, staleId: string): ProbeNote {
+  return {
+    tone: 'error',
+    text:
+      `The deployment this edit replaced (${staleId}) could not be removed and still serves ${name} next to ` +
+      `the new one, so part of its traffic goes to the old settings. Remove it on this page, then re-run Test.`,
+  };
+}
+
 function limitationsMessage(name: string, limitations: { shape: string; label?: string; error: string }[]): string {
   // The full provider reasons are in the probe's progress view; a toast gets the gist.
   const clip = (s: string) => (s.length > 160 ? `${s.slice(0, 157)}…` : s);
@@ -374,6 +384,8 @@ export function ModelGatewayPage() {
   const [aliasEdited, setAliasEdited] = useState(false);
   // null = registering a new model; a gateway id = editing that model.
   const [editingId, setEditingId] = useState<string | null>(null);
+  // The replaced deployment a re-registering edit could not delete, for the run's verdict.
+  const staleDuplicateRef = useRef<string | null>(null);
   // Pending embedding-default switch awaiting confirmation (re-index implication).
   const [pendingDefault, setPendingDefault] = useState<{
     modelId: string;
@@ -619,11 +631,20 @@ export function ModelGatewayPage() {
   // snapshot of the prior params) — the admin is told the change landed but failed its test.
   const saveMutation = useMutation({
     mutationFn: async (body: ModelRegistrationRequest) => {
+      staleDuplicateRef.current = null;
       // The form steps aside (its values kept, for "Back to form") and the run window takes over.
       setDialogOpen(false);
       startRun(editingId ? 'edit' : 'register', body.model_name);
       if (editingId) {
-        const updated = await updateGatewayModel(editingId, body);
+        const startedFrom = editingId;
+        const updated = await updateGatewayModel(startedFrom, body);
+        // An edit keeps the deployment id unless it re-registered (it made the deployment another
+        // model, or cleared a field); then
+        // the form moves onto the new id so "Back to form" edits the live deployment — but only
+        // while it is still this model's form (the run window can be closed mid-save).
+        const newId = updated.gateway_model_id;
+        if (newId && newId !== startedFrom) setEditingId((cur) => (cur === startedFrom ? newId : cur));
+        if (updated.status === 'updated_with_stale_duplicate') staleDuplicateRef.current = updated.stale_duplicate_model_id ?? null;
         probeStarted(body.model_name);
         // Throws when the probe refuses; the record goes to the re-registered deployment.
         const test = await testGatewayModel(body.model_name, updated.gateway_model_id, onProbeEvent(body.model_name));
@@ -707,13 +728,16 @@ export function ModelGatewayPage() {
     },
     onSuccess: ({ name, created, limitations, inconclusive, recorded, warning }, body) => {
       const auto = created?.default_roles ?? [];
+      const stale = staleDuplicateRef.current;
       finishRun(body.model_name, [
-        {
-          tone: 'success',
-          text: auto.length
-            ? `Saved & tested ${name} — set as default ${auto.map((r) => r.replace('_', ' ')).join(' & ')}.`
-            : `Saved & tested ${name}.`,
-        },
+        stale
+          ? staleDuplicateNote(name, stale)
+          : {
+              tone: 'success',
+              text: auto.length
+                ? `Saved & tested ${name} — set as default ${auto.map((r) => r.replace('_', ' ')).join(' & ')}.`
+                : `Saved & tested ${name}.`,
+            },
         ...probeNotes(name, { limitations, inconclusive, recorded, warning }),
       ]);
       closeDialog();
@@ -758,6 +782,7 @@ export function ModelGatewayPage() {
               ? `The update was applied but its test failed — please verify: ${hint ?? message}`
               : `Test failed — the registration was rolled back: ${hint ?? message}`,
           },
+          ...(staleDuplicateRef.current ? [staleDuplicateNote(body.model_name, staleDuplicateRef.current)] : []),
         ],
         true,
       );
@@ -985,6 +1010,13 @@ export function ModelGatewayPage() {
                     {m.model_name}
                   </CardTitle>
                   <CardDescription className="font-mono text-xs break-all">{m.litellm_model}</CardDescription>
+                  {/* The deployment id: what the run window names when an edit leaves a second
+                      deployment under an alias, and the only way to tell such cards apart. */}
+                  {m.db_model && m.model_id && (
+                    <CardDescription className="font-mono text-[11px] break-all" title="Gateway deployment id">
+                      id {m.model_id}
+                    </CardDescription>
+                  )}
                   {(perMillion(m.input_cost_per_token) || perMillion(m.output_cost_per_token)) && (
                     <CardDescription className="text-xs">
                       {perMillion(m.input_cost_per_token) && <span>in {perMillion(m.input_cost_per_token)}</span>}

@@ -103,77 +103,233 @@ async def test_list_models_cached_and_invalidated_on_write(svc, monkeypatch):
     assert calls["n"] == 2  # re-fetched after invalidation
 
 
-@pytest.mark.asyncio
-async def test_update_model_recreates_deployment_to_persist_model_info(svc, monkeypatch):
-    """update_model re-registers (so custom model_info like input_modes actually persists),
-    then deletes the old deployment — it must NOT call LiteLLM's /model/update, which drops
-    custom model_info keys. Register happens before delete so the alias is never without a
-    live deployment."""
-    calls: list[tuple[str, dict]] = []
+class _Deployments:
+    """The gateway's deployment table behind update_model's calls. PATCH merges like LiteLLM
+    v1.103.0 (measured on a live proxy): given keys overwrite, nulls are ignored, nothing is
+    removed, the id stays."""
 
-    async def _fake_request(method, path, **kwargs):
-        calls.append((path, kwargs.get("json") or {}))
+    def __init__(self, **deployments):
+        self.rows = {i: {"model_name": "m", **d, "model_info": {**d.get("model_info", {}), "id": i, "db_model": True}} for i, d in deployments.items()}
+        self.calls: list[tuple[str, str]] = []
+        self.fail_delete = False
+        self._next = 0
+
+    async def request(self, method, path, **kwargs):
+        body = kwargs.get("json") or {}
+        self.calls.append((method, path))
+        if path == "/model/info":
+            return {"data": list(self.rows.values())}
+        if method == "PATCH":
+            row = self.rows[path.split("/")[2]]
+            row["litellm_params"].update({k: v for k, v in body.get("litellm_params", {}).items() if v is not None})
+            row["model_info"].update({k: v for k, v in body.get("model_info", {}).items() if v is not None})
+            return {}
         if path == "/model/new":
-            return {"model_info": {"id": "new-id"}}
-        return {}
-
-    monkeypatch.setattr(svc, "_request", _fake_request)
-
-    result = await svc.update_model(
-        "old-id",
-        "claude-sonnet-4-6",
-        {"model": "eu.anthropic.claude-sonnet-4-6"},
-        {"input_modes": ["text", "image", "file"], "mode": "chat"},
-    )
-
-    paths = [p for p, _ in calls]
-    assert "/model/update" not in paths  # the whole point: /model/update can't persist model_info
-    # The old deployment is read first (its probe record is carried over, nannos#318), then
-    # register before delete so the alias is never without a live deployment.
-    assert paths == ["/model/info", "/model/new", "/model/delete"]
-
-    _, new_body = calls[1]
-    assert new_body["model_name"] == "claude-sonnet-4-6"
-    assert new_body["model_info"]["input_modes"] == ["text", "image", "file"]
-    assert calls[2][1] == {"id": "old-id"}  # old deployment deleted by id
-    assert result["model_info"]["id"] == "new-id"
-
-
-@pytest.mark.asyncio
-async def test_update_model_survives_failed_old_delete(svc, monkeypatch):
-    """If deleting the old deployment fails, the re-registration still stands (it was created
-    first) — update_model logs and returns rather than raising, so the edit isn't lost. It also
-    signals the lingering old deployment via _stale_duplicate_deployment_id so the endpoint can
-    report a partial success instead of a clean 'updated'."""
-
-    async def _fake_request(method, path, **kwargs):
-        if path == "/model/new":
-            return {"model_info": {"id": "new-id"}}
+            self._next += 1
+            new_id = f"new-{self._next}"
+            self.rows[new_id] = {**body, "model_info": {**body.get("model_info", {}), "id": new_id, "db_model": True}}
+            return {"model_info": {"id": new_id}}
         if path == "/model/delete":
-            raise ModelGatewayError("gateway unreachable")
-        return {}
+            if self.fail_delete:
+                raise ModelGatewayError("Gateway unreachable")
+            self.rows.pop(body["id"])
+            return {}
+        raise AssertionError(f"unexpected call {method} {path}")
 
-    monkeypatch.setattr(svc, "_request", _fake_request)
 
-    result = await svc.update_model("old-id", "m", {"model": "x"}, {"input_modes": ["file"]})
-    assert result["model_info"]["id"] == "new-id"
-    assert result["_stale_duplicate_deployment_id"] == "old-id"
+_SONNET = "bedrock/eu.anthropic.claude-sonnet-5-5"
 
 
 @pytest.mark.asyncio
-async def test_update_model_no_stale_signal_on_clean_delete(svc, monkeypatch):
-    """On the happy path (old delete succeeds) no stale-duplicate marker is attached, so the
-    endpoint reports a clean 'updated'."""
+async def test_an_edit_that_keeps_the_model_is_applied_in_place_and_keeps_the_id(svc, monkeypatch):
+    """Edits used to re-register, changing the id, and an edit from a client still holding the old
+    id left the previous deployment live beside the new one (nannos#323). In place, the same id
+    edited twice is still the one row."""
+    gw = _Deployments(**{"dep-0": {"litellm_params": {"model": _SONNET}, "model_info": {"mode": "chat", "input_modes": ["text"]}}})
+    monkeypatch.setattr(svc, "_request", gw.request)
 
-    async def _fake_request(method, path, **kwargs):
-        if path == "/model/new":
-            return {"model_info": {"id": "new-id"}}
-        return {}
+    first = await svc.update_model("dep-0", "m", {"model": _SONNET}, {"input_modes": ["text", "file"], "mode": "chat"})
+    second = await svc.update_model("dep-0", "m", {"model": _SONNET}, {"input_modes": ["text", "image"], "mode": "chat"})
 
-    monkeypatch.setattr(svc, "_request", _fake_request)
+    assert first["model_info"]["id"] == second["model_info"]["id"] == "dep-0"
+    assert list(gw.rows) == ["dep-0"]
+    assert gw.rows["dep-0"]["model_info"]["input_modes"] == ["text", "image"]  # custom keys persist
+    assert not [c for c in gw.calls if c[1] in ("/model/new", "/model/delete")]
 
-    result = await svc.update_model("old-id", "m", {"model": "x"}, {"input_modes": ["file"]})
-    assert "_stale_duplicate_deployment_id" not in result
+
+@pytest.mark.asyncio
+async def test_correcting_a_rejected_model_id_then_editing_from_the_returned_id_leaves_one(svc, monkeypatch):
+    """The nannos#323 cycle: an admin corrects a model id the provider rejects — a re-route, so a
+    re-registration with a new id. The form moves onto that id (the page re-binds it), and the next
+    edit from it (Back to form after the re-test) ends with one deployment."""
+    gw = _Deployments(**{"dep-0": {"litellm_params": {"model": "bedrock/rejected-id"}, "model_info": {"mode": "chat"}}})
+    monkeypatch.setattr(svc, "_request", gw.request)
+
+    first = await svc.update_model("dep-0", "m", {"model": _SONNET}, {"mode": "chat"})
+    second = await svc.update_model(first["model_info"]["id"], "m", {"model": _SONNET}, {"mode": "chat", "input_modes": ["text"]})
+
+    assert list(gw.rows) == [second["model_info"]["id"]] == [first["model_info"]["id"]]  # the second edit is in place
+
+
+@pytest.mark.asyncio
+async def test_an_in_place_edit_keeps_the_probe_record(svc, monkeypatch):
+    """The record is not part of the edit form; an edit that keeps the model leaves it alone."""
+    record = {"response_format": False}
+    stored = {"litellm_params": {"model": _SONNET, "aws_region_name": "eu-central-1"}, "model_info": {"mode": "chat", "nannos_capabilities": record}}
+    gw = _Deployments(**{"dep-0": stored})
+    monkeypatch.setattr(svc, "_request", gw.request)
+
+    result = await svc.update_model("dep-0", "m", {"model": _SONNET, "aws_region_name": "eu-central-1"}, {"mode": "chat", "input_modes": ["text", "file"]})
+
+    assert result["model_info"]["id"] == "dep-0"
+    assert gw.rows["dep-0"]["model_info"]["nannos_capabilities"] == record
+
+
+@pytest.mark.asyncio
+async def test_an_edit_cannot_rename_the_alias(svc, monkeypatch):
+    from console_backend.services.model_gateway_service import ModelRenameRefused
+
+    gw = _Deployments(**{"dep-0": {"litellm_params": {"model": _SONNET}, "model_info": {"mode": "chat"}}})
+    monkeypatch.setattr(svc, "_request", gw.request)
+
+    with pytest.raises(ModelRenameRefused):
+        await svc.update_model("dep-0", "another-alias", {"model": _SONNET}, {"mode": "chat"})
+    assert list(gw.rows) == ["dep-0"] and gw.rows["dep-0"]["model_name"] == "m"
+
+
+@pytest.mark.asyncio
+async def test_a_changed_base_model_re_registers(svc, monkeypatch):
+    """The base model picks the cost-map entry the capability flags are derived from, so a new one
+    is another model, like a re-route (clearing it re-registers too, for the merge's sake)."""
+    gw = _Deployments(**{"dep-0": {"litellm_params": {"model": "azure/d"}, "model_info": {"mode": "chat", "base_model": "azure/gpt-4o"}}})
+    monkeypatch.setattr(svc, "_request", gw.request)
+
+    result = await svc.update_model("dep-0", "m", {"model": "azure/d"}, {"mode": "chat", "base_model": "azure/gpt-5"})
+
+    new_id = result["model_info"]["id"]
+    assert new_id != "dep-0" and gw.rows[new_id]["model_info"]["base_model"] == "azure/gpt-5"
+
+
+@pytest.mark.asyncio
+async def test_an_unlisted_deployment_is_edited_by_patch(svc, monkeypatch):
+    """Not listed even after the retries (a replica that has not loaded it): the PATCH reads the
+    gateway's database, so it edits the deployment, and nothing is registered beside it."""
+    gw = _Deployments(**{"dep-0": {"litellm_params": {"model": _SONNET}, "model_info": {"mode": "chat"}}})
+    real = gw.request
+
+    async def _lagging(method, path, **kwargs):
+        if path == "/model/info":
+            return {"data": []}
+        return await real(method, path, **kwargs)
+
+    monkeypatch.setattr(svc, "_request", _lagging)
+    monkeypatch.setattr("console_backend.services.model_gateway_service.asyncio.sleep", _noop_sleep)
+
+    result = await svc.update_model("dep-0", "m", {"model": _SONNET}, {"mode": "chat", "input_modes": ["text", "file"]})
+
+    assert result["model_info"]["id"] == "dep-0" and list(gw.rows) == ["dep-0"]
+    assert gw.rows["dep-0"]["model_info"]["input_modes"] == ["text", "file"]
+
+
+@pytest.mark.asyncio
+async def test_a_route_kept_from_outside_the_form_stays_in_place(svc, monkeypatch):
+    """A stored key the form never sends (an api_base set on the gateway) survives the merge, so the
+    route is unchanged — compared with what the merge stores, not with what the form sent."""
+    gw = _Deployments(**{"dep-0": {"litellm_params": {"model": _SONNET, "api_base": "https://proxy.internal"}, "model_info": {"mode": "chat"}}})
+    monkeypatch.setattr(svc, "_request", gw.request)
+
+    result = await svc.update_model("dep-0", "m", {"model": _SONNET}, {"mode": "chat"})
+
+    assert result["model_info"]["id"] == "dep-0"
+    assert gw.rows["dep-0"]["litellm_params"]["api_base"] == "https://proxy.internal"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "edit,why",
+    [
+        (dict(params={"model": "bedrock/eu.anthropic.claude-opus-5-5"}, info={"mode": "chat"}, name="m"), "another provider model"),
+        (dict(params={"model": _SONNET, "aws_region_name": "us-east-1"}, info={"mode": "chat"}, name="m"), "another region"),
+        (dict(params={"model": _SONNET}, info={"mode": "embedding"}, name="m"), "another mode"),
+    ],
+)
+async def test_an_edit_that_makes_it_another_model_re_registers(svc, monkeypatch, edit, why):
+    """A merge cannot drop what described the previous model (the probe record, flags derived from
+    it, chat-only capability keys), so a re-route, a mode change or a rename replaces the deployment."""
+    stored = {"litellm_params": {"model": _SONNET}, "model_info": {"mode": "chat", "supports_reasoning": True, "nannos_capabilities": {"response_format": False}}}
+    gw = _Deployments(**{"dep-0": stored})
+    monkeypatch.setattr(svc, "_request", gw.request)
+    if edit["params"].get("aws_region_name"):
+        gw.rows["dep-0"]["litellm_params"]["aws_region_name"] = "eu-central-1"
+
+    result = await svc.update_model("dep-0", edit["name"], edit["params"], edit["info"])
+
+    new_id = result["model_info"]["id"]
+    assert new_id != "dep-0" and list(gw.rows) == [new_id], why
+    assert "nannos_capabilities" not in gw.rows[new_id]["model_info"], why
+    assert "supports_reasoning" not in gw.rows[new_id]["model_info"], why
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stored_params,stored_info,model_info",
+    [
+        ({"model": _SONNET, "aws_region_name": "eu-central-1"}, {}, {}),  # region pin cleared
+        ({"model": "azure/my-deployment"}, {"base_model": "azure/gpt-4o"}, {}),  # base model cleared
+    ],
+)
+async def test_an_edit_that_clears_a_field_re_registers(svc, monkeypatch, stored_params, stored_info, model_info):
+    """A PATCH cannot remove a key (LiteLLM ignores the null), so clearing one re-registers: the
+    new deployment has the field gone and a new id, which the response carries."""
+    gw = _Deployments(**{"dep-0": {"litellm_params": stored_params, "model_info": stored_info}})
+    monkeypatch.setattr(svc, "_request", gw.request)
+
+    result = await svc.update_model("dep-0", "m", {"model": stored_params["model"]}, model_info)
+
+    new_id = result["model_info"]["id"]
+    assert list(gw.rows) == [new_id] and new_id != "dep-0"
+    assert "aws_region_name" not in gw.rows[new_id]["litellm_params"]
+    assert "base_model" not in gw.rows[new_id]["model_info"]
+
+
+@pytest.mark.asyncio
+async def test_a_re_registration_carries_the_record_on_the_same_route(svc, monkeypatch):
+    record = {"response_format": False}
+    gw = _Deployments(**{"dep-0": {"litellm_params": {"model": "azure/d"}, "model_info": {"base_model": "azure/gpt-4o", "nannos_capabilities": record}}})
+    monkeypatch.setattr(svc, "_request", gw.request)
+
+    result = await svc.update_model("dep-0", "m", {"model": "azure/d"}, {})
+
+    assert gw.rows[result["model_info"]["id"]]["model_info"]["nannos_capabilities"] == record
+
+
+@pytest.mark.asyncio
+async def test_a_re_registration_whose_old_delete_fails_names_the_leftover(svc, monkeypatch):
+    """The re-registration stands (it was created first); the surviving old deployment is
+    signalled so the endpoint reports updated_with_stale_duplicate instead of a clean update."""
+    gw = _Deployments(**{"dep-0": {"litellm_params": {"model": _SONNET, "aws_region_name": "eu-central-1"}}})
+    gw.fail_delete = True
+    monkeypatch.setattr(svc, "_request", gw.request)
+
+    result = await svc.update_model("dep-0", "m", {"model": _SONNET}, {})
+
+    assert result["_stale_duplicate_deployment_id"] == "dep-0"
+    assert len(gw.rows) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_probe_of_an_alias_with_two_deployments_measures_only_the_pinned_one(svc, monkeypatch):
+    """nannos#323: addressed by alias, the probe was load-balanced across a broken and a good
+    deployment and recorded a mix on one; pinned, the broken one never answers."""
+    listing = {"data": _chat_deployment(model_id="dep-broken")["data"] + _chat_deployment(model_id="dep-good")["data"]}
+    calls = _probe_gateway(
+        svc, monkeypatch, deployment=listing, reject=lambda b: "invalid model identifier" if b["model"] != "dep-good" else None
+    )
+    result = await svc.test_model("m", model_id="dep-good")
+    assert result["probe"]["rejected"] == []
+    assert all(r["ok"] for r in result["probe"]["results"])
+    assert {b["model"] for b in calls["probe_bodies"]} == {"dep-good"}
+    assert calls["patched"][0][0] == "/model/dep-good/update"
 
 
 @pytest.mark.asyncio
@@ -415,8 +571,10 @@ async def test_chat_test_records_the_probe_on_the_deployment_and_returns_the_rep
     assert body["model_info"]["id"] == "dep-1"
     assert body["model_info"]["nannos_capabilities"]["forced_tool_choice"] is True
     assert body["model_info"]["nannos_capabilities"]["probed_at"]
-    # Every probe request names the alias under test and carries no credentials.
-    assert {b["model"] for b in calls["probe_bodies"]} == {"m"}
+    # Every probe request addresses the deployment it records on, not the alias (which
+    # load-balances over every deployment under it, nannos#323), and carries no credentials.
+    assert {b["model"] for b in calls["probe_bodies"]} == {"dep-1"}
+    assert result["probe"]["model"] == "m"
     assert not any("api_key" in b for b in calls["probe_bodies"])
 
 
@@ -659,39 +817,6 @@ async def _noop_sleep(_):
 
 
 @pytest.mark.asyncio
-async def test_an_edit_carries_the_record_over_unless_the_model_changed(svc, monkeypatch):
-    """The edit form knows nothing of the probe's record; re-registering from it would drop
-    the record and make every reader treat the model as unprobed."""
-    registered: list[dict] = []
-
-    async def _fake_request(method, path, **kwargs):
-        if path == "/model/info":
-            return {
-                "data": [
-                    {
-                        "model_name": "m",
-                        "litellm_params": {"model": "bedrock/eu.anthropic.claude-sonnet-5-5"},
-                        "model_info": {"id": "old", "db_model": True, "nannos_capabilities": {"response_format": False}},
-                    }
-                ]
-            }
-        if path == "/model/new":
-            registered.append(kwargs["json"])
-            return {"model_info": {"id": "new"}}
-        if path == "/model/delete":
-            return {}
-        raise AssertionError(path)
-
-    monkeypatch.setattr(svc, "_request", _fake_request)
-    await svc.update_model("old", "m", {"model": "bedrock/eu.anthropic.claude-sonnet-5-5"}, {"mode": "chat"})
-    assert registered[-1]["model_info"]["nannos_capabilities"] == {"response_format": False}
-    assert registered[-1]["model_info"]["mode"] == "chat"
-
-    await svc.update_model("old", "m", {"model": "bedrock/eu.anthropic.claude-sonnet-5"}, {"mode": "chat"})
-    assert "nannos_capabilities" not in registered[-1]["model_info"]
-
-
-@pytest.mark.asyncio
 async def test_an_inconclusive_re_probe_keeps_the_flags_already_recorded(svc, monkeypatch):
     """Recorded {response_format: false, thinking_off: between_tools}; on re-test
     response_format gets a 429. The known `false` must survive — dropping it would let the
@@ -726,31 +851,6 @@ async def test_a_pinned_id_reads_the_deployments_own_model_info(svc, monkeypatch
     await svc.test_model("m", model_id="new")
     assert any(b.get("reasoning_effort") == "low" for b in calls["probe_bodies"])
     assert calls["patched"][0][0] == "/model/new/update"
-
-
-@pytest.mark.asyncio
-async def test_an_edit_that_moves_region_does_not_inherit_the_record(svc, monkeypatch):
-    registered: list[dict] = []
-
-    async def _fake_request(method, path, **kwargs):
-        if path == "/model/info":
-            return {
-                "data": [
-                    {
-                        "model_name": "m",
-                        "litellm_params": {"model": "bedrock/eu.anthropic.claude-sonnet-5-5", "aws_region_name": "eu-central-1"},
-                        "model_info": {"id": "old", "db_model": True, "nannos_capabilities": {"response_format": False}},
-                    }
-                ]
-            }
-        if path == "/model/new":
-            registered.append(kwargs["json"])
-            return {"model_info": {"id": "new"}}
-        return {}
-
-    monkeypatch.setattr(svc, "_request", _fake_request)
-    await svc.update_model("old", "m", {"model": "bedrock/eu.anthropic.claude-sonnet-5-5", "aws_region_name": "us-east-1"}, {})
-    assert "nannos_capabilities" not in registered[-1]["model_info"]
 
 
 @pytest.mark.asyncio
