@@ -792,6 +792,28 @@ class TestUntypedArguments:
         params = validate_and_clean_tool_dict({"name": "t", "parameters": schema})["function"]["parameters"]
         assert params["required"] == ["ok"]
 
+    def test_required_names_from_other_keywords_stay_required(self):
+        """A required name that allOf (or patternProperties, …) supplies is not pruned."""
+        schema = {
+            "type": "object",
+            "properties": {"a": {"type": "string"}},
+            "allOf": [{"properties": {"b": {"type": "string"}}}],
+            "required": ["a", "b"],
+        }
+        assert clean_gemini_schema(copy.deepcopy(schema))["required"] == ["a", "b"]
+        nested = {"type": "object", "properties": {"w": copy.deepcopy(schema)}}
+        assert clean_gemini_schema(nested)["properties"]["w"]["required"] == ["a", "b"]
+        params = validate_and_clean_tool_dict({"name": "t", "parameters": schema})["function"]["parameters"]
+        assert params["required"] == ["a", "b"]
+
+    def test_malformed_required_does_not_raise(self):
+        for required in (None, [["a"]], "a"):
+            schema = {"type": "object", "properties": {"a": None}, "required": required}
+            # clean_schema_node strips None-valued keywords, so required: None simply goes away there
+            assert clean_gemini_schema(copy.deepcopy(schema)).get("required") == required
+            params = validate_and_clean_tool_dict({"name": "t", "parameters": schema})["function"]["parameters"]
+            assert params["required"] == required
+
 
 class TestAnyOfNullableUnwrapping:
     """Tests for anyOf nullable unwrapping — Pydantic v2 Optional[X] patterns.

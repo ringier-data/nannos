@@ -75,6 +75,23 @@ def _resolve_ref(node: dict[str, Any], defs: dict[str, Any]) -> tuple[dict[str, 
     return node, None
 
 
+def _none_valued(properties: Any) -> set[str]:
+    """Names of the properties ``clean_schema_properties`` will drop: a None value is not a schema."""
+    if not isinstance(properties, dict):
+        return set()
+    return {k for k, v in properties.items() if v is None}
+
+
+def _prune_required(node: dict[str, Any], dropped: set[str]) -> None:
+    """Remove from ``required`` only the properties cleaning dropped.
+
+    Anything else stays required, including names that ``properties`` does not list
+    because ``allOf``, ``patternProperties`` or ``additionalProperties`` supply them.
+    """
+    if dropped and isinstance(node.get("required"), list):
+        node["required"] = [r for r in node["required"] if not (isinstance(r, str) and r in dropped)]
+
+
 def clean_schema_node(
     node: Any,
     level: CleanupLevel = CleanupLevel.MINIMAL,
@@ -197,12 +214,11 @@ def clean_schema_node(
 
     # --- Recurse into nested schemas ---
     if "properties" in node and isinstance(node["properties"], dict):
+        dropped = _none_valued(node["properties"])
         node["properties"] = clean_schema_properties(
             node["properties"], level, tool_name, _path, defs=defs, _seen=_seen, _depth=_depth
         )
-        # Keep required consistent with the properties that survived (None-valued ones are dropped)
-        if isinstance(node.get("required"), list):
-            node["required"] = [r for r in node["required"] if r in node["properties"]]
+        _prune_required(node, dropped)
 
     if "items" in node and isinstance(node["items"], dict):
         node["items"] = clean_schema_node(
@@ -318,13 +334,9 @@ def validate_and_clean_tool_dict(
 
     # Clean properties and sync required array
     if "properties" in params:
-        original_props = params["properties"]
-        cleaned_props = clean_schema_properties(original_props, level, tool_name, defs=defs)
-        params["properties"] = cleaned_props
-
-        # Remove from required any properties that were cleaned away (None-valued only)
-        if "required" in params:
-            params["required"] = [r for r in params["required"] if r in cleaned_props]
+        dropped = _none_valued(params["properties"])
+        params["properties"] = clean_schema_properties(params["properties"], level, tool_name, defs=defs)
+        _prune_required(params, dropped)
 
     return tool_dict
 

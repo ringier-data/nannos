@@ -90,8 +90,8 @@ export function declaresNoArguments(tool: McpTool | undefined): boolean {
     | null;
   if (!schema || typeof schema !== 'object') return false;
   const { properties, additionalProperties, required } = schema;
-  // A required argument with no property left is one the schema cleaning dropped (an
-  // untyped `Any`): the tool does take it.
+  // A required name that `properties` does not list is still an argument (supplied by
+  // `allOf`, `patternProperties`, …, or dropped by a schema cleaner older than nannos#328).
   if (Array.isArray(required) && required.length > 0) return false;
   return (
     typeof properties === 'object' &&

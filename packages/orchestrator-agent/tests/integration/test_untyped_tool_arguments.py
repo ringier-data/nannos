@@ -15,6 +15,7 @@ Run with: RUN_INTEGRATION_TESTS=1 uv run pytest tests/integration/test_untyped_t
 """
 
 import copy
+import json
 
 import pytest
 from agent_common.core.model_factory import REASONING_OFF, create_model
@@ -45,13 +46,13 @@ def _top_level(payload_schema: dict) -> dict:
     return {"type": "object", "properties": {"payload": payload_schema}, "required": ["payload"]}
 
 
-# (case id, parameters schema, path from the call's args to the payload, strict?)
+# ``{"default": null}`` is not a separate case: cleaning turns it into exactly the top-level ``{}``
+# schema (pinned by the SDK's unit tests), so a live call would send the same bytes again.
 # Nested is not strict: in the probe that motivated this, Gemini 3.1 Pro preview made the call
 # only 1 time in 4 with a nested ``{}`` (4/4 with ``{"type": "object"}``), while every family
 # accepted the schema. A refusal (400) still fails the session through the pass-ratio gate.
 _CASES = [
     pytest.param(_top_level({}), ("payload",), marks=pytest.mark.strict, id="top-level-empty"),
-    pytest.param(_top_level({"default": None}), ("payload",), marks=pytest.mark.strict, id="default-null"),
     pytest.param(
         {
             "type": "object",
@@ -74,6 +75,12 @@ async def test_an_untyped_argument_is_sent_with_its_value(
 ):
     tool = validate_and_clean_tool_dict(_tool(copy.deepcopy(parameters)))
     assert tool is not None
+    # Model-free: the cleaner kept the argument, required at every level. Without this a model
+    # could still send an undeclared argument the prompt names and pass against a dropping cleaner.
+    node = tool["function"]["parameters"]
+    for key in path:
+        assert key in node["properties"] and key in node.get("required", []), f"cleaner dropped {key}: {node}"
+        node = node["properties"][key]
     t.log_inputs({"model": model_type, "parameters": tool["function"]["parameters"]})
 
     llm = create_model(model_type, streaming=False, reasoning_effort=REASONING_OFF, max_tokens=1024)
@@ -86,4 +93,10 @@ async def test_an_untyped_argument_is_sent_with_its_value(
     for key in path:
         assert isinstance(value, dict) and key in value, f"{model_type} call is missing {'.'.join(path)}: {args}"
         value = value[key]
+    # An untyped argument takes any value, so a JSON-encoded object is a correct call too
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            pass
     assert value == _VALUE, f"{model_type} sent {'.'.join(path)}={value!r}, expected {_VALUE!r}"
