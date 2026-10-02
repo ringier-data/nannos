@@ -89,11 +89,14 @@ class TestOrchestratorThinkingConfig:
                 sub_agent_config_hash=None,
                 enable_thinking=True,  # From client metadata
                 thinking_level="high",  # From client metadata
+                settings_version="s1",
             )
 
             # User config should have thinking enabled
             assert user_config.enable_thinking is True
             assert user_config.thinking_level == "high"
+            # Carried to the embedded-runnable cache key (nannos#320)
+            assert user_config.settings_version == "s1"
 
     @pytest.mark.asyncio
     async def test_metadata_thinking_overrides_user_settings(self):

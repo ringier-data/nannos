@@ -119,9 +119,9 @@ class UserStamps:
     """The per-turn stamps console-backend serves for a user (``/me/entitlement-version``).
 
     ``entitlement`` keys every per-user cache; ``settings`` keys the user and embedded-runnable
-    caches. An
-    older console-backend serves no settings stamp, so ``settings`` may be None and the user
-    entry is then TTL-bounded for preference changes, as it was before the stamp existed.
+    caches. An older console-backend serves no settings stamp, so ``settings`` may be None and
+    the user and embedded-runnable entries are then TTL-bounded for preference changes, as
+    they were before the stamp existed.
     """
 
     entitlement: str
@@ -261,7 +261,8 @@ def get_embedded_runnable_cache(ttl_seconds: float | None = None) -> TtlTokenCac
     OAuth token exchange, MCP gateway ``list_tools`` handshakes, console-tool discovery,
     and LangGraph compilation — which is seconds of time-to-first-token on every message
     while the non-embedded path reuses ``GraphFactory._graphs``. Entries are keyed like
-    the discovery cache (entitlements + sub-agent config hash + target id): the runnable's
+    the discovery cache (entitlements + sub-agent config hash) plus the settings stamp and
+    target id (its prompt and default model come from the user's preferences): the runnable's
     tools embed exchanged bearer tokens, so entries are token-bounded exactly like
     discovery entries.
     """
