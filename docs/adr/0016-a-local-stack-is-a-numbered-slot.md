@@ -45,6 +45,12 @@ backend would land on 5401.
 - **`just slots`** lists claims; **`just slots-gc`** releases every slot in which neither `up` nor
   any service process is alive any more, through the same path as `down`.
 - **`just db-reset N`** drops and recreates the slot's databases and re-applies migrations.
+- **`just up --from-slot0`** starts a slot's *new* databases as a copy of slot 0's (agents,
+  registered models and rate cards, users, conversations) and then applies the worktree's pending
+  migrations, so a branch that only adds migrations runs against realistic data. It is refused when
+  slot 0 has applied a migration the worktree does not have — slot 0 runs whichever branch started
+  it last. The copy's scheduled jobs are suspended with a reason, and the work slot 0 had in flight
+  (owed notices, pending retries, running runs, queued catalog syncs) is dropped.
 
 ## Why
 
@@ -85,6 +91,12 @@ backend would land on 5401.
   mprocs. A worktree has no `.env` or local model list of its own (both are gitignored), so a stack
   started from one reads the main checkout's.
 
+- **A copy must not act on slot 0's behalf.** Copied as is, every scheduled job would fire twice
+  and notify the same people through the same bots, and slot 0's owed notices would be delivered
+  again. Suspension is the scheduler's own off switch for a job, visible in the console with its
+  reason and undone by an admin there, so a copy uses it rather than a slot-only flag. The notice
+  queue ignores suspension, so owed notices are cleared outright.
+
 ## Alternatives considered
 
 - **Local Kubernetes (kind or k3d) with a namespace per stack.** The cleanest isolation boundary.
@@ -116,8 +128,12 @@ backend would land on 5401.
   it was given. A slot that tests channel delivery has to take over slot 0.
 - Google Drive catalog connect registers its own OAuth redirect (`localhost:5001`) with Google, so
   it works in slot 0 only until that client also lists the slot URIs.
-- When object storage is S3, slots share the buckets. Keys derive from ids generated in each slot's
-  own database, so they do not collide, but `down` and `db-reset` leave the slot's objects behind.
+- When object storage is S3, slots share the buckets. A slot started empty generates its own ids, so
+  its keys do not collide, but `down` and `db-reset` leave its objects behind. A `--from-slot0` copy
+  shares slot 0's ids and therefore slot 0's objects: deleting a file, conversation or catalog in
+  the copy deletes it for slot 0 as well. Catalog auto-sync is off in a copy for the same reason.
+- A copy takes as long as `pg_dump | pg_restore` of slot 0's databases — seconds on an idle
+  machine, ten minutes on a saturated one.
 - IdP groups created by a slot (`local-sN-*`) outlive it; `down` does not delete them. A later
   `up` in the same slot reuses the prefix.
 - The shared Postgres servers and Keycloak stay up across slots; `stop-local` and `reset-local`

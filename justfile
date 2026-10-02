@@ -1194,7 +1194,7 @@ reset-local:
 # beside slot 0 (`just start-local`). `up` is headless: it returns once the slot is healthy
 # and prints its URLs as JSON. Logs: ~/.nannos/slots/N/logs/.
 
-# Start this worktree's slot (or print it if it runs): --slot N, --local-idp, --debug
+# Start this worktree's slot (or print it if it runs): --slot N, --local-idp, --debug, --from-slot0
 up *FLAGS:
   ./scripts/local-dev/slot.sh up {{FLAGS}}
 

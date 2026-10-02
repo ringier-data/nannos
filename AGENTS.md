@@ -167,7 +167,10 @@ the same worktree prints the running slot. `just down` stops it and drops its da
 do this when you are done); `just slots` lists them; `just db-reset` re-migrates after you edit
 an already-applied migration (`up` refuses until you do). Slots have no Slack/Google Chat
 clients. A worktree without its own `.env` uses the main checkout's. `just up --local-idp` signs in
-against the local Keycloak (`test@local.dev` / `password`) instead of the remote IdP.
+against the local Keycloak (`test@local.dev` / `password`) instead of the remote IdP. A slot's
+databases start empty; `just up --from-slot0` starts them as a copy of slot 0's (agents, models,
+users) with every scheduled job suspended — deleting files or catalogs in such a copy deletes slot
+0's S3 objects too.
 
 **The `.env` file is gitignored and per-checkout** — it exists at the main repo root but **NOT in fresh git worktrees**. If `scripts/start-local.sh` reports no LLM provider / missing config, or `.env` is absent, **STOP and ask the user to provide it — never fabricate secrets, AWS profiles, or OIDC URLs.** Ask only for the *minimal subset the task needs*, not the whole file. Variables group by what they unlock:
 

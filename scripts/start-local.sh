@@ -23,6 +23,8 @@ set -euo pipefail
 #   --headless   Start the services in the background instead of mprocs, wait until they are
 #                healthy, print the slot's JSON summary and exit (slots only).
 #   --local-idp  Use the local Keycloak even when .env names a remote OIDC_ISSUER.
+#   --from-slot0 Start a slot's new databases as a copy of slot 0's (its agents, models,
+#                users, conversations), then apply this worktree's pending migrations.
 #
 # The base URL should point to the root of your LLM server — /v1 is appended
 # automatically if absent (works with LM Studio, Ollama, vLLM, etc.).
@@ -79,17 +81,22 @@ _DEBUG_MODE=""
 _SLOT=0
 _HEADLESS=""
 _FORCE_LOCAL_IDP=""
+_FROM_SLOT0=""
 while [[ $# -gt 0 ]]; do
   case $1 in
     --debug) _DEBUG_MODE=1; shift ;;
     --slot) _SLOT="${2:-}"; shift 2 ;;
     --headless) _HEADLESS=1; shift ;;
     --local-idp) _FORCE_LOCAL_IDP=1; shift ;;
+    --from-slot0) _FROM_SLOT0=1; shift ;;
     *) echo "Unknown flag: $1"; exit 1 ;;
   esac
 done
 if [[ ! "$_SLOT" =~ ^[0-8]$ ]]; then
   echo "--slot takes 1-8 (slot 0 is the default stack)"; exit 1
+fi
+if [[ -n "$_FROM_SLOT0" && "$_SLOT" == 0 ]]; then
+  echo "--from-slot0 starts a slot (1-8) from slot 0's databases; use 'just up --from-slot0'"; exit 1
 fi
 if [[ -n "$_HEADLESS" && "$_SLOT" == 0 ]]; then
   echo "--headless runs a slot (1-8); use 'just up'"; exit 1
@@ -648,15 +655,83 @@ done
 ok "PostgreSQL is ready"
 
 # ─── 4b. Slot databases ──────────────────────────────────────────
+# A slot's databases are created on its first start, empty or (--from-slot0) as a copy of slot
+# 0's, and kept until `just down` drops them. A copy is taken only into new databases.
+
+# service:slot-0 database:slot database:migrations dir. Iterated with `for`, not `while read`:
+# `docker compose exec -T` reads stdin and would swallow the rest of a here-string.
+_SLOT_DB_SPECS="postgres-console:console:$_DB_CONSOLE:packages/console-backend/sqlmigrations/ddl
+postgres-docstore:docstore:$_DB_DOCSTORE:packages/orchestrator-agent/sqlmigrations/ddl"
+_db_exists() { docker compose exec -T "$1" psql -U postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '$2'" </dev/null | grep -q 1; }
+_drop_slot_dbs() {
+  for _spec in $_SLOT_DB_SPECS; do
+    IFS=: read -r _svc _src _db _ddl <<< "$_spec"
+    docker compose exec -T "$_svc" psql -U postgres -qc "DROP DATABASE IF EXISTS \"$_db\" WITH (FORCE)" </dev/null >/dev/null || true
+  done
+}
 
 if [[ "$_SLOT" != 0 ]]; then
-  for _pair in "postgres-console:$_DB_CONSOLE" "postgres-docstore:$_DB_DOCSTORE"; do
-    _svc="${_pair%%:*}"; _db="${_pair#*:}"
-    if ! docker compose exec -T "$_svc" psql -U postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '$_db'" | grep -q 1; then
-      docker compose exec -T "$_svc" psql -U postgres -c "CREATE DATABASE \"$_db\"" >/dev/null
+  _COPY_MARKER="${NANNOS_SLOTS_DIR:-$HOME/.nannos/slots}/db-s${_SLOT}.from-slot0"
+  _COPY_NOW=""
+  if [[ -n "$_FROM_SLOT0" ]]; then
+    if _db_exists postgres-console "$_DB_CONSOLE"; then
+      warn "Slot $_SLOT already has databases (kept); --from-slot0 copies only into new ones ('just db-reset $_SLOT' starts over)"
+    else
+      # Slot 0 runs whichever branch started it last. A migration it applied that this worktree
+      # does not have would sit in the copy unaccounted for, so the copy is refused instead.
+      for _spec in $_SLOT_DB_SPECS; do
+        IFS=: read -r _svc _src _db _ddl <<< "$_spec"
+        _db_exists "$_svc" "$_src" || err "Slot 0 has no '$_src' database to copy (run 'just start-local' once)"
+        _AHEAD=$(comm -23 \
+          <(docker compose exec -T "$_svc" psql -U postgres -d "$_src" -tAc "SELECT migration FROM migrations" </dev/null | sort) \
+          <(ls "$ROOT_DIR/$_ddl" | sort))
+        if [[ -n "$_AHEAD" ]]; then
+          err "Slot 0's $_src has migrations this worktree does not: $(echo $_AHEAD). Slot 0 runs another branch; start without --from-slot0."
+        fi
+      done
+      _COPY_NOW=1
+    fi
+  fi
+
+  for _spec in $_SLOT_DB_SPECS; do
+    IFS=: read -r _svc _src _db _ddl <<< "$_spec"
+    _db_exists "$_svc" "$_db" && continue
+    docker compose exec -T "$_svc" psql -U postgres -qc "CREATE DATABASE \"$_db\"" >/dev/null
+    if [[ -n "$_COPY_NOW" ]]; then
+      log "Copying slot 0's $_src into $_db..."
+      if ! docker compose exec -T "$_svc" bash -c "set -o pipefail; pg_dump -U postgres -Fc --no-owner --no-privileges '$_src' | pg_restore -U postgres --no-owner --no-privileges --exit-on-error -d '$_db'"; then
+        _drop_slot_dbs
+        err "Copying slot 0's $_src failed; slot $_SLOT's databases were dropped again"
+      fi
+      ok "Copied slot 0's $_src into $_db"
+    else
       ok "Created database $_db"
     fi
   done
+
+  if [[ -n "$_COPY_NOW" ]]; then
+    # A copy carries slot 0's schedule with it. Run beside slot 0, each job would fire twice and
+    # notify the same people, so the copy suspends every job (visibly, with a reason) and drops
+    # the work slot 0 still had in flight: owed notices, pending retries, runs mid-execution and
+    # queued catalog syncs.
+    docker compose exec -T postgres-console psql -U postgres -d "$_DB_CONSOLE" -v ON_ERROR_STOP=1 -q >/dev/null <<SQL || { _drop_slot_dbs; err "Could not neutralize the copy; slot $_SLOT's databases were dropped again"; }
+BEGIN;
+UPDATE scheduled_job_definitions
+   SET suspended_at = now(), suspended_by_user_id = NULL, updated_at = now(),
+       suspended_reason = 'Copied from slot 0 into local stack slot $_SLOT. Unsuspend it to run it here, beside slot 0.'
+ WHERE deleted_at IS NULL AND suspended_at IS NULL;
+UPDATE scheduled_job_subscriptions SET retry_at = NULL WHERE retry_at IS NOT NULL;
+UPDATE scheduled_job_runs SET status = 'interrupted', completed_at = COALESCE(completed_at, now()) WHERE status = 'running';
+UPDATE scheduled_job_runs SET notice_due_at = NULL WHERE notice_due_at IS NOT NULL;
+UPDATE catalog_sync_jobs
+   SET status = 'cancelled', completed_at = COALESCE(completed_at, now()),
+       error_details = jsonb_build_object('reason', 'Copied from slot 0: cancelled in slot $_SLOT')
+ WHERE status IN ('pending', 'running', 'reindexing', 'paused', 'cancelling');
+COMMIT;
+SQL
+    touch "$_COPY_MARKER"
+    ok "Copy neutralized: scheduled jobs suspended, slot 0's in-flight runs and notices dropped"
+  fi
 fi
 
 # Rambler records which migrations ran, not what they contained. A slot's databases can outlive
@@ -1129,6 +1204,13 @@ export TWILIO_VERIFY_SERVICE_SID="${TWILIO_VERIFY_SERVICE_SID:-}"
 export TWILIO_VERIFY_API_KEY="${TWILIO_VERIFY_API_KEY:-}"
 export TWILIO_VERIFY_API_SECRET="${TWILIO_VERIFY_API_SECRET:-}"
 
+# A copy of slot 0's databases holds slot 0's catalogs, whose vectors and thumbnails live in the
+# same S3 buckets under the same ids: a slot must not re-sync them on its own schedule.
+_CATALOG_AUTO_SYNC=true
+if [[ "$_SLOT" != 0 && -f "${_COPY_MARKER:-}" ]]; then
+  _CATALOG_AUTO_SYNC=false
+fi
+
 # ── Generate mprocs config ──
 if [[ "$_SLOT" != 0 ]]; then
   MPROCS_CFG="$_SLOT_DIR/procs.yaml"
@@ -1337,7 +1419,7 @@ procs:
       CATALOG_THUMBNAILS_S3_BUCKET: "$CATALOG_THUMBNAILS_S3_BUCKET"
       CATALOG_VECTOR_STORE_BACKEND: "s3_vectors"
       CATALOG_SUMMARIZATION_MODEL_ID: "eu.anthropic.claude-haiku-4-5-20251001-v1:0"
-      CATALOG_AUTO_SYNC_ENABLED: "true"
+      CATALOG_AUTO_SYNC_ENABLED: "${_CATALOG_AUTO_SYNC}"
       CATALOG_SYNC_INTERVAL_SECONDS: "86400"
       CATALOG_SYNC_TICK_INTERVAL_SECONDS: "300"
       CATALOG_SYNC_MAX_CONCURRENT: "3"

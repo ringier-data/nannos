@@ -7,8 +7,11 @@ set -euo pipefail
 # stack (slot 0, `just start-local`) and with each other. A slot is a directory under
 # $NANNOS_SLOTS_DIR (default ~/.nannos/slots): claiming one is an atomic mkdir.
 #
-#   slot.sh up [--slot N] [--local-idp] [--debug]   claim a slot for this worktree, start it,
-#                                                   print its JSON summary when healthy
+#   slot.sh up [--slot N] [--local-idp] [--debug] [--from-slot0]
+#                                                   claim a slot for this worktree, start it,
+#                                                   print its JSON summary when healthy;
+#                                                   --from-slot0 starts new databases as a
+#                                                   copy of slot 0's
 #   slot.sh down [N] [--keep-db]                    stop a slot and release it (default: this
 #                                                   worktree's); drops its databases unless kept
 #   slot.sh list                                    every claimed slot and its state
@@ -68,7 +71,7 @@ cmd_up() {
   while [[ $# -gt 0 ]]; do
     case $1 in
       --slot) want="${2:-}"; shift 2 ;;
-      --local-idp|--debug) args+=("$1"); shift ;;
+      --local-idp|--debug|--from-slot0) args+=("$1"); shift ;;
       *) err "Unknown flag for up: $1" ;;
     esac
   done
@@ -148,7 +151,7 @@ cmd_down() {
       || note "Could not drop console_s$n (is $PG_CONSOLE_CONTAINER running?)"
     _psql "$PG_DOCSTORE_CONTAINER" "DROP DATABASE IF EXISTS \"docstore_s$n\" WITH (FORCE)" \
       || note "Could not drop docstore_s$n (is $PG_DOCSTORE_CONTAINER running?)"
-    rm -f "$SLOTS_DIR/db-s$n.sha256"
+    rm -f "$SLOTS_DIR/db-s$n.sha256" "$SLOTS_DIR/db-s$n.from-slot0"
   fi
   rm -rf "$dir"
   note "Slot $n released${keep_db:+ (databases kept)}"
@@ -196,5 +199,5 @@ case "${1:-}" in
   list) shift; cmd_list ;;
   gc) shift; cmd_gc ;;
   db-reset) shift; cmd_db_reset "$@" ;;
-  *) sed -n '4,17p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+  *) sed -n '4,20p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac
