@@ -355,6 +355,8 @@ processes:
   # pipe that stays open while the command runs (and ends with it, $$$$ being its pid after exec).
   embed-sdk:
     namespace: 4-console
+    # Its node children can outlive a SIGTERM to the group (mprocs stopped it with SIGKILL too).
+    shutdown: {signal: 9}
     command: |
       exec 0< <(while kill -0 $$$$ 2>/dev/null; do sleep 2; done)
       exec npm run dev:link
@@ -426,6 +428,8 @@ processes:
 
   slack:
     namespace: 5-slot0
+    # Its node children can outlive a SIGTERM to the group (mprocs stopped it with SIGKILL too).
+    shutdown: {signal: 9}
     command: "./wait-for-postgres.sh postgres:password@localhost:4700/nannos -- npm run dev"
     working_dir: ${NANNOS_ROOT}/packages/client-slack
     log_location: ${NANNOS_LOG_DIR}/slack.log
@@ -439,6 +443,8 @@ processes:
 
   slack-frontend:
     namespace: 5-slot0
+    # Its node children can outlive a SIGTERM to the group (mprocs stopped it with SIGKILL too).
+    shutdown: {signal: 9}
     command: "npm run dev"
     working_dir: ${NANNOS_ROOT}/packages/client-slack-frontend
     log_location: ${NANNOS_LOG_DIR}/slack-frontend.log
@@ -449,6 +455,8 @@ processes:
 
   google-chat:
     namespace: 5-slot0
+    # Its node children can outlive a SIGTERM to the group (mprocs stopped it with SIGKILL too).
+    shutdown: {signal: 9}
     command: "npm run dev"
     working_dir: ${NANNOS_ROOT}/packages/client-google-chat
     log_location: ${NANNOS_LOG_DIR}/google-chat.log

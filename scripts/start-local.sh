@@ -940,9 +940,18 @@ _PC=(process-compose -f "$LOCAL_DEV_DIR/process-compose.yaml" --disable-dotenv
      -L "$_STACK_DIR/process-compose.log" -u "$_SOCK")
 rm -f "$_SOCK"
 
+# Whatever is left of an earlier run of this stack (a process that outlived its shutdown) would
+# hold a port or a database connection: stop it first.
+slot_kill_leftovers "$_SLOT"
+
 if [[ -z "$_HEADLESS" ]]; then
   log "Starting the stack with process-compose (slot $_SLOT)..."
-  exec "${_PC[@]}" up --hide-disabled
+  # Not exec: once the TUI is quit, stop anything of the stack that outlived the shutdown.
+  _PC_EXIT=0
+  "${_PC[@]}" up --hide-disabled || _PC_EXIT=$?
+  slot_kill_leftovers "$_SLOT"
+  rm -f "$_SOCK"
+  exit "$_PC_EXIT"
 fi
 
 # Headless: start detached and wait until the stack is ready — or has failed, which does not get

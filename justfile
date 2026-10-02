@@ -1223,11 +1223,13 @@ slots-gc:
 
 # Dependency tree of a running stack with each process's state (default: this worktree's slot, else slot 0)
 graph N="":
-  @process-compose graph -u "$(./scripts/local-dev/slot.sh sock {{N}})" 2>/dev/null
+  @sock="$(./scripts/local-dev/slot.sh sock {{N}})" && process-compose graph -u "$sock" 2>/dev/null \
+    || { echo "No stack is running on $sock (see 'just slots')" >&2; exit 1; }
 
 # Startup critical chain of a running stack: when each process became ready and how long it took
 startup N="":
-  @process-compose analyze critical-chain -u "$(./scripts/local-dev/slot.sh sock {{N}})" 2>/dev/null
+  @sock="$(./scripts/local-dev/slot.sh sock {{N}})" && process-compose analyze critical-chain -u "$sock" 2>/dev/null \
+    || { echo "No stack is running on $sock (see 'just slots')" >&2; exit 1; }
 
 # Drop and re-create a slot's databases, re-applying this worktree's migrations
 db-reset *ARGS:
