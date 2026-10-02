@@ -25,6 +25,7 @@ set -euo pipefail
 #   --headless   Start the stack detached instead of in the process-compose TUI, wait until it
 #                is ready and exit (slots only).
 #   --local-idp  Use the local Keycloak even when .env names a remote OIDC_ISSUER.
+#   --yes        Start without asking to confirm the plan (`just start-local` passes it).
 #
 # The base URL should point to the root of your LLM server — /v1 is appended
 # automatically if absent (works with LM Studio, Ollama, vLLM, etc.).
@@ -81,12 +82,14 @@ _DEBUG_MODE=""
 _SLOT=0
 _HEADLESS=""
 _FORCE_LOCAL_IDP=""
+_ASSUME_YES=""
 while [[ $# -gt 0 ]]; do
   case $1 in
     --debug) _DEBUG_MODE=1; shift ;;
     --slot) _SLOT="${2:-}"; shift 2 ;;
     --headless) _HEADLESS=1; shift ;;
     --local-idp) _FORCE_LOCAL_IDP=1; shift ;;
+    -y|--yes) _ASSUME_YES=1; shift ;;
     *) echo "Unknown flag: $1"; exit 1 ;;
   esac
 done
@@ -421,7 +424,7 @@ printf "${CYAN}└────────────────────�
 printf "\n"
 
 # Confirm
-if [[ -n "$_HEADLESS" ]]; then
+if [[ -n "$_HEADLESS" || -n "$_ASSUME_YES" ]]; then
   _confirm=Y
 else
   printf "${CYAN}▸ Proceed? [Y/n] ${RESET}"

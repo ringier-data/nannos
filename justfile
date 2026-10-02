@@ -1170,10 +1170,11 @@ test-db-psql: test-db
 
 # ─── Local Development ────────────────────────────────────────────
 
-# Start all services locally — slot 0, in the process-compose TUI (requires an LLM source in .env)
+# Start all services locally — slot 0, in the process-compose TUI (requires an LLM source in .env).
+# Prints the plan and starts without asking (./scripts/start-local.sh alone still asks).
 start-local *FLAGS:
   ./scripts/local-dev/env-sync.sh --quiet
-  ./scripts/start-local.sh {{FLAGS}}
+  ./scripts/start-local.sh --yes {{FLAGS}}
 
 # Copy the gitignored env files (scripts/local-dev/worktree-env-files) from the main checkout into
 # this worktree; existing ones are kept, --force refreshes them. `up` and `start-local` run it.
