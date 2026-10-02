@@ -162,7 +162,7 @@ talks to comes from `.env`: `AWS_PROFILE` → cloud models (Bedrock/Azure/Vertex
 - **Migrations:** a new migration is applied by `just down --keep-db && just up`. After editing an
   already-applied one, `up` refuses to start; `just db-reset` rebuilds the databases.
 - **When you are done:** `just down` (stops it, drops its databases, frees the ports). `just slots`
-  lists every slot; `just slots-gc` releases slots whose processes died.
+  lists every running stack, slot 0 included, with its branch and worktree; `just slots-gc` releases slots whose processes died.
 - **One slot per worktree:** agents working in the same worktree share its slot.
 - **Slot 0 is the user's** `just start-local` (console `:5173`, mprocs, interactive). Only slot 0 runs
   the Slack and Google Chat clients; for channel work, ask the user rather than starting it

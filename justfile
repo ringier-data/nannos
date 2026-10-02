@@ -1209,7 +1209,7 @@ up *FLAGS:
 down *ARGS:
   ./scripts/local-dev/slot.sh down {{ARGS}}
 
-# List claimed slots and their state
+# List running stacks — slot 0 (whichever checkout runs start-local) and every slot — with branch and worktree
 slots:
   ./scripts/local-dev/slot.sh list
 

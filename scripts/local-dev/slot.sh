@@ -195,9 +195,29 @@ cmd_down() {
   note "Slot $n released$kept"
 }
 
+# Slot 0 has no claim: it is whichever checkout's console-backend holds :5001. Its working
+# directory (a package dir) names that checkout.
+_slot0_worktree() {
+  local pid cwd
+  pid="$(lsof -nP -iTCP:5001 -sTCP:LISTEN -t 2>/dev/null | head -1)"
+  [[ -n "$pid" ]] || return 0
+  cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p')"
+  [[ -n "$cwd" ]] && git -C "$cwd" rev-parse --show-toplevel 2>/dev/null
+}
+
+_branch_of() {  # worktree
+  [[ -d "$1" ]] || { echo "(gone)"; return; }
+  git -C "$1" branch --show-current 2>/dev/null | grep . || echo "(detached)"
+}
+
 cmd_list() {
-  local n found="" state worktree
-  printf '%-5s %-9s %-24s %s\n' SLOT STATE CONSOLE WORKTREE
+  local n state worktree slot0
+  local row='%-5s %-9s %-24s %-36s %s\n'
+  printf "$row" SLOT STATE CONSOLE BRANCH WORKTREE
+  slot0="$(_slot0_worktree)"
+  if [[ -n "$slot0" ]]; then
+    printf "$row" 0 running "http://localhost:5173" "$(_branch_of "$slot0")" "$slot0"
+  fi
   for n in 1 2 3 4 5 6 7 8; do
     if [[ -d "$SLOTS_DIR/$n" ]]; then
       state="$(_state "$n")"
@@ -208,10 +228,8 @@ cmd_list() {
     else
       continue
     fi
-    found=1
-    printf '%-5s %-9s %-24s %s\n' "$n" "$state" "http://localhost:$(slot_port "$n" frontend)" "$worktree"
+    printf "$row" "$n" "$state" "http://localhost:$(slot_port "$n" frontend)" "$(_branch_of "$worktree")" "$worktree"
   done
-  [[ -n "$found" ]] || printf '(no slots claimed; slot 0 is `just start-local`)\n'
 }
 
 cmd_gc() {
