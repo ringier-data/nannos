@@ -279,6 +279,10 @@ class UserConfig(BaseModel):
         default=None,
         description="Opaque per-user entitlement stamp from console-backend; part of the per-user cache keys",
     )
+    settings_version: Optional[str] = Field(
+        default=None,
+        description="Opaque per-user settings stamp from console-backend; part of the embedded-runnable cache key",
+    )
     agent_metadata: Optional[dict[str, dict[str, Any]]] = Field(
         default=None,
         description="Agent metadata from registry: Maps agent_url -> {sub_agent_id, name, description}",

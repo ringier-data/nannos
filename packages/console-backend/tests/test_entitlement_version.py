@@ -160,7 +160,8 @@ class TestComputeEntitlementVersion:
         assert await compute_entitlement_version(pg_session, test_user_db.id) != owned
 
     async def test_stable_across_non_entitlement_writes(self, pg_session, test_user_db):
-        # A login re-upsert or a timezone change must not evict the user's cache.
+        # A login re-upsert or a timezone change must not move the entitlement version
+        # (capability discovery); the settings version covers preferences.
         before = await compute_entitlement_version(pg_session, test_user_db.id)
         await pg_session.execute(
             text("UPDATE users SET updated_at = NOW() + interval '1 hour', first_name = 'Renamed' WHERE id = :u"),

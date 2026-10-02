@@ -31,10 +31,10 @@ falls back to the last ones seen for that user, so the turn degrades to a TTL-bo
 entry rather than a cold miss or an error.
 
 The same call also returns a *settings* stamp (``UserStamps.settings``), a digest of the
-user's preferences row: preferred model, thinking, custom prompt, language. Only the user
-cache keys on it (``settings_version``), because the cached ``User`` carries those
-preferences and discovery does not depend on them, so a model switch applies on the next
-turn without forcing a cold capability discovery.
+user's preferences row: preferred model, thinking, custom prompt, language. The user cache
+and the embedded-runnable cache key on it (``settings_version``), because their values bake
+those preferences in; discovery does not depend on them, so a model switch applies on the
+next turn without forcing a cold capability discovery.
 
 ``groups`` (free, from the JWT) are kept in the key as belt-and-braces: a membership
 change moves the stamp too, but the JWT view is the one that gates authorization.
@@ -98,7 +98,7 @@ def cache_key(
     Shared by the discovery, user and embedded-runnable caches (they live in separate
     stores, so an identical key string never collides across them). ``tool_names`` is
     intentionally excluded — see the module docstring. ``settings_version`` is passed by
-    the user cache only.
+    the user and embedded-runnable caches, not by discovery.
     """
     payload = json.dumps(
         {
@@ -118,7 +118,8 @@ def cache_key(
 class UserStamps:
     """The per-turn stamps console-backend serves for a user (``/me/entitlement-version``).
 
-    ``entitlement`` keys every per-user cache; ``settings`` keys only the user cache. An
+    ``entitlement`` keys every per-user cache; ``settings`` keys the user and embedded-runnable
+    caches. An
     older console-backend serves no settings stamp, so ``settings`` may be None and the user
     entry is then TTL-bounded for preference changes, as it was before the stamp existed.
     """

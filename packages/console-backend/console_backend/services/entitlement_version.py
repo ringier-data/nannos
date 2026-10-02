@@ -10,8 +10,8 @@ derived from the rows themselves, not from the code paths that write them.
 
 The version is an opaque digest over the rows in this database that decide which tools
 and sub-agents the orchestrator serves a user — deliberately only those, so that writes
-that do not change an entitlement (a login re-upsert, a timezone change) do not evict the
-user's cache:
+that do not change an entitlement (a login re-upsert, a timezone change) do not move it and
+so do not evict capability discovery (preferences have their own stamp, below):
 
 * ``users`` — system role, status, admin flag, and ``entitlements_touched_at`` (bumped
   for entitlements held outside this DB, see below);
@@ -43,7 +43,8 @@ The cached registry user also carries the user's *preferences* from ``user_setti
 (preferred model, thinking, custom prompt, language, ...). Those are deliberately not in
 the entitlement version — a model switch must not cost the user a cold capability
 discovery — so they get a stamp of their own, ``compute_settings_version``, served by the
-same endpoint. The orchestrator keys only its user cache on it. It digests the whole row by
+same endpoint. The orchestrator keys its user and embedded-runnable caches on it, never
+discovery. It digests the whole row by
 value, so a column added later is covered without anyone remembering to list it here.
 """
 
