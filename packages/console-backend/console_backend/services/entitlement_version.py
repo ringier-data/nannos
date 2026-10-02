@@ -140,18 +140,6 @@ async def compute_user_stamps(db: AsyncSession, user_id: str) -> tuple[str, str]
     return hashlib.sha256(material.encode()).hexdigest()[:32], settings_version
 
 
-async def compute_entitlement_version(db: AsyncSession, user_id: str) -> str | None:
-    """The entitlement half of ``compute_user_stamps``."""
-    stamps = await compute_user_stamps(db, user_id)
-    return stamps[0] if stamps else None
-
-
-async def compute_settings_version(db: AsyncSession, user_id: str) -> str | None:
-    """The settings half of ``compute_user_stamps``; see "Settings version" above."""
-    stamps = await compute_user_stamps(db, user_id)
-    return stamps[1] if stamps else None
-
-
 async def touch_group_member_entitlements(db: AsyncSession, group_id: int) -> int:
     """Bump ``entitlements_touched_at`` for every member of ``group_id``.
 

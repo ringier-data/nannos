@@ -10,10 +10,19 @@ import pytest
 from sqlalchemy import text
 
 from console_backend.services.entitlement_version import (
-    compute_entitlement_version,
-    compute_settings_version,
+    compute_user_stamps,
     touch_group_member_entitlements,
 )
+
+
+async def _entitlement_version(db, user_id: str) -> str | None:
+    stamps = await compute_user_stamps(db, user_id)
+    return stamps[0] if stamps else None
+
+
+async def _settings_version(db, user_id: str) -> str | None:
+    stamps = await compute_user_stamps(db, user_id)
+    return stamps[1] if stamps else None
 
 
 async def _create_group(pg_session, name: str) -> int:
@@ -38,30 +47,30 @@ async def _create_sub_agent(pg_session, owner_id: str, name: str) -> int:
 @pytest.mark.asyncio
 class TestComputeEntitlementVersion:
     async def test_stable_when_nothing_changes(self, pg_session, test_user_db):
-        v1 = await compute_entitlement_version(pg_session, test_user_db.id)
-        v2 = await compute_entitlement_version(pg_session, test_user_db.id)
+        v1 = await _entitlement_version(pg_session, test_user_db.id)
+        v2 = await _entitlement_version(pg_session, test_user_db.id)
         assert v1 is not None
         assert v1 == v2
 
     async def test_none_for_unknown_user(self, pg_session):
-        assert await compute_entitlement_version(pg_session, "no-such-user") is None
+        assert await compute_user_stamps(pg_session, "no-such-user") is None
 
     async def test_moves_on_sub_agent_activation_and_deactivation(self, pg_session, test_user_db):
         sub_agent_id = await _create_sub_agent(pg_session, test_user_db.id, "demo-agent")
-        before = await compute_entitlement_version(pg_session, test_user_db.id)
+        before = await _entitlement_version(pg_session, test_user_db.id)
 
         await pg_session.execute(
             text("INSERT INTO user_sub_agent_activations (user_id, sub_agent_id) VALUES (:u, :s)"),
             {"u": test_user_db.id, "s": sub_agent_id},
         )
-        activated = await compute_entitlement_version(pg_session, test_user_db.id)
+        activated = await _entitlement_version(pg_session, test_user_db.id)
         assert activated != before
 
         await pg_session.execute(
             text("DELETE FROM user_sub_agent_activations WHERE user_id = :u AND sub_agent_id = :s"),
             {"u": test_user_db.id, "s": sub_agent_id},
         )
-        deactivated = await compute_entitlement_version(pg_session, test_user_db.id)
+        deactivated = await _entitlement_version(pg_session, test_user_db.id)
         assert deactivated != activated
 
     async def test_moves_when_activated_agent_gets_new_default_version(self, pg_session, test_user_db):
@@ -70,12 +79,12 @@ class TestComputeEntitlementVersion:
             text("INSERT INTO user_sub_agent_activations (user_id, sub_agent_id) VALUES (:u, :s)"),
             {"u": test_user_db.id, "s": sub_agent_id},
         )
-        before = await compute_entitlement_version(pg_session, test_user_db.id)
+        before = await _entitlement_version(pg_session, test_user_db.id)
         await pg_session.execute(
             text("UPDATE sub_agents SET default_version = 2 WHERE id = :s"),
             {"s": sub_agent_id},
         )
-        assert await compute_entitlement_version(pg_session, test_user_db.id) != before
+        assert await _entitlement_version(pg_session, test_user_db.id) != before
 
     async def test_moves_when_live_version_content_changes(self, pg_session, test_user_db):
         # The orchestrator runs the default version's content (tools, prompt); an in-place
@@ -92,12 +101,12 @@ class TestComputeEntitlementVersion:
             text("INSERT INTO user_sub_agent_activations (user_id, sub_agent_id) VALUES (:u, :s)"),
             {"u": test_user_db.id, "s": sub_agent_id},
         )
-        before = await compute_entitlement_version(pg_session, test_user_db.id)
+        before = await _entitlement_version(pg_session, test_user_db.id)
         await pg_session.execute(
             text("UPDATE sub_agent_config_versions SET version_hash = 'bbbbbbbbbbbb' WHERE sub_agent_id = :s"),
             {"s": sub_agent_id},
         )
-        assert await compute_entitlement_version(pg_session, test_user_db.id) != before
+        assert await _entitlement_version(pg_session, test_user_db.id) != before
 
     async def test_moves_when_system_public_agent_gets_new_version(self, pg_session, test_user_db):
         # Every user gets system-owned public agents without an activation row; a new
@@ -114,12 +123,12 @@ class TestComputeEntitlementVersion:
             )
         )
         sub_agent_id = row.scalar_one()
-        before = await compute_entitlement_version(pg_session, test_user_db.id)
+        before = await _entitlement_version(pg_session, test_user_db.id)
         await pg_session.execute(
             text("UPDATE sub_agents SET default_version = 2 WHERE id = :s"),
             {"s": sub_agent_id},
         )
-        assert await compute_entitlement_version(pg_session, test_user_db.id) != before
+        assert await _entitlement_version(pg_session, test_user_db.id) != before
 
     async def test_moves_on_group_share_and_unshare_of_agent_and_catalog(self, pg_session, test_user_db):
         group_id = await _create_group(pg_session, "share-group")
@@ -128,19 +137,19 @@ class TestComputeEntitlementVersion:
             {"u": test_user_db.id, "g": group_id},
         )
         sub_agent_id = await _create_sub_agent(pg_session, test_user_db.id, "shared-agent")
-        before = await compute_entitlement_version(pg_session, test_user_db.id)
+        before = await _entitlement_version(pg_session, test_user_db.id)
 
         await pg_session.execute(
             text("INSERT INTO sub_agent_permissions (sub_agent_id, user_group_id) VALUES (:s, :g)"),
             {"s": sub_agent_id, "g": group_id},
         )
-        shared = await compute_entitlement_version(pg_session, test_user_db.id)
+        shared = await _entitlement_version(pg_session, test_user_db.id)
         assert shared != before
         await pg_session.execute(
             text("DELETE FROM sub_agent_permissions WHERE sub_agent_id = :s AND user_group_id = :g"),
             {"s": sub_agent_id, "g": group_id},
         )
-        unshared = await compute_entitlement_version(pg_session, test_user_db.id)
+        unshared = await _entitlement_version(pg_session, test_user_db.id)
         assert unshared != shared
 
         row = await pg_session.execute(
@@ -151,18 +160,18 @@ class TestComputeEntitlementVersion:
             {"u": test_user_db.id},
         )
         catalog_id = row.scalar_one()
-        owned = await compute_entitlement_version(pg_session, test_user_db.id)
+        owned = await _entitlement_version(pg_session, test_user_db.id)
         assert owned != unshared
         await pg_session.execute(
             text("INSERT INTO catalog_permissions (catalog_id, user_group_id) VALUES (:c, :g)"),
             {"c": catalog_id, "g": group_id},
         )
-        assert await compute_entitlement_version(pg_session, test_user_db.id) != owned
+        assert await _entitlement_version(pg_session, test_user_db.id) != owned
 
     async def test_stable_across_non_entitlement_writes(self, pg_session, test_user_db):
         # A login re-upsert or a timezone change must not move the entitlement version
         # (capability discovery); the settings version covers preferences.
-        before = await compute_entitlement_version(pg_session, test_user_db.id)
+        before = await _entitlement_version(pg_session, test_user_db.id)
         await pg_session.execute(
             text("UPDATE users SET updated_at = NOW() + interval '1 hour', first_name = 'Renamed' WHERE id = :u"),
             {"u": test_user_db.id},
@@ -171,17 +180,17 @@ class TestComputeEntitlementVersion:
             text("INSERT INTO user_settings (user_id, timezone) VALUES (:u, 'Europe/Rome')"),
             {"u": test_user_db.id},
         )
-        assert await compute_entitlement_version(pg_session, test_user_db.id) == before
+        assert await _entitlement_version(pg_session, test_user_db.id) == before
 
     async def test_moves_on_group_membership_and_group_default_agent(self, pg_session, test_user_db):
         group_id = await _create_group(pg_session, "ev-group")
-        before = await compute_entitlement_version(pg_session, test_user_db.id)
+        before = await _entitlement_version(pg_session, test_user_db.id)
 
         await pg_session.execute(
             text("INSERT INTO user_group_members (user_id, user_group_id) VALUES (:u, :g)"),
             {"u": test_user_db.id, "g": group_id},
         )
-        joined = await compute_entitlement_version(pg_session, test_user_db.id)
+        joined = await _entitlement_version(pg_session, test_user_db.id)
         assert joined != before
 
         sub_agent_id = await _create_sub_agent(pg_session, test_user_db.id, "group-default")
@@ -192,22 +201,22 @@ class TestComputeEntitlementVersion:
             ),
             {"g": group_id, "s": sub_agent_id, "u": test_user_db.id},
         )
-        assert await compute_entitlement_version(pg_session, test_user_db.id) != joined
+        assert await _entitlement_version(pg_session, test_user_db.id) != joined
 
     async def test_moves_on_role_and_settings_change(self, pg_session, test_user_db):
-        before = await compute_entitlement_version(pg_session, test_user_db.id)
+        before = await _entitlement_version(pg_session, test_user_db.id)
         await pg_session.execute(
             text("UPDATE users SET role = 'approver' WHERE id = :u"),
             {"u": test_user_db.id},
         )
-        role_changed = await compute_entitlement_version(pg_session, test_user_db.id)
+        role_changed = await _entitlement_version(pg_session, test_user_db.id)
         assert role_changed != before
 
         await pg_session.execute(
             text("INSERT INTO user_settings (user_id, mcp_tools) VALUES (:u, '[\"a_tool\"]'::jsonb)"),
             {"u": test_user_db.id},
         )
-        assert await compute_entitlement_version(pg_session, test_user_db.id) != role_changed
+        assert await _entitlement_version(pg_session, test_user_db.id) != role_changed
 
     async def test_touch_group_members_moves_only_members(self, pg_session, test_user_db, test_admin_user_db):
         group_id = await _create_group(pg_session, "touch-group")
@@ -215,14 +224,14 @@ class TestComputeEntitlementVersion:
             text("INSERT INTO user_group_members (user_id, user_group_id) VALUES (:u, :g)"),
             {"u": test_user_db.id, "g": group_id},
         )
-        member_before = await compute_entitlement_version(pg_session, test_user_db.id)
-        outsider_before = await compute_entitlement_version(pg_session, test_admin_user_db.id)
+        member_before = await _entitlement_version(pg_session, test_user_db.id)
+        outsider_before = await _entitlement_version(pg_session, test_admin_user_db.id)
 
         touched = await touch_group_member_entitlements(pg_session, group_id)
 
         assert touched == 1
-        assert await compute_entitlement_version(pg_session, test_user_db.id) != member_before
-        assert await compute_entitlement_version(pg_session, test_admin_user_db.id) == outsider_before
+        assert await _entitlement_version(pg_session, test_user_db.id) != member_before
+        assert await _entitlement_version(pg_session, test_admin_user_db.id) == outsider_before
 
 
 @pytest.mark.asyncio
@@ -230,17 +239,17 @@ class TestComputeSettingsVersion:
     """The cached user record's preferences: moves on any settings write, stable otherwise."""
 
     async def test_stable_when_nothing_changes(self, pg_session, test_user_db):
-        assert await compute_settings_version(pg_session, test_user_db.id) == await compute_settings_version(
+        assert await _settings_version(pg_session, test_user_db.id) == await _settings_version(
             pg_session, test_user_db.id
         )
 
     async def test_moves_on_first_save_and_on_preference_change(self, pg_session, test_user_db):
-        never_saved = await compute_settings_version(pg_session, test_user_db.id)
+        never_saved = await _settings_version(pg_session, test_user_db.id)
         await pg_session.execute(
             text("INSERT INTO user_settings (user_id, preferred_model) VALUES (:u, 'model-a')"),
             {"u": test_user_db.id},
         )
-        saved = await compute_settings_version(pg_session, test_user_db.id)
+        saved = await _settings_version(pg_session, test_user_db.id)
         assert saved != never_saved
 
         for column, value in (
@@ -254,7 +263,7 @@ class TestComputeSettingsVersion:
                 text(f"UPDATE user_settings SET {column} = {value} WHERE user_id = :u"),
                 {"u": test_user_db.id},
             )
-            changed = await compute_settings_version(pg_session, test_user_db.id)
+            changed = await _settings_version(pg_session, test_user_db.id)
             assert changed != saved, column
             saved = changed
 
@@ -264,20 +273,20 @@ class TestComputeSettingsVersion:
             text("INSERT INTO user_settings (user_id) VALUES (:u)"),
             {"u": test_user_db.id},
         )
-        before = await compute_entitlement_version(pg_session, test_user_db.id)
+        before = await _entitlement_version(pg_session, test_user_db.id)
         await pg_session.execute(
             text("UPDATE user_settings SET preferred_model = 'model-b', enable_thinking = FALSE WHERE user_id = :u"),
             {"u": test_user_db.id},
         )
-        assert await compute_entitlement_version(pg_session, test_user_db.id) == before
+        assert await _entitlement_version(pg_session, test_user_db.id) == before
 
     async def test_scoped_to_the_user(self, pg_session, test_user_db, test_admin_user_db):
-        outsider_before = await compute_settings_version(pg_session, test_admin_user_db.id)
+        outsider_before = await _settings_version(pg_session, test_admin_user_db.id)
         await pg_session.execute(
             text("INSERT INTO user_settings (user_id, preferred_model) VALUES (:u, 'model-a')"),
             {"u": test_user_db.id},
         )
-        assert await compute_settings_version(pg_session, test_admin_user_db.id) == outsider_before
+        assert await _settings_version(pg_session, test_admin_user_db.id) == outsider_before
 
 
 @pytest.mark.asyncio
@@ -287,5 +296,5 @@ class TestEntitlementVersionEndpoint:
         assert response.status_code == 200
         version = response.json()["version"]
         assert isinstance(version, str) and version
-        assert version == await compute_entitlement_version(pg_session, test_user_model.id)
-        assert response.json()["settings_version"] == await compute_settings_version(pg_session, test_user_model.id)
+        assert version == await _entitlement_version(pg_session, test_user_model.id)
+        assert response.json()["settings_version"] == await _settings_version(pg_session, test_user_model.id)
