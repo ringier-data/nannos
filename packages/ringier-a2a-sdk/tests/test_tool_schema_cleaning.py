@@ -13,6 +13,8 @@ at model-binding time. These tests cover the low-level cleaning utilities used b
 the middleware.
 """
 
+import copy
+
 from ringier_a2a_sdk.utils.schema_cleaning import (
     CleanupLevel,
     clean_gemini_schema,
@@ -50,8 +52,8 @@ class TestCleanSchemaProperties:
         assert "none_prop" not in cleaned
         assert "another_valid" in cleaned
 
-    def test_remove_empty_dicts(self):
-        """Test that empty dict properties are removed."""
+    def test_keep_empty_dicts(self):
+        """An untyped property ({}, e.g. Python Any) is kept as {} — it means "any value"."""
         properties = {
             "valid_prop": {"type": "string"},
             "empty_prop": {},
@@ -61,11 +63,11 @@ class TestCleanSchemaProperties:
         cleaned = clean_schema_properties(properties)
 
         assert "valid_prop" in cleaned
-        assert "empty_prop" not in cleaned
+        assert cleaned["empty_prop"] == {}
         assert "another_valid" in cleaned
 
-    def test_remove_default_none(self):
-        """Test that properties with only {"default": None} are removed."""
+    def test_keep_default_none_as_empty(self):
+        """A property that is only {"default": None} is emptied, not removed."""
         properties = {
             "valid_prop": {"type": "string", "default": "value"},
             "none_default": {"default": None},
@@ -75,7 +77,7 @@ class TestCleanSchemaProperties:
         cleaned = clean_schema_properties(properties)
 
         assert "valid_prop" in cleaned
-        assert "none_default" not in cleaned
+        assert cleaned["none_default"] == {}
         assert "another_valid" in cleaned
 
     def test_remove_none_subfields_within_property(self):
@@ -128,7 +130,7 @@ class TestCleanSchemaProperties:
         # Check deeply nested cleaning
         deep_props = nested_props["deeply_nested"]["properties"]
         assert "deep_valid" in deep_props
-        assert "deep_none" not in deep_props
+        assert deep_props["deep_none"] == {}  # emptied, not dropped
 
     def test_recursive_cleaning_array_items(self):
         """Test that array item properties are cleaned recursively."""
@@ -233,7 +235,7 @@ class TestValidateAndCleanToolDict:
         props = result["function"]["parameters"]["properties"]
         assert "valid_prop" in props
         assert "none_prop" not in props
-        assert "empty_prop" not in props
+        assert props["empty_prop"] == {}
 
     def test_sync_required_array(self):
         """Test that required array is synced with cleaned properties."""
@@ -743,6 +745,52 @@ class TestRealWorldScenarios:
 
         # Verify we still have 85 valid tools
         assert len(cleaned_tools) == 85
+
+
+UNTYPED_REQUIRED_SCHEMA = {
+    "type": "object",
+    "properties": {"payload": {}, "note": {"type": "string"}},
+    "required": ["payload"],
+}
+
+
+class TestUntypedArguments:
+    """An untyped argument ({} or {"default": None}) survives both cleaners, required or not."""
+
+    def test_clean_gemini_schema_keeps_required_untyped(self):
+        result = clean_gemini_schema(copy.deepcopy(UNTYPED_REQUIRED_SCHEMA))
+        assert result["properties"] == {"payload": {}, "note": {"type": "string"}}
+        assert result["required"] == ["payload"]
+
+    def test_tool_dict_keeps_required_untyped(self):
+        tool = {"name": "t", "parameters": copy.deepcopy(UNTYPED_REQUIRED_SCHEMA)}
+        params = validate_and_clean_tool_dict(tool)["function"]["parameters"]
+        assert params["properties"] == {"payload": {}, "note": {"type": "string"}}
+        assert params["required"] == ["payload"]
+
+    def test_default_none_kept_as_empty_and_required(self):
+        schema = {"type": "object", "properties": {"payload": {"default": None}}, "required": ["payload"]}
+        result = clean_gemini_schema(schema)
+        assert result["properties"] == {"payload": {}}
+        assert result["required"] == ["payload"]
+
+    def test_nested_untyped_kept(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "wrapper": {"type": "object", "properties": {"payload": {}}, "required": ["payload"]},
+            },
+        }
+        result = clean_gemini_schema(schema)
+        assert result["properties"]["wrapper"]["properties"] == {"payload": {}}
+        assert result["properties"]["wrapper"]["required"] == ["payload"]
+
+    def test_none_property_pruned_from_required(self):
+        """None is not a schema: it is still dropped, and required stays consistent on both paths."""
+        schema = {"type": "object", "properties": {"bad": None, "ok": {}}, "required": ["bad", "ok"]}
+        assert clean_gemini_schema(copy.deepcopy(schema))["required"] == ["ok"]
+        params = validate_and_clean_tool_dict({"name": "t", "parameters": schema})["function"]["parameters"]
+        assert params["required"] == ["ok"]
 
 
 class TestAnyOfNullableUnwrapping:

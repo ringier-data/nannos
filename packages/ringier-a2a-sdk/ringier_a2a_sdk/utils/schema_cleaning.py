@@ -200,6 +200,9 @@ def clean_schema_node(
         node["properties"] = clean_schema_properties(
             node["properties"], level, tool_name, _path, defs=defs, _seen=_seen, _depth=_depth
         )
+        # Keep required consistent with the properties that survived (None-valued ones are dropped)
+        if isinstance(node.get("required"), list):
+            node["required"] = [r for r in node["required"] if r in node["properties"]]
 
     if "items" in node and isinstance(node["items"], dict):
         node["items"] = clean_schema_node(
@@ -226,11 +229,16 @@ def clean_schema_properties(
     _seen: frozenset[str] = frozenset(),
     _depth: int = 0,
 ) -> dict[str, Any]:
-    """Recursively remove invalid property schemas with progressive cleanup levels.
+    """Recursively clean property schemas with progressive cleanup levels.
 
-    MINIMAL: Removes None values, empty dicts, and unwraps anyOf nullable types
+    MINIMAL: Removes None-valued properties and unwraps anyOf nullable types
     MODERATE: Also removes ALL enum constraints (global state space limit)
     AGGRESSIVE: Also removes format, min/max bounds, array length constraints
+
+    An empty schema (``{}``, e.g. Python ``Any`` or zod ``z.any()``) is kept as ``{}``,
+    including one that only becomes empty after cleaning (``{"default": None}``). It means
+    "any value", which every provider behind the gateway accepts; dropping it would leave
+    the model unable to send that argument, and a required one would fail every call.
 
     Args:
         properties: Properties dict from JSON Schema
@@ -247,22 +255,14 @@ def clean_schema_properties(
     for key, value in properties.items():
         prop_path = f"{_path}.{key}" if _path else key
 
-        # Remove None-valued and empty properties
+        # None is not a schema at all — drop the property
         if value is None:
             logger.debug(f"Removing property '{key}' with None value")
-            continue
-        if isinstance(value, dict) and not value:
-            logger.debug(f"Removing property '{key}' with empty dict")
             continue
 
         # Delegate full recursive cleaning to clean_schema_node
         if isinstance(value, dict):
-            result = clean_schema_node(value, level, tool_name, prop_path, defs=defs, _seen=_seen, _depth=_depth)
-            if not result:
-                # Schema reduced to empty dict (e.g. {"default": None}) — skip it
-                logger.debug(f"Removing property '{key}': schema reduced to empty after cleaning")
-                continue
-            cleaned[key] = result
+            cleaned[key] = clean_schema_node(value, level, tool_name, prop_path, defs=defs, _seen=_seen, _depth=_depth)
         else:
             cleaned[key] = value
 
@@ -322,7 +322,7 @@ def validate_and_clean_tool_dict(
         cleaned_props = clean_schema_properties(original_props, level, tool_name, defs=defs)
         params["properties"] = cleaned_props
 
-        # Remove from required any properties that were cleaned away
+        # Remove from required any properties that were cleaned away (None-valued only)
         if "required" in params:
             params["required"] = [r for r in params["required"] if r in cleaned_props]
 
