@@ -105,7 +105,7 @@ processes:
     working_dir: ${NANNOS_ROOT}/packages/soffice-worker
     availability: *once
   deps-frontend:
-    command: "npm install --silent"
+    command: "npm install --silent --no-save"
     working_dir: ${NANNOS_ROOT}/packages/console-frontend
     availability: *once
 
@@ -361,18 +361,19 @@ processes:
     depends_on:
       infra: {condition: process_completed_successfully}
 
+  # --no-save: a start installs what the lockfiles say and never rewrites them.
   deps-client-slack:
-    command: "npm install --silent"
+    command: "npm install --silent --no-save"
     working_dir: ${NANNOS_ROOT}/packages/client-slack
     availability: *once
     disabled: ${NANNOS_CHANNEL_CLIENTS_OFF:-false}
   deps-client-slack-frontend:
-    command: "npm install --silent"
+    command: "npm install --silent --no-save"
     working_dir: ${NANNOS_ROOT}/packages/client-slack-frontend
     availability: *once
     disabled: ${NANNOS_CHANNEL_CLIENTS_OFF:-false}
   deps-client-google-chat:
-    command: "npm install --silent"
+    command: "npm install --silent --no-save"
     working_dir: ${NANNOS_ROOT}/packages/client-google-chat
     availability: *once
     disabled: ${NANNOS_CHANNEL_CLIENTS_OFF:-false}
