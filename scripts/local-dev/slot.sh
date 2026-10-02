@@ -104,7 +104,8 @@ _start() {  # N
   fi
 }
 
-# Stop slot N's stack and its gateway container; keeps the claim and the databases.
+# Stop slot N's stack, anything left of it and its gateway container; keeps the claim and the
+# databases.
 _stop() {  # N
   local n="$1"
   if slot_pc_running "$n"; then
@@ -112,6 +113,7 @@ _stop() {  # N
     # `down` returns once it asked; wait for the instance to be gone.
     for _ in $(seq 1 60); do slot_pc_running "$n" || break; sleep 1; done
   fi
+  slot_kill_leftovers "$n"
   docker rm -f "nannos-gw-s$n" >/dev/null 2>&1 || true
   rm -f "$(slot_sock "$n")"
 }

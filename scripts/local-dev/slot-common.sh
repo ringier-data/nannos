@@ -75,6 +75,27 @@ slot_pc_running() {  # N
   [[ -S "$(slot_sock "$1")" ]] && slot_pc "$1" project state >/dev/null
 }
 
+# Stop whatever still runs of slot N's stack without its process-compose instance — after the
+# instance was killed outright (SIGKILL, a crash), its services keep running as orphans, holding
+# the slot's ports and its database connections. Every process of the stack inherits
+# NANNOS_STACK_DIR, which `ps -E` shows for this user's processes; each is stopped by process group,
+# as process-compose would have.
+slot_kill_leftovers() {  # N
+  local dir pgids pg
+  dir="$(slot_dir "$1")"
+  pgids="$(ps -axEww -o pgid=,command= 2>/dev/null \
+    | awk -v want="NANNOS_STACK_DIR=$dir" -v self="$(ps -o pgid= -p $$ | tr -d ' ')" '
+        { for (i = 2; i <= NF; i++) if ($i == want && $1 != self) { print $1; break } }' | sort -u)"
+  [[ -n "$pgids" ]] || return 0
+  for pg in $pgids; do kill -TERM -- "-$pg" 2>/dev/null || true; done
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    sleep 1
+    for pg in $pgids; do kill -0 -- "-$pg" 2>/dev/null && continue 2; done
+    return 0
+  done
+  for pg in $pgids; do kill -KILL -- "-$pg" 2>/dev/null || true; done
+}
+
 # Read slot N's process list and judge it: prints "ready", "starting" or "failed: <names>".
 # Failed: a setup step exited non-zero or was skipped (its dependency failed), or a service exited.
 # Ready: no failure, every setup step done and every service with a readiness probe ready.
