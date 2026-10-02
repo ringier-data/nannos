@@ -1101,8 +1101,14 @@ _start-test-db:
 _build-migrations:
   #!/usr/bin/env bash
   set -e
-  # Local-only image: the context's own builder skips a docker-container builder's export+load.
-  docker build --builder "$(docker context show)" -t {{_migrations_image}} {{_migrations_dir}}
+  # Local-only image: the context's own builder skips a docker-container builder's export+load
+  # (where buildx has one; plain `docker build` has no --builder flag).
+  ctx="$(docker context show 2>/dev/null || true)"
+  if [[ -n "$ctx" ]] && docker buildx inspect "$ctx" >/dev/null 2>&1; then
+    docker build --builder "$ctx" -t {{_migrations_image}} {{_migrations_dir}}
+  else
+    docker build -t {{_migrations_image}} {{_migrations_dir}}
+  fi
 
 # Run migrations against a given port
 [private]
@@ -1186,8 +1192,9 @@ reset-local:
   tmux kill-session -t nannos 2>/dev/null || true
   docker rm -f nannos-litellm-proxy-local 2>/dev/null || true
   cd scripts/local-dev && docker compose down -v
+  @rm -rf "${NANNOS_SLOTS_DIR:-$HOME/.nannos/slots}"/db-s[0-8].*
   @echo "✓ Local infrastructure removed. Run 'just start-local' to start fresh."
-  @echo "⚠ Every slot's databases went with it: release the slots with 'just down N' or 'just slots-gc'."
+  @echo "⚠ Every slot's databases went with it: release running slots with 'just down N' or 'just slots-gc'."
 
 # ── Stack slots (ADR-0016): side-by-side stacks, one per worktree ──
 # A slot is a full stack on its own ports (4N000-4N999), databases, gateway and cookies,

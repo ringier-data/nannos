@@ -41,15 +41,18 @@ backend would land on 5401.
   databases, log path). It never prompts. A worktree holds at most one slot; `up` from a worktree
   whose slot runs prints that slot instead of claiming another.
 - **`just down [N]`** stops the slot's processes and gateway container, drops its databases and
-  releases the claim. `--keep-db` keeps the databases for the next `up` in the same slot.
+  releases the claim. `--keep-db` keeps the databases — with their migration hashes and, without
+  S3, their uploaded files — for the next `up` **from the same worktree**: kept databases record
+  the worktree that created them, and no other worktree's `up` takes that slot.
 - **`just slots`** lists claims; **`just slots-gc`** releases every slot in which neither `up` nor
   any service process is alive any more, through the same path as `down`.
 - **`just db-reset N`** drops and recreates the slot's databases and re-applies migrations.
 - **`just up --from-slot0`** starts a slot's *new* databases as a copy of slot 0's (agents,
   registered models and rate cards, users, conversations) and then applies the worktree's pending
   migrations, so a branch that only adds migrations runs against realistic data. It is refused when
-  slot 0 has applied a migration the worktree does not have — slot 0 runs whichever branch started
-  it last. The copy's scheduled jobs are suspended with a reason, and the work slot 0 had in flight
+  slot 0 has applied a migration the worktree does not have, or applied one with other contents —
+  slot 0 runs whichever branch started it last, so `start-local` records the contents slot 0
+  applied each migration with. The copy's scheduled jobs are suspended with a reason, and the work slot 0 had in flight
   (owed notices, pending retries, running runs, queued catalog syncs) is dropped.
 
 ## Why
@@ -95,7 +98,9 @@ backend would land on 5401.
   and notify the same people through the same bots, and slot 0's owed notices would be delivered
   again. Suspension is the scheduler's own off switch for a job, visible in the console with its
   reason and undone by an admin there, so a copy uses it rather than a slot-only flag. The notice
-  queue ignores suspension, so owed notices are cleared outright.
+  queue ignores suspension, so owed notices are cleared outright. A copy also runs without the
+  IdP admin client: its groups carry slot 0's IdP group ids and its users slot 0's identities, so
+  renaming a group or changing a phone number in the copy would change them for slot 0.
 
 ## Alternatives considered
 

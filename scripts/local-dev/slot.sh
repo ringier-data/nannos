@@ -5,7 +5,7 @@ set -euo pipefail
 #
 # Claims, starts, lists, stops and reclaims stacks that run side by side with the default
 # stack (slot 0, `just start-local`) and with each other. A slot is a directory under
-# $NANNOS_SLOTS_DIR (default ~/.nannos/slots): claiming one is an atomic mkdir.
+# $NANNOS_SLOTS_DIR (default ~/.nannos/slots); claims are taken under one lock.
 #
 #   slot.sh up [--slot N] [--local-idp] [--debug] [--from-slot0]
 #                                                   claim a slot for this worktree, start it,
@@ -14,22 +14,21 @@ set -euo pipefail
 #                                                   copy of slot 0's
 #   slot.sh down [N] [--keep-db]                    stop a slot and release it (default: this
 #                                                   worktree's); drops its databases unless kept
-#   slot.sh list                                    every claimed slot and its state
+#   slot.sh list                                    every slot: claimed, or holding kept databases
 #   slot.sh gc                                      release every slot nothing runs in any more
 #   slot.sh db-reset [N]                            down + drop databases + up again, same slot
 #
 # One worktree holds at most one slot; `up` from a worktree whose slot is running just prints it.
+# Kept databases belong to the worktree that created them: no other worktree's `up` takes them.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
-SLOTS_DIR="${NANNOS_SLOTS_DIR:-$HOME/.nannos/slots}"
-PG_CONSOLE_CONTAINER="nannos-local-postgres-console"
-PG_DOCSTORE_CONTAINER="nannos-local-postgres-docstore"
+# shellcheck source=slot-common.sh
+source "$SCRIPT_DIR/slot-common.sh"
+SLOTS_DIR="$NANNOS_SLOTS_DIR"
 
 err() { printf '✗ %s\n' "$*" >&2; exit 1; }
 note() { printf '▸ %s\n' "$*" >&2; }
-
-_procs() { uv run --quiet --no-project --with pyyaml python "$SCRIPT_DIR/slot_procs.py" "$@"; }
 
 _claim_field() {  # slot_dir field
   python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))' "$1/claim.json" "$2" 2>/dev/null || true
@@ -40,13 +39,20 @@ _pid_alive() { [[ -n "$1" ]] && kill -0 "$1" 2>/dev/null; }
 # running: a service process is alive; starting: `up` is still working; dead: neither.
 _state() {
   local dir="$SLOTS_DIR/$1"
-  if [[ -f "$dir/pids.json" ]] && _procs status "$dir" >/dev/null 2>&1; then
+  if [[ -f "$dir/pids.json" ]] && slot_procs status "$dir" >/dev/null 2>&1; then
     echo running
   elif _pid_alive "$(_claim_field "$dir" up_pid)"; then
     echo starting
   else
     echo dead
   fi
+}
+
+# Healthy is what `up` waited for: every service process alive and the backend answering.
+_healthy() {
+  [[ -f "$SLOTS_DIR/$1/slot.json" ]] \
+    && slot_procs status "$SLOTS_DIR/$1" --all >/dev/null 2>&1 \
+    && [[ "$(curl -s -o /dev/null --max-time 3 -w '%{http_code}' "http://localhost:$(slot_port "$1" backend)/api/v1/health")" == 200 ]]
 }
 
 _slot_of_worktree() {
@@ -60,14 +66,20 @@ _slot_of_worktree() {
   done
 }
 
+_kept_owner() { cat "$(slot_db_state "$1").owner" 2>/dev/null || true; }
+
 _port_in_use() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 
-_psql() {  # container sql
-  docker exec "$1" psql -U postgres -v ON_ERROR_STOP=1 -qc "$2" >/dev/null
+_block_in_use() {  # N: is any port of the slot's block held by something?
+  local port
+  for port in $(slot_all_ports "$1"); do
+    _port_in_use "$port" && return 0
+  done
+  return 1
 }
 
 cmd_up() {
-  local want="" args=() n="" existing
+  local want="" args=() n="" existing candidate owner
   while [[ $# -gt 0 ]]; do
     case $1 in
       --slot) want="${2:-}"; shift 2 ;;
@@ -79,36 +91,51 @@ cmd_up() {
   mkdir -p "$SLOTS_DIR"
   "$SCRIPT_DIR/env-sync.sh" --quiet
 
+  # Finding this worktree's slot and claiming a new one happen under one lock, so two `up`s
+  # from one worktree cannot both claim, and `gc` never sees a claim half-written.
+  slot_lock claim
   existing="$(_slot_of_worktree "$ROOT_DIR")"
   if [[ -n "$existing" ]]; then
     case "$(_state "$existing")" in
       running)
+        slot_unlock claim
+        _healthy "$existing" \
+          || err "Slot $existing of this worktree runs but is not healthy (logs: $SLOTS_DIR/$existing/logs). 'just down' and 'just up' restart it."
         note "This worktree already runs slot $existing"
-        cat "$SLOTS_DIR/$existing/slot.json" 2>/dev/null && echo || _procs status "$SLOTS_DIR/$existing" >&2
+        cat "$SLOTS_DIR/$existing/slot.json"
+        echo
         return 0 ;;
       starting)
+        slot_unlock claim
         err "Slot $existing is still starting for this worktree (log: $SLOTS_DIR/$existing/up.log)" ;;
       dead)
+        slot_unlock claim
         note "Slot $existing of this worktree is dead; restarting it on its databases"
         cmd_down "$existing" --keep-db
+        slot_lock claim
         want="$existing" ;;
     esac
   fi
 
-  local candidates candidate base
+  local candidates
   if [[ -n "$want" ]]; then candidates="$want"; else candidates="1 2 3 4 5 6 7 8"; fi
   for candidate in $candidates; do
-    base=$((40000 + candidate * 1000))
-    # Something outside the slot registry (a leftover process) may still hold the block.
-    if _port_in_use $((base + 1)) || _port_in_use $((base + 173)); then
+    [[ ! -d "$SLOTS_DIR/$candidate" ]] || continue
+    owner="$(_kept_owner "$candidate")"
+    if [[ -n "$owner" && "$owner" != "$ROOT_DIR" ]]; then
+      [[ -z "$want" ]] || { slot_unlock claim; err "Slot $candidate keeps the databases of $owner. 'just down $candidate' drops them."; }
       continue
     fi
-    if mkdir "$SLOTS_DIR/$candidate" 2>/dev/null; then
-      n="$candidate"
-      break
-    fi
+    # Something outside the slot registry (a leftover process) may still hold the block.
+    _block_in_use "$candidate" && continue
+    mkdir "$SLOTS_DIR/$candidate"
+    n="$candidate"
+    break
   done
-  [[ -n "$n" ]] || err "No free slot${want:+ ($want is taken)}. See 'just slots'; 'just slots-gc' releases dead ones."
+  if [[ -z "$n" ]]; then
+    slot_unlock claim
+    err "No free slot${want:+ ($want is taken)}. See 'just slots'; 'just slots-gc' releases dead ones."
+  fi
 
   python3 -c '
 import json, sys, time
@@ -116,6 +143,7 @@ slot, worktree, up_pid, *args = sys.argv[1:]
 print(json.dumps({"slot": int(slot), "worktree": worktree, "up_pid": int(up_pid), "args": args,
                   "claimed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}, indent=2))
 ' "$n" "$ROOT_DIR" "$$" ${args[@]+"${args[@]}"} > "$SLOTS_DIR/$n/claim.json"
+  slot_unlock claim
 
   note "Starting slot $n for $ROOT_DIR (log: $SLOTS_DIR/$n/up.log)"
   if "$ROOT_DIR/scripts/start-local.sh" --slot "$n" --headless ${args[@]+"${args[@]}"} > "$SLOTS_DIR/$n/up.log" 2>&1; then
@@ -138,45 +166,55 @@ cmd_down() {
   done
   [[ -n "$n" ]] || n="$(_slot_of_worktree "$ROOT_DIR")"
   [[ -n "$n" ]] || err "This worktree holds no slot. Name one: 'just down N' (see 'just slots')."
-  local dir="$SLOTS_DIR/$n"
-  [[ -d "$dir" ]] || err "Slot $n is not claimed"
-  if [[ "$(_state "$n")" == starting ]]; then
+  local dir="$SLOTS_DIR/$n" owner
+  owner="$(_kept_owner "$n")"
+  [[ -d "$dir" || -n "$owner" ]] || err "Slot $n is neither claimed nor keeping databases"
+  if [[ -d "$dir" && "$(_state "$n")" == starting ]]; then
     err "Slot $n is still starting (pid $(_claim_field "$dir" up_pid)); stop that first"
   fi
 
-  [[ -f "$dir/pids.json" ]] && _procs stop "$dir" >&2
+  [[ -f "$dir/pids.json" ]] && slot_procs stop "$dir" >&2
   docker rm -f "nannos-gw-s$n" >/dev/null 2>&1 || true
   if [[ -z "$keep_db" ]]; then
-    _psql "$PG_CONSOLE_CONTAINER" "DROP DATABASE IF EXISTS \"console_s$n\" WITH (FORCE)" \
-      || note "Could not drop console_s$n (is $PG_CONSOLE_CONTAINER running?)"
-    _psql "$PG_DOCSTORE_CONTAINER" "DROP DATABASE IF EXISTS \"docstore_s$n\" WITH (FORCE)" \
-      || note "Could not drop docstore_s$n (is $PG_DOCSTORE_CONTAINER running?)"
-    rm -f "$SLOTS_DIR/db-s$n.sha256" "$SLOTS_DIR/db-s$n.from-slot0"
+    slot_drop_databases "$n" \
+      || note "Could not drop slot $n's databases (are $PG_CONSOLE_CONTAINER and $PG_DOCSTORE_CONTAINER running?)"
   fi
   rm -rf "$dir"
-  note "Slot $n released${keep_db:+ (databases kept)}"
+  local kept=""
+  [[ -z "$keep_db" ]] || kept=" (databases kept${owner:+ for $owner})"
+  note "Slot $n released$kept"
 }
 
 cmd_list() {
-  local dir n found=""
+  local n found="" state worktree
   printf '%-5s %-9s %-24s %s\n' SLOT STATE CONSOLE WORKTREE
-  for dir in "$SLOTS_DIR"/[1-8]; do
-    [[ -d "$dir" ]] || continue
+  for n in 1 2 3 4 5 6 7 8; do
+    if [[ -d "$SLOTS_DIR/$n" ]]; then
+      state="$(_state "$n")"
+      worktree="$(_claim_field "$SLOTS_DIR/$n" worktree)"
+    elif [[ -n "$(_kept_owner "$n")" ]]; then
+      state="kept-db"
+      worktree="$(_kept_owner "$n")"
+    else
+      continue
+    fi
     found=1
-    n="$(basename "$dir")"
-    printf '%-5s %-9s %-24s %s\n' "$n" "$(_state "$n")" "http://localhost:$((40000 + n * 1000 + 173))" "$(_claim_field "$dir" worktree)"
+    printf '%-5s %-9s %-24s %s\n' "$n" "$state" "http://localhost:$(slot_port "$n" frontend)" "$worktree"
   done
   [[ -n "$found" ]] || printf '(no slots claimed; slot 0 is `just start-local`)\n'
 }
 
 cmd_gc() {
-  local dir n
+  local dir n dead=()
+  slot_lock claim
   for dir in "$SLOTS_DIR"/[1-8]; do
     [[ -d "$dir" ]] || continue
     n="$(basename "$dir")"
-    if [[ "$(_state "$n")" == dead ]]; then
-      cmd_down "$n"
-    fi
+    [[ "$(_state "$n")" == dead ]] && dead+=("$n")
+  done
+  slot_unlock claim
+  for n in ${dead[@]+"${dead[@]}"}; do
+    cmd_down "$n"
   done
 }
 
@@ -199,5 +237,5 @@ case "${1:-}" in
   list) shift; cmd_list ;;
   gc) shift; cmd_gc ;;
   db-reset) shift; cmd_db_reset "$@" ;;
-  *) sed -n '4,20p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+  *) sed -n '4,22p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

@@ -18,10 +18,10 @@ set -euo pipefail
 #   --debug      Start Python services with debugpy for VS Code debugging
 #                (ports: backend=5678, orchestrator=5679,
 #                 runner=5682, voice-agent=5683; offset per slot)
-#   --slot N     Run as stack slot N (1-8) beside slot 0 and the others (ADR-0016).
-#                Claimed and driven by `just up` / `just down`; not meant to be run by hand.
+#   --slot N     Run as stack slot N (1-8) beside slot 0 and the others (ADR-0016), always
+#                with --headless. Claimed and driven by `just up` / `just down`; not by hand.
 #   --headless   Start the services in the background instead of mprocs, wait until they are
-#                healthy, print the slot's JSON summary and exit (slots only).
+#                healthy, write the slot's JSON summary and exit (slots only).
 #   --local-idp  Use the local Keycloak even when .env names a remote OIDC_ISSUER.
 #   --from-slot0 Start a slot's new databases as a copy of slot 0's (its agents, models,
 #                users, conversations), then apply this worktree's pending migrations.
@@ -101,10 +101,17 @@ fi
 if [[ -n "$_HEADLESS" && "$_SLOT" == 0 ]]; then
   echo "--headless runs a slot (1-8); use 'just up'"; exit 1
 fi
+# A slot runs headless only: its claim is alive through the PIDs headless mode records, so a
+# slot under mprocs would look dead to `just slots-gc` and be dropped while running.
+if [[ "$_SLOT" != 0 && -z "$_HEADLESS" ]]; then
+  echo "A slot runs headless; start it with 'just up'"; exit 1
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 LOCAL_DEV_DIR="$SCRIPT_DIR/local-dev"
+# shellcheck source=local-dev/slot-common.sh
+source "$LOCAL_DEV_DIR/slot-common.sh"
 
 # Port console-backend listens on, and that every other service is pointed at.
 # Overridable for when something else already holds the default:
@@ -132,32 +139,36 @@ fi
 if [[ "$_SLOT" == 0 ]]; then
   _P_FRONTEND=5173; _P_ORCHESTRATOR=10001; _P_RUNNER=5005; _P_VOICE=8002; _P_SOFFICE=8090
   _P_DBG_BACKEND=5678; _P_DBG_ORCHESTRATOR=5679; _P_DBG_RUNNER=5682; _P_DBG_VOICE=5683
-  _DB_CONSOLE="console"; _DB_DOCSTORE="docstore"
   _GW_CONTAINER="nannos-litellm-proxy-local"
   _GROUP_PREFIX="local-"
   _LOG_DIR="$ROOT_DIR/logs"
 else
-  _SLOT_DIR="${NANNOS_SLOTS_DIR:-$HOME/.nannos/slots}/$_SLOT"
+  _SLOT_DIR="$NANNOS_SLOTS_DIR/$_SLOT"
   if [[ ! -f "$_SLOT_DIR/claim.json" ]]; then
     echo "Slot $_SLOT is not claimed. Start a slot with 'just up'."; exit 1
   fi
-  _B=$((40000 + _SLOT * 1000))
-  export CONSOLE_BACKEND_PORT=$((_B + 1))
-  LLM_GATEWAY_PORT=$((_B + 400))
-  _P_FRONTEND=$((_B + 173)); _P_ORCHESTRATOR=$((_B + 10)); _P_RUNNER=$((_B + 5))
-  _P_VOICE=$((_B + 2)); _P_SOFFICE=$((_B + 90))
-  _P_DBG_BACKEND=$((_B + 678)); _P_DBG_ORCHESTRATOR=$((_B + 679))
-  _P_DBG_RUNNER=$((_B + 682)); _P_DBG_VOICE=$((_B + 683))
-  _DB_CONSOLE="console_s${_SLOT}"; _DB_DOCSTORE="docstore_s${_SLOT}"
+  export CONSOLE_BACKEND_PORT="$(slot_port "$_SLOT" backend)"
+  LLM_GATEWAY_PORT="$(slot_port "$_SLOT" gateway)"
+  _P_FRONTEND="$(slot_port "$_SLOT" frontend)"; _P_ORCHESTRATOR="$(slot_port "$_SLOT" orchestrator)"
+  _P_RUNNER="$(slot_port "$_SLOT" runner)"; _P_VOICE="$(slot_port "$_SLOT" voice)"
+  _P_SOFFICE="$(slot_port "$_SLOT" soffice)"
+  _P_DBG_BACKEND="$(slot_port "$_SLOT" dbg_backend)"; _P_DBG_ORCHESTRATOR="$(slot_port "$_SLOT" dbg_orchestrator)"
+  _P_DBG_RUNNER="$(slot_port "$_SLOT" dbg_runner)"; _P_DBG_VOICE="$(slot_port "$_SLOT" dbg_voice)"
   _GW_CONTAINER="nannos-gw-s${_SLOT}"
   _GROUP_PREFIX="local-s${_SLOT}-"
   _LOG_DIR="$_SLOT_DIR/logs"
-  LOCAL_STORAGE_PATH="${LOCAL_STORAGE_PATH:-$_SLOT_DIR/uploads}"
   # Browsers scope cookies by host, not port: without their own names, slots on localhost would
   # sign each other out. The browser's Origin is the slot's frontend, which Socket.IO checks.
   export SESSION_COOKIE_NAME="a2a-chatui-s${_SLOT}"
   export OAUTH_STATE_COOKIE_NAME="session-s${_SLOT}"
   export CORS_ALLOWED_CHAT_ORIGINS="${CORS_ALLOWED_CHAT_ORIGINS:+$CORS_ALLOWED_CHAT_ORIGINS,}http://localhost:${_P_FRONTEND},http://127.0.0.1:${_P_FRONTEND}"
+fi
+_DB_CONSOLE="$(slot_db_name "$_SLOT" console)"; _DB_DOCSTORE="$(slot_db_name "$_SLOT" docstore)"
+_DB_STATE="$(slot_db_state "$_SLOT")"
+if [[ "$_SLOT" != 0 ]]; then
+  # Uploads belong to the databases that reference them, not to the claim: `down --keep-db`
+  # releases the claim but keeps both.
+  LOCAL_STORAGE_PATH="${LOCAL_STORAGE_PATH:-$_DB_STATE.uploads}"
 fi
 _FRONTEND_URL="http://localhost:${_P_FRONTEND}"
 mkdir -p "$_LOG_DIR"
@@ -176,22 +187,38 @@ err()  { printf "${RED}✗ %s${RESET}\n" "$*"; exit 1; }
 
 # Read SSM parameters in batches: `_ssm_load VAR=/ssm/name ...` sets each VAR whose parameter SSM
 # returns and leaves the others unset. `get-parameters` takes up to ten names per call; one call
-# per secret cost ~4 s each, fifteen times on every start.
-_ssm_load() {
-  local _pairs=("$@") _names=() _p _i=0 _out
-  for _p in "${_pairs[@]}"; do _names+=("${_p#*=}"); done
-  while [[ $_i -lt ${#_names[@]} ]]; do
-    _out=$(aws ssm get-parameters --names "${_names[@]:$_i:10}" --with-decryption --output json 2>/dev/null) || _out='{}'
-    eval "$(printf '%s' "$_out" | python3 -c '
+# per secret cost ~4 s each, fifteen times on every start. A batch fails as a whole when one of
+# its names is denied, so a failed batch is read again one name at a time — one optional secret
+# the profile may not read must not cost the required ones.
+_ssm_emit() {  # get-parameter(s) JSON on stdin, VAR=/name pairs as arguments
+  python3 -c '
 import json, shlex, sys
-values = {p["Name"]: p["Value"] for p in json.load(sys.stdin).get("Parameters", [])}
+doc = json.load(sys.stdin)
+params = doc.get("Parameters") or ([doc["Parameter"]] if "Parameter" in doc else [])
+values = {p["Name"]: p["Value"] for p in params}
 for pair in sys.argv[1:]:
     var, name = pair.split("=", 1)
     if name in values:
         print(f"{var}={shlex.quote(values[name])}")
-' "${_pairs[@]}")"
+' "$@"
+}
+_ssm_load() {
+  local _pairs=("$@") _names=() _p _n _i=0 _out _err
+  for _p in "${_pairs[@]}"; do _names+=("${_p#*=}"); done
+  _err="$(mktemp)"
+  while [[ $_i -lt ${#_names[@]} ]]; do
+    if _out=$(aws ssm get-parameters --names "${_names[@]:$_i:10}" --with-decryption --output json 2>"$_err"); then
+      eval "$(printf '%s' "$_out" | _ssm_emit "${_pairs[@]}")"
+    else
+      warn "Batched SSM read failed ($(head -1 "$_err")); reading those secrets one by one"
+      for _n in "${_names[@]:$_i:10}"; do
+        _out=$(aws ssm get-parameter --name "$_n" --with-decryption --output json 2>/dev/null) || continue
+        eval "$(printf '%s' "$_out" | _ssm_emit "${_pairs[@]}")"
+      done
+    fi
     _i=$((_i + 10))
   done
+  rm -f "$_err"
 }
 
 # ─── 1. Check prerequisites ───────────────────────────────────────
@@ -656,65 +683,72 @@ ok "PostgreSQL is ready"
 
 # ─── 4b. Slot databases ──────────────────────────────────────────
 # A slot's databases are created on its first start, empty or (--from-slot0) as a copy of slot
-# 0's, and kept until `just down` drops them. A copy is taken only into new databases.
+# 0's, and kept until `just down` drops them. They belong to the worktree that created them.
 
-# service:slot-0 database:slot database:migrations dir. Iterated with `for`, not `while read`:
-# `docker compose exec -T` reads stdin and would swallow the rest of a here-string.
-_SLOT_DB_SPECS="postgres-console:console:$_DB_CONSOLE:packages/console-backend/sqlmigrations/ddl
-postgres-docstore:docstore:$_DB_DOCSTORE:packages/orchestrator-agent/sqlmigrations/ddl"
-_db_exists() { docker compose exec -T "$1" psql -U postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '$2'" </dev/null | grep -q 1; }
-_drop_slot_dbs() {
-  for _spec in $_SLOT_DB_SPECS; do
-    IFS=: read -r _svc _src _db _ddl <<< "$_spec"
-    docker compose exec -T "$_svc" psql -U postgres -qc "DROP DATABASE IF EXISTS \"$_db\" WITH (FORCE)" </dev/null >/dev/null || true
-  done
+_db_exists() { docker exec "$1" psql -U postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '$2'" </dev/null | grep -q 1; }
+_hash_mismatches() {  # recorded-hashes-file: the files whose current hash differs from the record
+  slot_migration_hashes "$ROOT_DIR" \
+    | awk 'NR == FNR { seen[$1 " " $3] = $2; next } ($1 " " $3) in seen && seen[$1 " " $3] != $2 { print $1 "/" $3 }' "$1" -
 }
 
 if [[ "$_SLOT" != 0 ]]; then
-  _COPY_MARKER="${NANNOS_SLOTS_DIR:-$HOME/.nannos/slots}/db-s${_SLOT}.from-slot0"
   _COPY_NOW=""
-  if [[ -n "$_FROM_SLOT0" ]]; then
-    if _db_exists postgres-console "$_DB_CONSOLE"; then
-      warn "Slot $_SLOT already has databases (kept); --from-slot0 copies only into new ones ('just db-reset $_SLOT' starts over)"
-    else
-      # Slot 0 runs whichever branch started it last. A migration it applied that this worktree
-      # does not have would sit in the copy unaccounted for, so the copy is refused instead.
-      for _spec in $_SLOT_DB_SPECS; do
-        IFS=: read -r _svc _src _db _ddl <<< "$_spec"
-        _db_exists "$_svc" "$_src" || err "Slot 0 has no '$_src' database to copy (run 'just start-local' once)"
-        _AHEAD=$(comm -23 \
-          <(docker compose exec -T "$_svc" psql -U postgres -d "$_src" -tAc "SELECT migration FROM migrations" </dev/null | sort) \
-          <(ls "$ROOT_DIR/$_ddl" | sort))
-        if [[ -n "$_AHEAD" ]]; then
-          err "Slot 0's $_src has migrations this worktree does not: $(echo $_AHEAD). Slot 0 runs another branch; start without --from-slot0."
-        fi
-      done
-      _COPY_NOW=1
+  if _db_exists "$PG_CONSOLE_CONTAINER" "$_DB_CONSOLE"; then
+    _OWNER="$(cat "$_DB_STATE.owner" 2>/dev/null || true)"
+    if [[ -n "$_OWNER" && "$_OWNER" != "$ROOT_DIR" ]]; then
+      err "Slot $_SLOT's kept databases belong to $_OWNER, not this worktree. 'just down $_SLOT' drops them."
     fi
+    [[ -z "$_FROM_SLOT0" ]] || warn "Slot $_SLOT already has databases (kept); --from-slot0 copies only into new ones ('just db-reset $_SLOT' starts over)"
+  elif [[ -n "$_FROM_SLOT0" ]]; then
+    # Slot 0 runs whichever branch started it last. Copy only a schema this worktree accounts
+    # for: no migration this worktree lacks, and none applied from other contents than its own.
+    for _spec in $SLOT_DB_SPECS; do
+      IFS=: read -r _logical _container _ddl <<< "$_spec"
+      _db_exists "$_container" "$_logical" || err "Slot 0 has no '$_logical' database to copy (run 'just start-local' once)"
+      _AHEAD=$(comm -23 \
+        <(docker exec "$_container" psql -U postgres -d "$_logical" -tAc "SELECT migration FROM migrations" </dev/null | sort) \
+        <(ls "$ROOT_DIR/$_ddl" | sort))
+      if [[ -n "$_AHEAD" ]]; then
+        err "Slot 0's $_logical has migrations this worktree does not: $(echo $_AHEAD). Slot 0 runs another branch; start without --from-slot0."
+      fi
+    done
+    _S0_HASHES="$(slot_db_state 0).sha256"
+    if [[ -f "$_S0_HASHES" ]]; then
+      _DIFFERENT="$(_hash_mismatches "$_S0_HASHES")"
+      if [[ -n "$_DIFFERENT" ]]; then
+        err "Slot 0 applied other contents of: $(echo $_DIFFERENT). Slot 0 runs another branch; start without --from-slot0."
+      fi
+    else
+      warn "Slot 0 has no record of the migration contents it applied (it records them from its next 'just start-local'); the copy assumes they are this worktree's"
+    fi
+    _COPY_NOW=1
   fi
 
-  for _spec in $_SLOT_DB_SPECS; do
-    IFS=: read -r _svc _src _db _ddl <<< "$_spec"
-    _db_exists "$_svc" "$_db" && continue
-    docker compose exec -T "$_svc" psql -U postgres -qc "CREATE DATABASE \"$_db\"" >/dev/null
+  for _spec in $SLOT_DB_SPECS; do
+    IFS=: read -r _logical _container _ddl <<< "$_spec"
+    _db="$(slot_db_name "$_SLOT" "$_logical")"
+    _db_exists "$_container" "$_db" && continue
+    docker exec "$_container" psql -U postgres -qc "CREATE DATABASE \"$_db\"" </dev/null >/dev/null
     if [[ -n "$_COPY_NOW" ]]; then
-      log "Copying slot 0's $_src into $_db..."
-      if ! docker compose exec -T "$_svc" bash -c "set -o pipefail; pg_dump -U postgres -Fc --no-owner --no-privileges '$_src' | pg_restore -U postgres --no-owner --no-privileges --exit-on-error -d '$_db'"; then
-        _drop_slot_dbs
-        err "Copying slot 0's $_src failed; slot $_SLOT's databases were dropped again"
+      log "Copying slot 0's $_logical into $_db..."
+      # -Z0: the dump is restored in the same pipe, compressing it only costs CPU.
+      if ! docker exec "$_container" bash -c "set -o pipefail; pg_dump -U postgres -Fc -Z0 --no-owner --no-privileges '$_logical' | pg_restore -U postgres --no-owner --no-privileges --exit-on-error -d '$_db'" </dev/null; then
+        slot_drop_databases "$_SLOT" || true
+        err "Copying slot 0's $_logical failed; slot $_SLOT's databases were dropped again"
       fi
-      ok "Copied slot 0's $_src into $_db"
+      ok "Copied slot 0's $_logical into $_db"
     else
       ok "Created database $_db"
     fi
   done
+  [[ -f "$_DB_STATE.owner" ]] || echo "$ROOT_DIR" > "$_DB_STATE.owner"
 
   if [[ -n "$_COPY_NOW" ]]; then
     # A copy carries slot 0's schedule with it. Run beside slot 0, each job would fire twice and
     # notify the same people, so the copy suspends every job (visibly, with a reason) and drops
     # the work slot 0 still had in flight: owed notices, pending retries, runs mid-execution and
     # queued catalog syncs.
-    docker compose exec -T postgres-console psql -U postgres -d "$_DB_CONSOLE" -v ON_ERROR_STOP=1 -q >/dev/null <<SQL || { _drop_slot_dbs; err "Could not neutralize the copy; slot $_SLOT's databases were dropped again"; }
+    docker exec -i "$PG_CONSOLE_CONTAINER" psql -U postgres -d "$_DB_CONSOLE" -v ON_ERROR_STOP=1 -q >/dev/null <<SQL || { slot_drop_databases "$_SLOT" || true; err "Could not neutralize the copy; slot $_SLOT's databases were dropped again"; }
 BEGIN;
 UPDATE scheduled_job_definitions
    SET suspended_at = now(), suspended_by_user_id = NULL, updated_at = now(),
@@ -729,26 +763,19 @@ UPDATE catalog_sync_jobs
  WHERE status IN ('pending', 'running', 'reindexing', 'paused', 'cancelling');
 COMMIT;
 SQL
-    touch "$_COPY_MARKER"
+    touch "$_DB_STATE.from-slot0"
     ok "Copy neutralized: scheduled jobs suspended, slot 0's in-flight runs and notices dropped"
   fi
 fi
 
 # Rambler records which migrations ran, not what they contained. A slot's databases can outlive
 # a migration edit (`just down --keep-db`), so a slot keeps the hash of every migration file it
-# applied, beside the claim, and refuses to start when one has since changed: re-applying an
-# edited migration is not something Rambler does, and the schema would silently drift.
-_mig_hashes() {
-  (cd "$ROOT_DIR/packages/console-backend/sqlmigrations/ddl" && shasum -a 256 *.sql | sed 's/^/console /')
-  (cd "$ROOT_DIR/packages/orchestrator-agent/sqlmigrations/ddl" && shasum -a 256 *.sql | sed 's/^/docstore /')
-}
-if [[ "$_SLOT" != 0 ]]; then
-  _MIG_HASH_FILE="${NANNOS_SLOTS_DIR:-$HOME/.nannos/slots}/db-s${_SLOT}.sha256"
-  if [[ -f "$_MIG_HASH_FILE" ]]; then
-    _EDITED=$(_mig_hashes | awk 'NR == FNR { seen[$1 " " $3] = $2; next } ($1 " " $3) in seen && seen[$1 " " $3] != $2 { print $1 "/" $3 }' "$_MIG_HASH_FILE" -)
-    if [[ -n "$_EDITED" ]]; then
-      err "Migrations edited since slot $_SLOT applied them: $(echo $_EDITED). Run 'just db-reset $_SLOT'."
-    fi
+# applied and refuses to start when one has since changed: re-applying an edited migration is
+# not something Rambler does, and the schema would silently drift.
+if [[ "$_SLOT" != 0 && -f "$_DB_STATE.sha256" ]]; then
+  _EDITED="$(_hash_mismatches "$_DB_STATE.sha256")"
+  if [[ -n "$_EDITED" ]]; then
+    err "Migrations edited since slot $_SLOT applied them: $(echo $_EDITED). Run 'just db-reset $_SLOT'."
   fi
 fi
 
@@ -763,9 +790,14 @@ DOCSTORE_MIGRATIONS_IMAGE="nannos-docstore-migrations:local"
 # buildx builder is the default. A docker-container builder (needed for multi-platform pushes)
 # exports and re-loads the whole image on every build, even a full cache hit: ~70 s vs ~7 s.
 # These images are local-only; release builds keep the default builder.
-_LOCAL_BUILDER="$(docker context show)"
-docker build --builder "$_LOCAL_BUILDER" -t "$CONSOLE_MIGRATIONS_IMAGE" "$ROOT_DIR/packages/console-backend/sqlmigrations" --quiet
-docker build --builder "$_LOCAL_BUILDER" -t "$DOCSTORE_MIGRATIONS_IMAGE" "$ROOT_DIR/packages/orchestrator-agent/sqlmigrations" --quiet
+# Docker without buildx (or with BuildKit off) has no --builder flag: build as before there.
+_BUILDER_ARGS=()
+_CONTEXT="$(docker context show 2>/dev/null || true)"
+if [[ -n "$_CONTEXT" ]] && docker buildx inspect "$_CONTEXT" >/dev/null 2>&1; then
+  _BUILDER_ARGS=(--builder "$_CONTEXT")
+fi
+docker build ${_BUILDER_ARGS[@]+"${_BUILDER_ARGS[@]}"} -t "$CONSOLE_MIGRATIONS_IMAGE" "$ROOT_DIR/packages/console-backend/sqlmigrations" --quiet
+docker build ${_BUILDER_ARGS[@]+"${_BUILDER_ARGS[@]}"} -t "$DOCSTORE_MIGRATIONS_IMAGE" "$ROOT_DIR/packages/orchestrator-agent/sqlmigrations" --quiet
 
 # Install pgvector extension on the docstore database
 docker run --rm \
@@ -806,8 +838,13 @@ docker run --rm \
   "$DOCSTORE_MIGRATIONS_IMAGE"
 
 ok "Database migrations applied"
-if [[ "$_SLOT" != 0 ]]; then
-  _mig_hashes > "$_MIG_HASH_FILE"
+mkdir -p "$NANNOS_SLOTS_DIR"
+if [[ "$_SLOT" == 0 ]]; then
+  # Slot 0 keeps the contents it first applied each migration with — what a --from-slot0 copy
+  # checks a worktree against. A file already recorded keeps its first hash.
+  { cat "$_DB_STATE.sha256" 2>/dev/null || true; slot_migration_hashes "$ROOT_DIR"; }     | awk '!seen[$1 " " $3]++' > "$_DB_STATE.sha256.tmp" && mv "$_DB_STATE.sha256.tmp" "$_DB_STATE.sha256"
+else
+  slot_migration_hashes "$ROOT_DIR" > "$_DB_STATE.sha256"
 fi
 
 # Seed: make all users administrators for local dev
@@ -929,6 +966,8 @@ if [[ "$_SLOT" != 0 ]]; then
   _AC_UUID=$(curl -sf -H "Authorization: Bearer $KC_ADMIN_TOKEN" \
     "http://localhost:8180/admin/realms/nannos/clients?clientId=agent-console" \
     | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['id'])")
+  # Two slots registering at once would each PUT the list it read, dropping the other's URIs.
+  slot_lock keycloak-realm || err "Could not take the local realm lock"
   _SLOT_URIS_OK=""
   for _try in 1 2 3; do
     _AC_PATCH=$(curl -sf -H "Authorization: Bearer $KC_ADMIN_TOKEN" \
@@ -959,6 +998,7 @@ print(json.dumps({
     curl -sf -X PUT -H "Authorization: Bearer $KC_ADMIN_TOKEN" -H "Content-Type: application/json" \
       "http://localhost:8180/admin/realms/nannos/clients/$_AC_UUID" -d "$_AC_PATCH" >/dev/null || true
   done
+  slot_unlock keycloak-realm
   [[ -n "$_SLOT_URIS_OK" ]] || err "Could not register slot $_SLOT's URIs on the local realm's agent-console client"
   ok "Slot $_SLOT registered on the local realm (localhost:${CONSOLE_BACKEND_PORT}, localhost:${_P_FRONTEND})"
 fi
@@ -1205,10 +1245,15 @@ export TWILIO_VERIFY_API_KEY="${TWILIO_VERIFY_API_KEY:-}"
 export TWILIO_VERIFY_API_SECRET="${TWILIO_VERIFY_API_SECRET:-}"
 
 # A copy of slot 0's databases holds slot 0's catalogs, whose vectors and thumbnails live in the
-# same S3 buckets under the same ids: a slot must not re-sync them on its own schedule.
+# same S3 buckets under the same ids: a slot must not re-sync them on its own schedule. Nor may
+# it act on slot 0's IdP groups and users.
 _CATALOG_AUTO_SYNC=true
-if [[ "$_SLOT" != 0 && -f "${_COPY_MARKER:-}" ]]; then
+if [[ -f "$_DB_STATE.from-slot0" ]]; then
   _CATALOG_AUTO_SYNC=false
+  # The copy's groups carry slot 0's IdP group ids, and its users slot 0's identities: with the
+  # IdP admin client, editing a group or a phone number in the copy would change slot 0's.
+  _OIDC_SECRET_ADMIN=""
+  warn "Slot $_SLOT is a copy of slot 0: IdP group and user sync is off"
 fi
 
 # ── Generate mprocs config ──
@@ -1534,6 +1579,7 @@ procs:
       OIDC_ISSUER: "$_OIDC_ISSUER"
       OIDC_CLIENT_ID: "voice-agent"
       VOICE_AGENT_BASE_URL: "http://localhost:${_P_VOICE}"
+      CONSOLE_FRONTEND_URL: "${_FRONTEND_URL}"
       CONSOLE_BACKEND_URL: "http://localhost:${CONSOLE_BACKEND_PORT}"
       PUBLIC_URL: "${PUBLIC_URL:-}"
       GCP_KEY: '$GCP_KEY'
@@ -1600,10 +1646,7 @@ fi
 # ─── 9. Headless: start in the background, wait until healthy ──────
 # The procs file is the single definition of what runs; slot_procs.py starts each entry as its
 # own process group (stop = kill the group) and records the PIDs beside the claim.
-_slot_procs() {
-  uv run --quiet --no-project --with pyyaml python "$SCRIPT_DIR/local-dev/slot_procs.py" "$@"
-}
-_slot_procs start "$MPROCS_CFG" "$_SLOT_DIR" --skip info
+slot_procs start "$MPROCS_CFG" "$_SLOT_DIR" --skip info
 
 # Any HTTP answer counts as up (the orchestrator answers 401 without a token); 000 is no answer.
 _SLOT_CHECKS="console-backend=http://localhost:${CONSOLE_BACKEND_PORT}/api/v1/health
@@ -1620,6 +1663,10 @@ while :; do
     [[ "$_code" != "000" ]] || _DOWN="$_DOWN $_name"
   done <<< "$_SLOT_CHECKS"
   [[ -n "$_DOWN" ]] || break
+  # A service that exited will not come up by waiting: fail now, not at the deadline.
+  if ! _EXITED="$(slot_procs status "$_SLOT_DIR" --all 2>/dev/null)"; then
+    err "Slot $_SLOT: a service exited during startup ($(echo "$_EXITED" | grep ': down' | cut -d: -f1 | xargs)). Logs: $_LOG_DIR"
+  fi
   if [[ $SECONDS -ge $_DEADLINE ]]; then
     err "Slot $_SLOT not healthy:${_DOWN}. Logs: $_LOG_DIR"
   fi
