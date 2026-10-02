@@ -432,6 +432,7 @@ app.add_middleware(
 app.add_middleware(
     SessionMiddleware,
     secret_key=config.secret_key,
+    session_cookie=config.oauth_state_cookie_name,
     max_age=600,  # OAuth state expires in 10 minutes
     same_site="lax",
     https_only=not config.is_local(),
