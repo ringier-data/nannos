@@ -149,6 +149,33 @@ if [[ "$_SLOT" == 0 ]]; then
     _RUNNING_IN="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["worktree"])' "$_STACK_DIR/stack.json" 2>/dev/null || echo "another checkout")"
     echo "Slot 0 already runs (from $_RUNNING_IN). Stop it first: quit its TUI, or 'just stop-local'."; exit 1
   fi
+  # Another stack on slot 0's ports — one started before process-compose (mprocs), or anything
+  # else — would make every service fail on "address in use", and the gateway step would remove
+  # its gateway container (same name). Refuse before touching anything. A gateway container of
+  # ours left alone on its port is a leftover the gateway step replaces.
+  _HELD=""
+  for _name in backend frontend orchestrator runner voice soffice gateway; do
+    _port="$(slot_port 0 "$_name")"
+    [[ "$_name" == backend ]] && _port="$CONSOLE_BACKEND_PORT"
+    [[ "$_name" == gateway ]] && _port="$LLM_GATEWAY_PORT"
+    _pid="$(lsof -nP -iTCP:"$_port" -sTCP:LISTEN -t 2>/dev/null | head -1 || true)"
+    [[ -n "$_pid" ]] || continue
+    _container="$(docker ps --filter "publish=$_port" --format '{{.Names}}' 2>/dev/null | head -1 || true)"
+    if [[ -n "$_container" ]]; then
+      [[ "$_name" == gateway && "$_container" == "$_GW_CONTAINER" ]] && continue
+      _HELD="$_HELD
+  :$_port ($_name) — Docker container $_container"
+    else
+      _cwd="$(lsof -a -p "$_pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' || true)"
+      _where="$(git -C "${_cwd:-/}" rev-parse --show-toplevel 2>/dev/null || echo "${_cwd:-unknown directory}")"
+      _HELD="$_HELD
+  :$_port ($_name) — $(ps -o comm= -p "$_pid" 2>/dev/null | xargs basename 2>/dev/null) (pid $_pid) in $_where"
+    fi
+  done
+  if [[ -n "$_HELD" ]]; then
+    echo "Slot 0's ports are in use — another stack (an mprocs-era start-local?) or another process:$_HELD"
+    echo "Stop it first (quit its mprocs/TUI, or 'just stop-local')."; exit 1
+  fi
 else
   [[ -f "$_STACK_DIR/claim.json" ]] || { echo "Slot $_SLOT is not claimed. Start a slot with 'just up'."; exit 1; }
   _GW_CONTAINER="nannos-gw-s${_SLOT}"

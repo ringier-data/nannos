@@ -128,7 +128,8 @@ else:
 }
 # The setup steps of process-compose.yaml (run once, exit 0); everything else is a service.
 SLOT_ONE_SHOTS="info infra migrate-console migrate-docstore keycloak-setup embed-sdk-build slack-migrate
-deps-console-backend deps-orchestrator deps-runner deps-voice-agent deps-soffice-worker deps-frontend"
+deps-console-backend deps-orchestrator deps-runner deps-voice-agent deps-soffice-worker deps-frontend
+deps-client-slack deps-client-slack-frontend deps-client-google-chat"
 
 # A kernel lock (flock) on a file, held through file descriptor FD by the calling shell: the
 # short Python child takes it on the shared open file, and it stays held until the shell closes

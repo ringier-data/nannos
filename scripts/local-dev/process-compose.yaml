@@ -361,6 +361,22 @@ processes:
     depends_on:
       infra: {condition: process_completed_successfully}
 
+  deps-client-slack:
+    command: "npm install --silent"
+    working_dir: ${NANNOS_ROOT}/packages/client-slack
+    availability: *once
+    disabled: ${NANNOS_CHANNEL_CLIENTS_OFF:-false}
+  deps-client-slack-frontend:
+    command: "npm install --silent"
+    working_dir: ${NANNOS_ROOT}/packages/client-slack-frontend
+    availability: *once
+    disabled: ${NANNOS_CHANNEL_CLIENTS_OFF:-false}
+  deps-client-google-chat:
+    command: "npm install --silent"
+    working_dir: ${NANNOS_ROOT}/packages/client-google-chat
+    availability: *once
+    disabled: ${NANNOS_CHANNEL_CLIENTS_OFF:-false}
+
   slack-migrate:
     command: "just migrate"
     working_dir: ${NANNOS_ROOT}/packages/client-slack
@@ -376,6 +392,7 @@ processes:
     log_configuration: *log
     disabled: ${NANNOS_CHANNEL_CLIENTS_OFF:-false}
     depends_on:
+      deps-client-slack: {condition: process_completed_successfully}
       slack-migrate: {condition: process_completed_successfully}
 
   slack-frontend:
@@ -384,6 +401,8 @@ processes:
     log_location: ${NANNOS_LOG_DIR}/slack-frontend.log
     log_configuration: *log
     disabled: ${NANNOS_CHANNEL_CLIENTS_OFF:-false}
+    depends_on:
+      deps-client-slack-frontend: {condition: process_completed_successfully}
 
   google-chat:
     command: "npm run dev"
@@ -391,3 +410,5 @@ processes:
     log_location: ${NANNOS_LOG_DIR}/google-chat.log
     log_configuration: *log
     disabled: ${NANNOS_CHANNEL_CLIENTS_OFF:-false}
+    depends_on:
+      deps-client-google-chat: {condition: process_completed_successfully}
