@@ -1,4 +1,9 @@
-"""Per-user entitlement version: the cache-validation stamp the orchestrator keys on.
+"""Per-user cache stamps the orchestrator keys on: the entitlement version and the settings version.
+
+Two stamps because the orchestrator's caches depend on different things: capability
+discovery (expensive) depends only on entitlements, while its cached user record also
+carries the user's preferences. See "Two stamps" in the orchestrator's
+``app/core/discovery_cache.py``.
 
 The orchestrator memoizes capability discovery (MCP tools + sub-agents) and the registry
 user lookup per user. Instead of console-backend *pushing* invalidations to every
@@ -125,7 +130,7 @@ _TOUCH_GROUP_QUERY = text("""
 
 async def compute_user_stamps(db: AsyncSession, user_id: str) -> tuple[str, str] | None:
     """Return ``(entitlement_version, settings_version)`` in one round trip, or None if the
-    user does not exist.
+    user does not exist. Two stamps, not one: see the module docstring.
 
     Opaque to callers: compare for equality only. Each stays the same as long as none of its
     underlying rows changed. A user who never saved settings has no ``user_settings`` row and

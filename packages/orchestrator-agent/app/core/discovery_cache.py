@@ -15,6 +15,26 @@ Keying
 entitled to *and* that the cached value actually depends on::
 
     user_sub, sorted(groups), entitlement_version, sub_agent_config_hash, policy_version
+    [+ settings_version, for the caches that bake in preferences — see "Two stamps"]
+
+Two stamps
+~~~~~~~~~~
+Console-backend serves two per-user stamps in one call, because the caches here depend on
+different things:
+
+  ============================  ===================================  ==================
+  cache                         keyed on                             cost of a miss
+  ============================  ===================================  ==================
+  discovery (tools, sub-agents) ``entitlement_version``              ~2-3 s
+  user record                   ``entitlement_version`` + settings   ~1 s
+  embedded runnable             ``entitlement_version`` + settings   seconds (rebuild)
+  ============================  ===================================  ==================
+
+Discovery does not read the user's preferences (model, thinking, language, custom prompt),
+so evicting it on a preference change would cost ~2-3 s for nothing. The user record and
+the embedded runnable do bake those preferences in, so a preference change must evict them. One stamp could not
+do both: with preferences in it, every model switch would cost a cold discovery; without
+them, a switch would be served stale until the TTL (nannos#320).
 
 ``entitlement_version`` is the load-bearing part. It is an opaque stamp console-backend
 derives from every row that decides the user's entitlements — role, settings (tool
@@ -30,11 +50,8 @@ If the stamps cannot be fetched (console-backend blip), ``resolve_user_stamps``
 falls back to the last ones seen for that user, so the turn degrades to a TTL-bounded
 entry rather than a cold miss or an error.
 
-The same call also returns a *settings* stamp (``UserStamps.settings``), a digest of the
-user's preferences row: preferred model, thinking, custom prompt, language. The user cache
-and the embedded-runnable cache key on it (``settings_version``), because their values bake
-those preferences in; discovery does not depend on them, so a model switch applies on the
-next turn without forcing a cold capability discovery.
+The settings stamp (``UserStamps.settings``) is a digest of the user's whole
+``user_settings`` row; see "Two stamps" for which caches key on it and why.
 
 ``groups`` (free, from the JWT) are kept in the key as belt-and-braces: a membership
 change moves the stamp too, but the JWT view is the one that gates authorization.
@@ -118,10 +135,11 @@ def cache_key(
 class UserStamps:
     """The per-turn stamps console-backend serves for a user (``/me/entitlement-version``).
 
-    ``entitlement`` keys every per-user cache; ``settings`` keys the user and embedded-runnable
-    caches. An older console-backend serves no settings stamp, so ``settings`` may be None and
-    the user and embedded-runnable entries are then TTL-bounded for preference changes, as
-    they were before the stamp existed.
+    ``entitlement`` keys every per-user cache; ``settings`` keys only the caches that bake in
+    the user's preferences (user record, embedded runnable), never discovery. Why two: see
+    "Two stamps" in the module docstring. An older console-backend serves no settings stamp,
+    so ``settings`` may be None and the user and embedded-runnable entries are then
+    TTL-bounded for preference changes, as they were before the stamp existed.
     """
 
     entitlement: str
