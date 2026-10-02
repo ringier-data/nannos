@@ -688,7 +688,8 @@ ok "PostgreSQL is ready"
 _db_exists() { docker exec "$1" psql -U postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '$2'" </dev/null | grep -q 1; }
 _hash_mismatches() {  # recorded-hashes-file: the files whose current hash differs from the record
   slot_migration_hashes "$ROOT_DIR" \
-    | awk 'NR == FNR { seen[$1 " " $3] = $2; next } ($1 " " $3) in seen && seen[$1 " " $3] != $2 { print $1 "/" $3 }' "$1" -
+    | awk 'NR == FNR { seen[$1 " " $3] = $2; next }
+           ($1 " " $3) in seen && seen[$1 " " $3] != "unknown" && seen[$1 " " $3] != $2 { print $1 "/" $3 }' "$1" -
 }
 
 if [[ "$_SLOT" != 0 ]]; then
@@ -718,17 +719,23 @@ if [[ "$_SLOT" != 0 ]]; then
       if [[ -n "$_DIFFERENT" ]]; then
         err "Slot 0 applied other contents of: $(echo $_DIFFERENT). Slot 0 runs another branch; start without --from-slot0."
       fi
+      _UNKNOWN="$(awk '$2 == "unknown"' "$_S0_HASHES" | wc -l | tr -d ' ')"
+      if [[ "$_UNKNOWN" != 0 ]]; then
+        warn "Slot 0 applied $_UNKNOWN migrations before it kept a record of their contents; the copy assumes those are this worktree's"
+      fi
     else
       warn "Slot 0 has no record of the migration contents it applied (it records them from its next 'just start-local'); the copy assumes they are this worktree's"
     fi
     _COPY_NOW=1
   fi
 
+  _CREATED=""
   for _spec in $SLOT_DB_SPECS; do
     IFS=: read -r _logical _container _ddl <<< "$_spec"
     _db="$(slot_db_name "$_SLOT" "$_logical")"
     _db_exists "$_container" "$_db" && continue
     docker exec "$_container" psql -U postgres -qc "CREATE DATABASE \"$_db\"" </dev/null >/dev/null
+    _CREATED=1
     if [[ -n "$_COPY_NOW" ]]; then
       log "Copying slot 0's $_logical into $_db..."
       # -Z0: the dump is restored in the same pipe, compressing it only costs CPU.
@@ -741,13 +748,19 @@ if [[ "$_SLOT" != 0 ]]; then
       ok "Created database $_db"
     fi
   done
-  [[ -f "$_DB_STATE.owner" ]] || echo "$ROOT_DIR" > "$_DB_STATE.owner"
+  # New databases are this worktree's, whatever an earlier owner file says (databases dropped
+  # outside `just down` leave it behind); kept ones from before owners were recorded become so.
+  if [[ -n "$_CREATED" || ! -f "$_DB_STATE.owner" ]]; then
+    echo "$ROOT_DIR" > "$_DB_STATE.owner"
+  fi
 
   if [[ -n "$_COPY_NOW" ]]; then
     # A copy carries slot 0's schedule with it. Run beside slot 0, each job would fire twice and
     # notify the same people, so the copy suspends every job (visibly, with a reason) and drops
     # the work slot 0 still had in flight: owed notices, pending retries, runs mid-execution and
-    # queued catalog syncs.
+    # queued catalog syncs. It also carries slot 0's outbound SCIM endpoints with their tokens,
+    # which every user or group change would push to: they are disabled and their tokens blanked
+    # (the MCP-gateway access service uses the tokens without looking at `enabled`).
     docker exec -i "$PG_CONSOLE_CONTAINER" psql -U postgres -d "$_DB_CONSOLE" -v ON_ERROR_STOP=1 -q >/dev/null <<SQL || { slot_drop_databases "$_SLOT" || true; err "Could not neutralize the copy; slot $_SLOT's databases were dropped again"; }
 BEGIN;
 UPDATE scheduled_job_definitions
@@ -757,6 +770,7 @@ UPDATE scheduled_job_definitions
 UPDATE scheduled_job_subscriptions SET retry_at = NULL WHERE retry_at IS NOT NULL;
 UPDATE scheduled_job_runs SET status = 'interrupted', completed_at = COALESCE(completed_at, now()) WHERE status = 'running';
 UPDATE scheduled_job_runs SET notice_due_at = NULL WHERE notice_due_at IS NOT NULL;
+UPDATE outbound_scim_endpoints SET enabled = false, bearer_token = '', updated_at = now() WHERE deleted_at IS NULL;
 UPDATE catalog_sync_jobs
    SET status = 'cancelled', completed_at = COALESCE(completed_at, now()),
        error_details = jsonb_build_object('reason', 'Copied from slot 0: cancelled in slot $_SLOT')
@@ -780,6 +794,18 @@ if [[ "$_SLOT" != 0 && -f "$_DB_STATE.sha256" ]]; then
 fi
 
 # ─── 5. Run database migrations ──────────────────────────────────
+
+# Slot 0 starts keeping a record of migration contents with this version of the script. What it
+# applied before then is unknown: recorded as such, never certified with today's files.
+_PRE_APPLIED=""
+if [[ "$_SLOT" == 0 && ! -f "$_DB_STATE.sha256" ]]; then
+  _PRE_APPLIED="$(mktemp)"
+  for _spec in $SLOT_DB_SPECS; do
+    IFS=: read -r _logical _container _ddl <<< "$_spec"
+    { docker exec "$_container" psql -U postgres -d "$_logical" -tAc "SELECT migration FROM migrations" </dev/null 2>/dev/null || true; } \
+      | sed "s|^|$_logical |" >> "$_PRE_APPLIED"
+  done
+fi
 
 log "Running database migrations (Rambler)..."
 
@@ -842,7 +868,16 @@ mkdir -p "$NANNOS_SLOTS_DIR"
 if [[ "$_SLOT" == 0 ]]; then
   # Slot 0 keeps the contents it first applied each migration with — what a --from-slot0 copy
   # checks a worktree against. A file already recorded keeps its first hash.
-  { cat "$_DB_STATE.sha256" 2>/dev/null || true; slot_migration_hashes "$ROOT_DIR"; }     | awk '!seen[$1 " " $3]++' > "$_DB_STATE.sha256.tmp" && mv "$_DB_STATE.sha256.tmp" "$_DB_STATE.sha256"
+  if [[ -n "$_PRE_APPLIED" ]]; then
+    slot_migration_hashes "$ROOT_DIR" \
+      | awk 'NR == FNR { pre[$0]; next } { print $1, (($1 " " $3) in pre ? "unknown" : $2) "  " $3 }' "$_PRE_APPLIED" - \
+      > "$_DB_STATE.sha256"
+    rm -f "$_PRE_APPLIED"
+  else
+    # A file already recorded keeps its first hash.
+    { cat "$_DB_STATE.sha256" 2>/dev/null || true; slot_migration_hashes "$ROOT_DIR"; } \
+      | awk '!seen[$1 " " $3]++' > "$_DB_STATE.sha256.tmp" && mv "$_DB_STATE.sha256.tmp" "$_DB_STATE.sha256"
+  fi
 else
   slot_migration_hashes "$ROOT_DIR" > "$_DB_STATE.sha256"
 fi
@@ -1182,14 +1217,14 @@ docker run -d --name "$_GW_CONTAINER" \
   -e UI_PASSWORD="${LITELLM_UI_PASSWORD:-sk-nannos-local}" \
   -e AWS_BEDROCK_REGION="${AWS_BEDROCK_REGION:-eu-central-1}" \
   -e AWS_REGION="${AWS_BEDROCK_REGION:-eu-central-1}" \
-  "${_GW_AWS_ENV[@]}" \
+  ${_GW_AWS_ENV[@]+"${_GW_AWS_ENV[@]}"} \
   -e AZURE_API_BASE="${AZURE_API_BASE:-}" \
   -e AZURE_OPENAI_API_KEY="${AZURE_OPENAI_API_KEY:-}" \
   -e AZURE_AI_API_BASE="${AZURE_AI_API_BASE:-}" \
   -e AZURE_AI_API_KEY="${AZURE_AI_API_KEY:-}" \
   -e GCP_PROJECT_ID="${GCP_PROJECT_ID:-}" \
   -e GCP_KEY="${GCP_KEY:-}" \
-  "${_GW_GCP_ENV[@]}" \
+  ${_GW_GCP_ENV[@]+"${_GW_GCP_ENV[@]}"} \
   -e DEFAULT_VERTEXAI_LOCATION="${DEFAULT_VERTEXAI_LOCATION:-eu}" \
   -e CONSOLE_BACKEND_URL="http://host.docker.internal:${CONSOLE_BACKEND_PORT}" \
   -e GATEWAY_INGEST_TOKEN="$GATEWAY_INGEST_TOKEN" \
@@ -1253,7 +1288,8 @@ if [[ -f "$_DB_STATE.from-slot0" ]]; then
   # The copy's groups carry slot 0's IdP group ids, and its users slot 0's identities: with the
   # IdP admin client, editing a group or a phone number in the copy would change slot 0's.
   _OIDC_SECRET_ADMIN=""
-  warn "Slot $_SLOT is a copy of slot 0: IdP group and user sync is off"
+  export OUTBOUND_SCIM_NIGHTLY_SYNC_ENABLED=false
+  warn "Slot $_SLOT is a copy of slot 0: IdP group and user sync and outbound SCIM are off"
 fi
 
 # ── Generate mprocs config ──

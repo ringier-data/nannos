@@ -12,6 +12,9 @@ also reaches uvicorn's reloader children and the `tee` behind each log.
 Each group leader is recorded with its start time, so a PID the system has since given to an
 unrelated process (after a reboot, say) is never taken for one of ours, let alone signalled.
 
+A service's stdin is a pipe that never reaches end-of-file, as under mprocs: some watchers exit
+when stdin closes (Tailwind's `--watch` in the embed-sdk's `dev:link` does).
+
 Run with: uv run --no-project --with pyyaml python slot_procs.py ...
 """
 
@@ -30,23 +33,40 @@ PIDS_FILE = "pids.json"
 STOP_GRACE_SECONDS = 10
 
 
-def _started(pid: int) -> str | None:
+# `ps` prints lstart in the caller's timezone and locale: pin both, or a reader in another shell
+# would see a different string for the same process and take a live slot for dead.
+_PS_ENV = {**os.environ, "TZ": "UTC", "LC_ALL": "C"}
+
+# Holds the service's stdin open: `tail -f /dev/null` never writes and never exits on its own,
+# and it is in the service's process group, so stopping the group stops it too.
+_STDIN_OPEN = "exec 0< <(tail -f /dev/null); "
+
+
+def _started(pid: int, pinned: bool = True) -> str | None:
     """The process's start time as `ps` reports it, or None when there is no such process."""
     # check=False: ps exits 1 when the process is gone, which is an answer, not a failure.
-    result = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, check=False)
+    result = subprocess.run(
+        ["ps", "-o", "lstart=", "-p", str(pid)],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=_PS_ENV if pinned else None,
+    )
     return result.stdout.strip() or None
 
 
 def _alive(entry: dict) -> bool:
-    started = _started(entry["pgid"])
-    if started is None or started != entry["started"]:
-        return False
     try:
         os.killpg(entry["pgid"], 0)
     except (ProcessLookupError, PermissionError):
         # PermissionError: the group exists but belongs to someone else, so it is not ours.
         return False
-    return True
+    # The group exists. Its leader may have exited while the rest of the group runs on (a group
+    # id is not handed out again while the group lives); if the leader is there, it must be the
+    # process we started, not a stranger that inherited the number.
+    # Entries written before the timezone was pinned carry a local-time stamp: compare like for like.
+    started = _started(entry["pgid"], pinned=entry.get("tz") == "UTC")
+    return started is None or started == entry["started"]
 
 
 def _signal(entry: dict, sig: signal.Signals) -> None:
@@ -63,7 +83,7 @@ def _read_pids(slot_dir: Path) -> dict[str, dict]:
         return {}
     # A slot started before start times were recorded has bare pgids: take them as they are.
     return {
-        name: entry if isinstance(entry, dict) else {"pgid": entry, "started": _started(entry)}
+        name: entry if isinstance(entry, dict) else {"pgid": entry, "started": _started(entry, pinned=False)}
         for name, entry in pids.items()
     }
 
@@ -79,7 +99,7 @@ def start(procs_file: Path, slot_dir: Path, skip: set[str]) -> None:
             continue
         env = {**os.environ, **{key: str(value) for key, value in (proc.get("env") or {}).items()}}
         child = subprocess.Popen(
-            ["bash", "-c", proc["shell"]],
+            ["bash", "-c", _STDIN_OPEN + proc["shell"]],
             cwd=proc.get("cwd"),
             env=env,
             stdin=subprocess.DEVNULL,
@@ -87,7 +107,7 @@ def start(procs_file: Path, slot_dir: Path, skip: set[str]) -> None:
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
-        pids[name] = {"pgid": child.pid, "started": _started(child.pid)}
+        pids[name] = {"pgid": child.pid, "started": _started(child.pid), "tz": "UTC"}
         print(f"  {name}: started (pgid {child.pid})")
     (slot_dir / PIDS_FILE).write_text(json.dumps(pids, indent=2))
 

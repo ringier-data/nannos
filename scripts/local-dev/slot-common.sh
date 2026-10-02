@@ -76,7 +76,15 @@ slot_lock() {  # name
     fi
     holder="$(cat "$dir/pid" 2>/dev/null || true)"
     if [[ -n "$holder" ]] && ! kill -0 "$holder" 2>/dev/null; then
-      rm -rf "$dir"
+      # Break it by renaming, then check what was renamed: a waiter that saw the same dead holder
+      # may already have broken the lock and taken it anew, and that live lock goes back.
+      if mv "$dir" "$dir.stale.$$" 2>/dev/null; then
+        if [[ "$(cat "$dir.stale.$$/pid" 2>/dev/null || true)" == "$holder" ]]; then
+          rm -rf "$dir.stale.$$"
+        else
+          [[ -e "$dir" ]] || mv "$dir.stale.$$" "$dir"
+        fi
+      fi
       continue
     fi
     sleep 0.1

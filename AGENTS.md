@@ -154,8 +154,10 @@ talks to comes from `.env`: `AWS_PROFILE` → cloud models (Bedrock/Azure/Vertex
 
 - **Data:** a slot's databases start empty (all migrations applied) and are kept until `just down`
   drops them. Use `--from-slot0` when you need realistic data (agents, registered models, users):
-  every copied scheduled job is suspended so it cannot fire beside slot 0, and the copy shares slot
-  0's S3 objects — deleting a file, conversation or catalog in it deletes slot 0's too. The copy is
+  every copied scheduled job is suspended so it cannot fire beside slot 0, IdP group/user sync and
+  outbound SCIM are off (they would change slot 0's real groups and downstream systems), and the
+  copy shares slot 0's S3 objects — deleting a file, conversation or catalog in it deletes slot 0's
+  too. The copy is
   refused when slot 0 runs a branch with migrations yours lacks.
 - **Migrations:** a new migration is applied by `just down --keep-db && just up`. After editing an
   already-applied one, `up` refuses to start; `just db-reset` rebuilds the databases.

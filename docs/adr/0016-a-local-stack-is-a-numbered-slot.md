@@ -52,7 +52,8 @@ backend would land on 5401.
   migrations, so a branch that only adds migrations runs against realistic data. It is refused when
   slot 0 has applied a migration the worktree does not have, or applied one with other contents —
   slot 0 runs whichever branch started it last, so `start-local` records the contents slot 0
-  applied each migration with. The copy's scheduled jobs are suspended with a reason, and the work slot 0 had in flight
+  applied each migration with. Migrations slot 0 applied before it kept that record are recorded
+  as unknown and assumed to match, with a warning. The copy's scheduled jobs are suspended with a reason, and the work slot 0 had in flight
   (owed notices, pending retries, running runs, queued catalog syncs) is dropped.
 
 ## Why
@@ -100,7 +101,9 @@ backend would land on 5401.
   reason and undone by an admin there, so a copy uses it rather than a slot-only flag. The notice
   queue ignores suspension, so owed notices are cleared outright. A copy also runs without the
   IdP admin client: its groups carry slot 0's IdP group ids and its users slot 0's identities, so
-  renaming a group or changing a phone number in the copy would change them for slot 0.
+  renaming a group or changing a phone number in the copy would change them for slot 0. Its
+  outbound SCIM endpoints are disabled and their tokens blanked, and the nightly SCIM push is off,
+  for the same reason: they point at slot 0's real downstream systems.
 
 ## Alternatives considered
 
@@ -137,6 +140,8 @@ backend would land on 5401.
   its keys do not collide, but `down` and `db-reset` leave its objects behind. A `--from-slot0` copy
   shares slot 0's ids and therefore slot 0's objects: deleting a file, conversation or catalog in
   the copy deletes it for slot 0 as well. Catalog auto-sync is off in a copy for the same reason.
+  Without S3, a copy does not bring slot 0's local uploads along (they live in whichever worktree
+  ran slot 0): its file records point at files the slot does not have.
 - A copy takes as long as `pg_dump | pg_restore` of slot 0's databases — seconds on an idle
   machine, ten minutes on a saturated one.
 - IdP groups created by a slot (`local-sN-*`) outlive it; `down` does not delete them. A later

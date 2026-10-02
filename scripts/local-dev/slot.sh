@@ -36,13 +36,14 @@ _claim_field() {  # slot_dir field
 
 _pid_alive() { [[ -n "$1" ]] && kill -0 "$1" 2>/dev/null; }
 
-# running: a service process is alive; starting: `up` is still working; dead: neither.
+# starting: `up` is still working (its services may already run, during the health wait);
+# running: `up` is done and a service process is alive; dead: neither.
 _state() {
   local dir="$SLOTS_DIR/$1"
-  if [[ -f "$dir/pids.json" ]] && slot_procs status "$dir" >/dev/null 2>&1; then
-    echo running
-  elif _pid_alive "$(_claim_field "$dir" up_pid)"; then
+  if _pid_alive "$(_claim_field "$dir" up_pid)"; then
     echo starting
+  elif [[ -f "$dir/pids.json" ]] && slot_procs status "$dir" >/dev/null 2>&1; then
+    echo running
   else
     echo dead
   fi
@@ -100,7 +101,7 @@ cmd_up() {
       running)
         slot_unlock claim
         _healthy "$existing" \
-          || err "Slot $existing of this worktree runs but is not healthy (logs: $SLOTS_DIR/$existing/logs). 'just down' and 'just up' restart it."
+          || err "Slot $existing of this worktree runs but is not healthy (logs: $SLOTS_DIR/$existing/logs). 'just down --keep-db && just up' restarts it on its databases."
         note "This worktree already runs slot $existing"
         cat "$SLOTS_DIR/$existing/slot.json"
         echo
@@ -117,6 +118,15 @@ cmd_up() {
     esac
   fi
 
+  # A slot keeping this worktree's databases (`down --keep-db`) is this worktree's to take back.
+  if [[ -z "$want" ]]; then
+    for candidate in 1 2 3 4 5 6 7 8; do
+      if [[ ! -d "$SLOTS_DIR/$candidate" && "$(_kept_owner "$candidate")" == "$ROOT_DIR" ]]; then
+        want="$candidate"
+        break
+      fi
+    done
+  fi
   local candidates
   if [[ -n "$want" ]]; then candidates="$want"; else candidates="1 2 3 4 5 6 7 8"; fi
   for candidate in $candidates; do
@@ -205,17 +215,20 @@ cmd_list() {
 }
 
 cmd_gc() {
-  local dir n dead=()
+  local n owner
+  # Under the claim lock throughout: a slot found dead is released before anyone can claim it.
   slot_lock claim
-  for dir in "$SLOTS_DIR"/[1-8]; do
-    [[ -d "$dir" ]] || continue
-    n="$(basename "$dir")"
-    [[ "$(_state "$n")" == dead ]] && dead+=("$n")
+  for n in 1 2 3 4 5 6 7 8; do
+    owner="$(_kept_owner "$n")"
+    if [[ -d "$SLOTS_DIR/$n" ]]; then
+      [[ "$(_state "$n")" == dead ]] && cmd_down "$n"
+    elif [[ -n "$owner" && ! -d "$owner" ]]; then
+      # Databases kept for a worktree that no longer exists: nobody can take them back.
+      note "Slot $n kept databases for $owner, which is gone"
+      cmd_down "$n"
+    fi
   done
   slot_unlock claim
-  for n in ${dead[@]+"${dead[@]}"}; do
-    cmd_down "$n"
-  done
 }
 
 cmd_db_reset() {
