@@ -758,9 +758,12 @@ if [[ "$_SLOT" != 0 ]]; then
     # A copy carries slot 0's schedule with it. Run beside slot 0, each job would fire twice and
     # notify the same people, so the copy suspends every job (visibly, with a reason) and drops
     # the work slot 0 still had in flight: owed notices, pending retries, runs mid-execution and
-    # queued catalog syncs. It also carries slot 0's outbound SCIM endpoints with their tokens,
-    # which every user or group change would push to: they are disabled and their tokens blanked
-    # (the MCP-gateway access service uses the tokens without looking at `enabled`).
+    # queued catalog syncs. It also carries slot 0's outbound SCIM endpoints, which every user or
+    # group change would push to: they are disabled (their tokens blanked as well, so re-enabling
+    # one in the copy cannot reach slot 0's downstream system either). With no enabled MCP-gateway
+    # endpoint, the copy cannot manage MCP server access for groups. Its delivery channels point
+    # at slot 0's channel clients, which would message real users once a job is unsuspended:
+    # their webhooks go to a discard address and their secrets are blanked.
     docker exec -i "$PG_CONSOLE_CONTAINER" psql -U postgres -d "$_DB_CONSOLE" -v ON_ERROR_STOP=1 -q >/dev/null <<SQL || { slot_drop_databases "$_SLOT" || true; err "Could not neutralize the copy; slot $_SLOT's databases were dropped again"; }
 BEGIN;
 UPDATE scheduled_job_definitions
@@ -771,6 +774,8 @@ UPDATE scheduled_job_subscriptions SET retry_at = NULL WHERE retry_at IS NOT NUL
 UPDATE scheduled_job_runs SET status = 'interrupted', completed_at = COALESCE(completed_at, now()) WHERE status = 'running';
 UPDATE scheduled_job_runs SET notice_due_at = NULL WHERE notice_due_at IS NOT NULL;
 UPDATE outbound_scim_endpoints SET enabled = false, bearer_token = '', updated_at = now() WHERE deleted_at IS NULL;
+UPDATE delivery_channels
+   SET webhook_url = 'http://127.0.0.1:9/delivery-disabled-in-slot-copy', secret = '', updated_at = now();
 UPDATE catalog_sync_jobs
    SET status = 'cancelled', completed_at = COALESCE(completed_at, now()),
        error_details = jsonb_build_object('reason', 'Copied from slot 0: cancelled in slot $_SLOT')
@@ -1002,7 +1007,7 @@ if [[ "$_SLOT" != 0 ]]; then
     "http://localhost:8180/admin/realms/nannos/clients?clientId=agent-console" \
     | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['id'])")
   # Two slots registering at once would each PUT the list it read, dropping the other's URIs.
-  slot_lock keycloak-realm || err "Could not take the local realm lock"
+  slot_lock keycloak-realm 9 || err "Could not take the local realm lock"
   _SLOT_URIS_OK=""
   for _try in 1 2 3; do
     _AC_PATCH=$(curl -sf -H "Authorization: Bearer $KC_ADMIN_TOKEN" \
@@ -1033,7 +1038,7 @@ print(json.dumps({
     curl -sf -X PUT -H "Authorization: Bearer $KC_ADMIN_TOKEN" -H "Content-Type: application/json" \
       "http://localhost:8180/admin/realms/nannos/clients/$_AC_UUID" -d "$_AC_PATCH" >/dev/null || true
   done
-  slot_unlock keycloak-realm
+  slot_unlock 9
   [[ -n "$_SLOT_URIS_OK" ]] || err "Could not register slot $_SLOT's URIs on the local realm's agent-console client"
   ok "Slot $_SLOT registered on the local realm (localhost:${CONSOLE_BACKEND_PORT}, localhost:${_P_FRONTEND})"
 fi

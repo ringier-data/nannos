@@ -34,13 +34,22 @@ _claim_field() {  # slot_dir field
   python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))' "$1/claim.json" "$2" 2>/dev/null || true
 }
 
-_pid_alive() { [[ -n "$1" ]] && kill -0 "$1" 2>/dev/null; }
+# Is `up` (recorded as pid + start time in the claim) still running? A bare pid is not enough:
+# macOS reuses pids, and a reused one would keep a long-finished slot `starting` for good.
+_up_running() {  # slot_dir
+  local pid recorded now
+  pid="$(_claim_field "$1" up_pid)"
+  recorded="$(_claim_field "$1" up_started)"
+  [[ -n "$pid" && -n "$recorded" ]] || return 1
+  now="$(slot_proc_started "$pid")"
+  [[ -n "$now" && "$now" == "$recorded" ]]
+}
 
 # starting: `up` is still working (its services may already run, during the health wait);
 # running: `up` is done and a service process is alive; dead: neither.
 _state() {
   local dir="$SLOTS_DIR/$1"
-  if _pid_alive "$(_claim_field "$dir" up_pid)"; then
+  if _up_running "$dir"; then
     echo starting
   elif [[ -f "$dir/pids.json" ]] && slot_procs status "$dir" >/dev/null 2>&1; then
     echo running
@@ -94,12 +103,12 @@ cmd_up() {
 
   # Finding this worktree's slot and claiming a new one happen under one lock, so two `up`s
   # from one worktree cannot both claim, and `gc` never sees a claim half-written.
-  slot_lock claim
+  slot_lock claim 8
   existing="$(_slot_of_worktree "$ROOT_DIR")"
   if [[ -n "$existing" ]]; then
     case "$(_state "$existing")" in
       running)
-        slot_unlock claim
+        slot_unlock 8
         _healthy "$existing" \
           || err "Slot $existing of this worktree runs but is not healthy (logs: $SLOTS_DIR/$existing/logs). 'just down --keep-db && just up' restarts it on its databases."
         note "This worktree already runs slot $existing"
@@ -107,13 +116,13 @@ cmd_up() {
         echo
         return 0 ;;
       starting)
-        slot_unlock claim
+        slot_unlock 8
         err "Slot $existing is still starting for this worktree (log: $SLOTS_DIR/$existing/up.log)" ;;
       dead)
-        slot_unlock claim
+        slot_unlock 8
         note "Slot $existing of this worktree is dead; restarting it on its databases"
         cmd_down "$existing" --keep-db
-        slot_lock claim
+        slot_lock claim 8
         want="$existing" ;;
     esac
   fi
@@ -133,27 +142,33 @@ cmd_up() {
     [[ ! -d "$SLOTS_DIR/$candidate" ]] || continue
     owner="$(_kept_owner "$candidate")"
     if [[ -n "$owner" && "$owner" != "$ROOT_DIR" ]]; then
-      [[ -z "$want" ]] || { slot_unlock claim; err "Slot $candidate keeps the databases of $owner. 'just down $candidate' drops them."; }
+      [[ -z "$want" ]] || { slot_unlock 8; err "Slot $candidate keeps the databases of $owner. 'just down $candidate' drops them."; }
       continue
     fi
     # Something outside the slot registry (a leftover process) may still hold the block.
-    _block_in_use "$candidate" && continue
+    if _block_in_use "$candidate"; then
+      if [[ "$(_kept_owner "$candidate")" == "$ROOT_DIR" ]]; then
+        slot_unlock 8
+        err "Slot $candidate keeps this worktree's databases, but a port of its block (4${candidate}000-4${candidate}999) is in use: a leftover process? 'lsof -nP -iTCP:4${candidate}001 -sTCP:LISTEN' shows the backend's."
+      fi
+      continue
+    fi
     mkdir "$SLOTS_DIR/$candidate"
     n="$candidate"
     break
   done
   if [[ -z "$n" ]]; then
-    slot_unlock claim
+    slot_unlock 8
     err "No free slot${want:+ ($want is taken)}. See 'just slots'; 'just slots-gc' releases dead ones."
   fi
 
   python3 -c '
 import json, sys, time
-slot, worktree, up_pid, *args = sys.argv[1:]
-print(json.dumps({"slot": int(slot), "worktree": worktree, "up_pid": int(up_pid), "args": args,
-                  "claimed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}, indent=2))
-' "$n" "$ROOT_DIR" "$$" ${args[@]+"${args[@]}"} > "$SLOTS_DIR/$n/claim.json"
-  slot_unlock claim
+slot, worktree, up_pid, up_started, *args = sys.argv[1:]
+print(json.dumps({"slot": int(slot), "worktree": worktree, "up_pid": int(up_pid), "up_started": up_started,
+                  "args": args, "claimed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}, indent=2))
+' "$n" "$ROOT_DIR" "$$" "$(slot_proc_started $$)" ${args[@]+"${args[@]}"} > "$SLOTS_DIR/$n/claim.json"
+  slot_unlock 8
 
   note "Starting slot $n for $ROOT_DIR (log: $SLOTS_DIR/$n/up.log)"
   if "$ROOT_DIR/scripts/start-local.sh" --slot "$n" --headless ${args[@]+"${args[@]}"} > "$SLOTS_DIR/$n/up.log" 2>&1; then
@@ -235,18 +250,18 @@ cmd_list() {
 cmd_gc() {
   local n owner
   # Under the claim lock throughout: a slot found dead is released before anyone can claim it.
-  slot_lock claim
+  slot_lock claim 8
   for n in 1 2 3 4 5 6 7 8; do
     owner="$(_kept_owner "$n")"
     if [[ -d "$SLOTS_DIR/$n" ]]; then
       [[ "$(_state "$n")" == dead ]] && cmd_down "$n"
     elif [[ -n "$owner" && ! -d "$owner" ]]; then
-      # Databases kept for a worktree that no longer exists: nobody can take them back.
-      note "Slot $n kept databases for $owner, which is gone"
-      cmd_down "$n"
+      # Kept for a worktree that is not there (deleted — or on a volume not mounted right now):
+      # dropping data is a decision gc does not take on its own.
+      note "Slot $n keeps databases for $owner, which is not there. 'just down $n' drops them."
     fi
   done
-  slot_unlock claim
+  slot_unlock 8
 }
 
 cmd_db_reset() {

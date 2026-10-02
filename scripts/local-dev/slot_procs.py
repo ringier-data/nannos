@@ -37,9 +37,10 @@ STOP_GRACE_SECONDS = 10
 # would see a different string for the same process and take a live slot for dead.
 _PS_ENV = {**os.environ, "TZ": "UTC", "LC_ALL": "C"}
 
-# Holds the service's stdin open: `tail -f /dev/null` never writes and never exits on its own,
-# and it is in the service's process group, so stopping the group stops it too.
-_STDIN_OPEN = "exec 0< <(tail -f /dev/null); "
+# Holds the service's stdin open without ever writing to it, for as long as the service's shell
+# (the group leader, `$$` inside the substitution) lives — and no longer: a feeder that outlived a
+# crashed service would leave it a process behind.
+_STDIN_OPEN = "exec 0< <(while kill -0 $$ 2>/dev/null; do sleep 2; done); "
 
 
 def _started(pid: int, pinned: bool = True) -> str | None:
@@ -56,17 +57,21 @@ def _started(pid: int, pinned: bool = True) -> str | None:
 
 
 def _alive(entry: dict) -> bool:
+    """A service is alive while its shell — the group leader we started — is.
+
+    The shell runs the service's pipeline and exits with it, so its life is the service's. The
+    leader must be the very process we started: after a reboot its pid may belong to a stranger.
+    """
+    # Entries written before the timezone was pinned carry a local-time stamp: compare like for like.
+    started = _started(entry["pgid"], pinned=entry.get("tz") == "UTC")
+    if started is None or started != entry["started"]:
+        return False
     try:
         os.killpg(entry["pgid"], 0)
     except (ProcessLookupError, PermissionError):
-        # PermissionError: the group exists but belongs to someone else, so it is not ours.
+        # PermissionError: the group belongs to someone else, so it is not ours.
         return False
-    # The group exists. Its leader may have exited while the rest of the group runs on (a group
-    # id is not handed out again while the group lives); if the leader is there, it must be the
-    # process we started, not a stranger that inherited the number.
-    # Entries written before the timezone was pinned carry a local-time stamp: compare like for like.
-    started = _started(entry["pgid"], pinned=entry.get("tz") == "UTC")
-    return started is None or started == entry["started"]
+    return True
 
 
 def _signal(entry: dict, sig: signal.Signals) -> None:

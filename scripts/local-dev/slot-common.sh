@@ -65,34 +65,32 @@ slot_procs() {
   uv run --quiet --no-project --with pyyaml python "$SLOT_COMMON_DIR/slot_procs.py" "$@"
 }
 
-# A mkdir lock: atomic, no daemon. A holder that died leaves its pid behind and is broken.
-slot_lock() {  # name
-  local dir="$NANNOS_SLOTS_DIR/.$1.lock" holder i
-  mkdir -p "$NANNOS_SLOTS_DIR"
-  for i in $(seq 1 1200); do
-    if mkdir "$dir" 2>/dev/null; then
-      echo $$ > "$dir/pid"
-      return 0
-    fi
-    holder="$(cat "$dir/pid" 2>/dev/null || true)"
-    if [[ -n "$holder" ]] && ! kill -0 "$holder" 2>/dev/null; then
-      # Break it by renaming, then check what was renamed: a waiter that saw the same dead holder
-      # may already have broken the lock and taken it anew, and that live lock goes back.
-      if mv "$dir" "$dir.stale.$$" 2>/dev/null; then
-        if [[ "$(cat "$dir.stale.$$/pid" 2>/dev/null || true)" == "$holder" ]]; then
-          rm -rf "$dir.stale.$$"
-        else
-          [[ -e "$dir" ]] || mv "$dir.stale.$$" "$dir"
-        fi
-      fi
-      continue
-    fi
-    sleep 0.1
-  done
-  echo "Timed out waiting for the $1 lock ($dir)" >&2
-  return 1
+# A process's start time, pinned to one timezone and locale so every reader sees the same string.
+# With the pid it names a process for good: a pid is reused, a pid and its start time are not.
+slot_proc_started() {  # pid
+  TZ=UTC LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null | sed 's/^ *//; s/ *$//'
 }
 
-slot_unlock() {  # name
-  rm -rf "$NANNOS_SLOTS_DIR/.$1.lock"
+# A kernel lock (flock) on a file, held through file descriptor FD by the calling shell: the
+# short Python child takes it on the shared open file, and it stays held until the shell closes
+# FD or exits. A holder that dies releases it, so there is no stale lock to break.
+slot_lock() {  # name fd
+  mkdir -p "$NANNOS_SLOTS_DIR"
+  eval "exec $2>>\"\$NANNOS_SLOTS_DIR/.\$1.lock\""
+  python3 -c '
+import fcntl, sys, time
+fd, deadline = int(sys.argv[1]), time.monotonic() + 120
+while True:
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        sys.exit(0)
+    except BlockingIOError:
+        if time.monotonic() > deadline:
+            sys.exit(1)
+        time.sleep(0.1)
+' "$2" || { echo "Timed out waiting for the $1 lock" >&2; return 1; }
+}
+
+slot_unlock() {  # fd
+  eval "exec $1>&-"
 }
