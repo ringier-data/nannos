@@ -1,4 +1,9 @@
-"""Per-user entitlement version: the cache-validation stamp the orchestrator keys on.
+"""Per-user cache stamps the orchestrator keys on: the entitlement version and the settings version.
+
+Two stamps because the orchestrator's caches depend on different things: capability
+discovery (expensive) depends only on entitlements, while its cached user record also
+carries the user's preferences. See "Two stamps" in the orchestrator's
+``app/core/discovery_cache.py``.
 
 The orchestrator memoizes capability discovery (MCP tools + sub-agents) and the registry
 user lookup per user. Instead of console-backend *pushing* invalidations to every
@@ -10,8 +15,8 @@ derived from the rows themselves, not from the code paths that write them.
 
 The version is an opaque digest over the rows in this database that decide which tools
 and sub-agents the orchestrator serves a user — deliberately only those, so that writes
-that do not change an entitlement (a login re-upsert, a timezone change) do not evict the
-user's cache:
+that do not change an entitlement (a login re-upsert, a timezone change) do not move it and
+so do not evict capability discovery (preferences have their own stamp, below):
 
 * ``users`` — system role, status, admin flag, and ``entitlements_touched_at`` (bumped
   for entitlements held outside this DB, see below);
@@ -36,6 +41,16 @@ repository pattern (the admin action that triggers it is audited on its own).
 
 Gateway-side catalogue changes made outside the console are not visible here and remain
 bounded by the orchestrator's cache TTL, which is that TTL's only remaining job.
+
+Settings version
+----------------
+The cached registry user also carries the user's *preferences* from ``user_settings``
+(preferred model, thinking, custom prompt, language, ...). Those are deliberately not in
+the entitlement version — a model switch must not cost the user a cold capability
+discovery — so they get a stamp of their own, computed in the same query
+(``compute_user_stamps``) and served by the same endpoint. The orchestrator keys its user
+and embedded-runnable caches on it, never discovery. It digests the whole row by value, so
+a column added later is covered without anyone remembering to list it here.
 """
 
 from __future__ import annotations
@@ -94,7 +109,14 @@ _VERSION_QUERY = text("""
             AND (EXISTS (SELECT 1 FROM user_sub_agent_activations a
                           WHERE a.user_id = u.id AND a.sub_agent_id = sa.id)
                  OR (sa.owner_user_id = 'system' AND sa.is_public = TRUE)))
-                                                AS served_agents
+                                                AS served_agents,
+        -- Not entitlement material: the separate settings version, digested by value in the
+        -- same statement so both stamps come from one snapshot (see "Settings version").
+        -- sha256, not md5: md5() errors on a FIPS-mode server and would take the
+        -- entitlement stamp down with it.
+        left(encode(sha256(convert_to(coalesce((SELECT row_to_json(us)::text FROM user_settings us
+                                                 WHERE us.user_id = u.id), ''), 'UTF8')), 'hex'), 32)
+                                                AS settings_digest
     FROM users u
     WHERE u.id = :user_id
 """)
@@ -106,17 +128,21 @@ _TOUCH_GROUP_QUERY = text("""
 """)
 
 
-async def compute_entitlement_version(db: AsyncSession, user_id: str) -> str | None:
-    """Return the user's current entitlement version, or None if the user does not exist.
+async def compute_user_stamps(db: AsyncSession, user_id: str) -> tuple[str, str] | None:
+    """Return ``(entitlement_version, settings_version)`` in one round trip, or None if the
+    user does not exist. Two stamps, not one: see the module docstring.
 
-    Opaque to callers: compare for equality only. Two calls return the same string as long
-    as none of the underlying rows changed.
+    Opaque to callers: compare for equality only. Each stays the same as long as none of its
+    underlying rows changed. A user who never saved settings has no ``user_settings`` row and
+    gets a fixed settings version, which moves on their first save.
     """
     row = (await db.execute(_VERSION_QUERY, {"user_id": user_id})).mappings().first()
     if row is None:
         return None
-    material = "|".join("" if v is None else str(v) for v in row.values())
-    return hashlib.sha256(material.encode()).hexdigest()[:32]
+    entitlement = dict(row)
+    settings_version = entitlement.pop("settings_digest")
+    material = "|".join("" if v is None else str(v) for v in entitlement.values())
+    return hashlib.sha256(material.encode()).hexdigest()[:32], settings_version
 
 
 async def touch_group_member_entitlements(db: AsyncSession, group_id: int) -> int:

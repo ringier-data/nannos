@@ -2180,6 +2180,10 @@ export type EntitlementVersionResponse = {
      * Version
      */
     version: string;
+    /**
+     * Settings Version
+     */
+    settings_version: string;
 };
 
 /**

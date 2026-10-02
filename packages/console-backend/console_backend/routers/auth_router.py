@@ -21,7 +21,7 @@ from ..models.user import (
     UserSettingsUpdate,
 )
 from ..services.audit_service import AuditService
-from ..services.entitlement_version import compute_entitlement_version
+from ..services.entitlement_version import compute_user_stamps
 from ..services.keycloak_admin_service import KeycloakAdminService, KeycloakSyncError
 from ..services.phone_verification_service import PhoneVerificationService
 from ..services.session_service import SessionService
@@ -303,6 +303,7 @@ async def get_current_user_settings(
 
 class EntitlementVersionResponse(BaseModel):
     version: str
+    settings_version: str
 
 
 @router.get("/me/entitlement-version", response_model=EntitlementVersionResponse)
@@ -310,17 +311,21 @@ async def get_current_user_entitlement_version(
     db: DbSession,
     user: User = Depends(require_auth_or_bearer_token),
 ) -> EntitlementVersionResponse:
-    """Opaque version of the current user's entitlements (tools, sub-agents, role, settings).
+    """Opaque versions of the current user's entitlements and of their settings.
 
-    The orchestrator fetches this once per turn and folds it into its per-user discovery
-    cache key, so any entitlement change is picked up on the user's next turn on every
-    replica without a push-based invalidation. Compare for equality only; the value has no
-    other meaning. See ``services.entitlement_version`` for what it covers.
+    The orchestrator fetches this once per turn and folds ``version`` into its per-user
+    cache keys, so any entitlement change (tools, sub-agents, role) is picked up on the
+    user's next turn on every replica without a push-based invalidation. ``settings_version``
+    keys only its caches that bake in preferences (user record, embedded runnable), so a
+    preference change (model, thinking, custom prompt) applies on the next turn without
+    evicting capability discovery. Compare for
+    equality only; the values have no other meaning. See ``services.entitlement_version``.
     """
-    version = await compute_entitlement_version(db, user.id)
-    if version is None:
+    stamps = await compute_user_stamps(db, user.id)
+    if stamps is None:
         raise HTTPException(status_code=404, detail="User not found")
-    return EntitlementVersionResponse(version=version)
+    version, settings_version = stamps
+    return EntitlementVersionResponse(version=version, settings_version=settings_version)
 
 
 @router.patch("/me/settings", response_model=UserSettingsResponse)

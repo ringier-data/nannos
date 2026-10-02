@@ -75,7 +75,7 @@ from .discovery_cache import (
     get_discovery_cache,
     get_embedded_runnable_cache,
     get_user_cache,
-    resolve_entitlement_version,
+    resolve_user_stamps,
 )
 from .interrupt_owner import foreign_interrupt_message, interrupt_owner
 from .registry import RegistryService, User
@@ -438,6 +438,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         client_objects: list | None = None,
         page_context: dict | None = None,
         entitlement_version: str | None = None,
+        settings_version: str | None = None,
     ) -> UserConfig:
         """Build complete UserConfig with all data and discovered capabilities.
 
@@ -456,6 +457,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             enable_thinking: Optional thinking configuration from client
             thinking_level: Optional thinking level from client
             entitlement_version: Per-user entitlement stamp fetched this turn (cache key input)
+            settings_version: Per-user settings stamp fetched this turn (embedded-runnable cache key input)
 
         Returns:
             UserConfig: Fully initialized with static data and discovered tools/agents
@@ -473,6 +475,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             client_user_handle=client_user_handle,
             sub_agent_config_hash=sub_agent_config_hash,
             entitlement_version=entitlement_version,
+            settings_version=settings_version,
             language=user.language,
             custom_prompt=user.custom_prompt,
             local_subagents=user.local_subagents,
@@ -713,19 +716,21 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         if sub_agent_config_hash:
             logger.info(f"[CONSOLE] Console mode enabled for sub-agent config hash: {sub_agent_config_hash}")
 
-        # One cheap call per turn: the user's entitlement version. It goes into every per-user
-        # cache key below, so a changed entitlement (activated sub-agent, whitelist, role,
-        # group default, gateway server access, ...) makes the stale entries unreachable on
-        # this turn — on every replica, with no push-based invalidation. Awaited inline: the
-        # only awaits it could overlap (turn registration) are in-memory, and an inline call
-        # has no lifetime to manage across the raise paths above.
-        entitlement_version = resolve_entitlement_version(
-            user_sub, await self.registry_service.get_entitlement_version(user_token)
-        )
+        # One cheap call per turn: the user's entitlement and settings stamps. The entitlement
+        # stamp goes into every per-user cache key below, so a changed entitlement (activated
+        # sub-agent, whitelist, role, group default, gateway server access, ...) makes the
+        # stale entries unreachable on this turn — on every replica, with no push-based
+        # invalidation. The settings stamp keys the caches whose value bakes in the user's
+        # preferences (model, language, custom prompt): the user record and the embedded
+        # runnable. Discovery does not depend on them and keys on the entitlement stamp only. Awaited
+        # inline: the only awaits it could overlap (turn registration) are in-memory, and an
+        # inline call has no lifetime to manage across the raise paths above.
+        stamps = resolve_user_stamps(user_sub, await self.registry_service.get_user_stamps(user_token))
+        entitlement_version = stamps.entitlement if stamps else None
 
         # Fetch user from registry to get stable database ID (user.id). Memoized per-user
-        # (keyed incl. groups + entitlement version + policy_version) to avoid the ~1s of
-        # console-backend calls on every turn; entry bounded by the user token's expiry.
+        # (keyed incl. groups + entitlement and settings stamps + policy_version) to avoid the
+        # ~1s of console-backend calls on every turn; entry bounded by the user token's expiry.
         ucache = get_user_cache(AgentSettings.AGENT_DISCOVERY_CACHE_TTL)
         ukey = cache_key(
             user_sub=user_sub,
@@ -733,6 +738,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             sub_agent_config_hash=sub_agent_config_hash,
             policy_version=AgentSettings.ENTITLEMENT_POLICY_VERSION,
             entitlement_version=entitlement_version,
+            settings_version=stamps.settings if stamps else None,
         )
         user = ucache.get(ukey)
         if user is not None:
@@ -920,6 +926,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 client_objects=client_objects,
                 page_context=page_context,
                 entitlement_version=entitlement_version,
+                settings_version=stamps.settings if stamps else None,
             )
 
             # Extract message parts for multimodal support (text + files)
@@ -982,7 +989,9 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 # OAuth exchange + MCP gateway list_tools + graph compilation, which is
                 # seconds of time-to-first-token per message. Keyed like the discovery
                 # cache (entitlements incl. the per-turn entitlement version + sub-agent
-                # config hash) plus the target id; entries are token-bounded. The per-turn
+                # config hash) plus the settings stamp, because the runnable's system prompt
+                # and default model come from the user's preferences, and the target id;
+                # entries are token-bounded. The per-turn
                 # <client_objects> manifest is NOT baked in — ClientObjectsMiddleware reads
                 # it from config metadata per invocation.
                 ecache = get_embedded_runnable_cache(AgentSettings.AGENT_DISCOVERY_CACHE_TTL)
@@ -993,6 +1002,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                         sub_agent_config_hash=user_config.sub_agent_config_hash,
                         policy_version=AgentSettings.ENTITLEMENT_POLICY_VERSION,
                         entitlement_version=user_config.entitlement_version,
+                        settings_version=user_config.settings_version,
                     )
                     + f":{embedded_sub_agent_id}"
                 )

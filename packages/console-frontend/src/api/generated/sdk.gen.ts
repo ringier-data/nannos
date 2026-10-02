@@ -154,12 +154,14 @@ export const updateCurrentUserSettingsApiV1AuthMeSettingsPatch = <ThrowOnError e
 /**
  * Get Current User Entitlement Version
  *
- * Opaque version of the current user's entitlements (tools, sub-agents, role, settings).
+ * Opaque versions of the current user's entitlements and of their settings.
  *
- * The orchestrator fetches this once per turn and folds it into its per-user discovery
- * cache key, so any entitlement change is picked up on the user's next turn on every
- * replica without a push-based invalidation. Compare for equality only; the value has no
- * other meaning. See ``services.entitlement_version`` for what it covers.
+ * The orchestrator fetches this once per turn and folds ``version`` into its per-user
+ * cache keys, so any entitlement change (tools, sub-agents, role) is picked up on the
+ * user's next turn on every replica without a push-based invalidation. ``settings_version``
+ * keys only its cached user record, so a preference change (model, thinking, custom
+ * prompt) applies on the next turn without evicting capability discovery. Compare for
+ * equality only; the values have no other meaning. See ``services.entitlement_version``.
  */
 export const getCurrentUserEntitlementVersionApiV1AuthMeEntitlementVersionGet = <ThrowOnError extends boolean = false>(options?: Options<GetCurrentUserEntitlementVersionApiV1AuthMeEntitlementVersionGetData, ThrowOnError>) => (options?.client ?? client).get<GetCurrentUserEntitlementVersionApiV1AuthMeEntitlementVersionGetResponses, unknown, ThrowOnError>({ url: '/api/v1/auth/me/entitlement-version', ...options });
 
