@@ -15,9 +15,14 @@ set -euo pipefail
 # Both can be combined to enable local + cloud models simultaneously.
 #
 # Flags:
-#   --debug   Start Python services with debugpy for VS Code debugging
-#             (ports: backend=5678, orchestrator=5679,
-#              runner=5682, voice-agent=5683)
+#   --debug      Start Python services with debugpy for VS Code debugging
+#                (ports: backend=5678, orchestrator=5679,
+#                 runner=5682, voice-agent=5683; offset per slot)
+#   --slot N     Run as stack slot N (1-8) beside slot 0 and the others (ADR-0016).
+#                Claimed and driven by `just up` / `just down`; not meant to be run by hand.
+#   --headless   Start the services in the background instead of mprocs, wait until they are
+#                healthy, print the slot's JSON summary and exit (slots only).
+#   --local-idp  Use the local Keycloak even when .env names a remote OIDC_ISSUER.
 #
 # The base URL should point to the root of your LLM server — /v1 is appended
 # automatically if absent (works with LM Studio, Ollama, vLLM, etc.).
@@ -71,12 +76,24 @@ set -euo pipefail
 # ─── 0. Parse flags ────────────────────────────────────────────────
 
 _DEBUG_MODE=""
+_SLOT=0
+_HEADLESS=""
+_FORCE_LOCAL_IDP=""
 while [[ $# -gt 0 ]]; do
   case $1 in
     --debug) _DEBUG_MODE=1; shift ;;
+    --slot) _SLOT="${2:-}"; shift 2 ;;
+    --headless) _HEADLESS=1; shift ;;
+    --local-idp) _FORCE_LOCAL_IDP=1; shift ;;
     *) echo "Unknown flag: $1"; exit 1 ;;
   esac
 done
+if [[ ! "$_SLOT" =~ ^[0-8]$ ]]; then
+  echo "--slot takes 1-8 (slot 0 is the default stack)"; exit 1
+fi
+if [[ -n "$_HEADLESS" && "$_SLOT" == 0 ]]; then
+  echo "--headless runs a slot (1-8); use 'just up'"; exit 1
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -88,7 +105,8 @@ LOCAL_DEV_DIR="$SCRIPT_DIR/local-dev"
 # Exported so the frontend's vite proxy picks the same value up.
 export CONSOLE_BACKEND_PORT="${CONSOLE_BACKEND_PORT:-5001}"
 
-# Source .env from repo root if present (does not override existing env vars)
+# Source .env from repo root if present. A fresh worktree has none (it is gitignored):
+# `just start-local` and `just up` copy it from the main checkout first (`just env-sync`).
 _DOTENV_LOADED=false
 if [[ -f "$ROOT_DIR/.env" ]]; then
   set -a
@@ -96,6 +114,46 @@ if [[ -f "$ROOT_DIR/.env" ]]; then
   set +a
   _DOTENV_LOADED=true
 fi
+if [[ -n "$_FORCE_LOCAL_IDP" ]]; then
+  unset OIDC_ISSUER
+fi
+
+# ─── 0b. Stack slot (ADR-0016) ─────────────────────────────────────
+# Slot 0 is the stack this script has always started. Slots 1-8 run beside it and each other:
+# slot N owns the port block 4N000-4N999, its own databases on the shared Postgres servers, its
+# own Model Gateway container, its own cookie names and IdP group prefix.
+if [[ "$_SLOT" == 0 ]]; then
+  _P_FRONTEND=5173; _P_ORCHESTRATOR=10001; _P_RUNNER=5005; _P_VOICE=8002; _P_SOFFICE=8090
+  _P_DBG_BACKEND=5678; _P_DBG_ORCHESTRATOR=5679; _P_DBG_RUNNER=5682; _P_DBG_VOICE=5683
+  _DB_CONSOLE="console"; _DB_DOCSTORE="docstore"
+  _GW_CONTAINER="nannos-litellm-proxy-local"
+  _GROUP_PREFIX="local-"
+  _LOG_DIR="$ROOT_DIR/logs"
+else
+  _SLOT_DIR="${NANNOS_SLOTS_DIR:-$HOME/.nannos/slots}/$_SLOT"
+  if [[ ! -f "$_SLOT_DIR/claim.json" ]]; then
+    echo "Slot $_SLOT is not claimed. Start a slot with 'just up'."; exit 1
+  fi
+  _B=$((40000 + _SLOT * 1000))
+  export CONSOLE_BACKEND_PORT=$((_B + 1))
+  LLM_GATEWAY_PORT=$((_B + 400))
+  _P_FRONTEND=$((_B + 173)); _P_ORCHESTRATOR=$((_B + 10)); _P_RUNNER=$((_B + 5))
+  _P_VOICE=$((_B + 2)); _P_SOFFICE=$((_B + 90))
+  _P_DBG_BACKEND=$((_B + 678)); _P_DBG_ORCHESTRATOR=$((_B + 679))
+  _P_DBG_RUNNER=$((_B + 682)); _P_DBG_VOICE=$((_B + 683))
+  _DB_CONSOLE="console_s${_SLOT}"; _DB_DOCSTORE="docstore_s${_SLOT}"
+  _GW_CONTAINER="nannos-gw-s${_SLOT}"
+  _GROUP_PREFIX="local-s${_SLOT}-"
+  _LOG_DIR="$_SLOT_DIR/logs"
+  LOCAL_STORAGE_PATH="${LOCAL_STORAGE_PATH:-$_SLOT_DIR/uploads}"
+  # Browsers scope cookies by host, not port: without their own names, slots on localhost would
+  # sign each other out. The browser's Origin is the slot's frontend, which Socket.IO checks.
+  export SESSION_COOKIE_NAME="a2a-chatui-s${_SLOT}"
+  export OAUTH_STATE_COOKIE_NAME="session-s${_SLOT}"
+  export CORS_ALLOWED_CHAT_ORIGINS="${CORS_ALLOWED_CHAT_ORIGINS:+$CORS_ALLOWED_CHAT_ORIGINS,}http://localhost:${_P_FRONTEND},http://127.0.0.1:${_P_FRONTEND}"
+fi
+_FRONTEND_URL="http://localhost:${_P_FRONTEND}"
+mkdir -p "$_LOG_DIR"
 
 CYAN='\033[1;36m'
 GREEN='\033[1;32m'
@@ -254,8 +312,13 @@ else
   printf "${CYAN}│${RESET}    ${DIM}✗ Keycloak        (skipped — using remote OIDC)${RESET}\n"
 fi
 printf "${CYAN}│${RESET}    ${GREEN}✓${RESET} DB migrations   ${DIM}(Rambler, auto-applied)${RESET}\n"
-printf "${CYAN}│${RESET}    ${GREEN}✓${RESET} Slack (FE+BE)   ${DIM}(Docker)${RESET}\n"
-printf "${CYAN}│${RESET}    ${GREEN}✓${RESET} Google Chat     ${DIM}(Node.js)${RESET}\n"
+if [[ "$_SLOT" == 0 ]]; then
+  printf "${CYAN}│${RESET}    ${GREEN}✓${RESET} Slack (FE+BE)   ${DIM}(Docker)${RESET}\n"
+  printf "${CYAN}│${RESET}    ${GREEN}✓${RESET} Google Chat     ${DIM}(Node.js)${RESET}\n"
+else
+  printf "${CYAN}│${RESET}    ${DIM}✗ Slack, Google Chat (slot 0 only)${RESET}\n"
+  printf "${CYAN}│${RESET}    ${GREEN}✓${RESET} Slot $_SLOT          ${DIM}(ports 4${_SLOT}000-4${_SLOT}999, databases $_DB_CONSOLE/$_DB_DOCSTORE)${RESET}\n"
+fi
 
 printf "${CYAN}│${RESET}                                                        ${CYAN}│${RESET}\n"
 
@@ -264,8 +327,8 @@ printf "${CYAN}│${RESET}                                                      
 if [[ -n "$_DEBUG_MODE" ]]; then
   printf "${CYAN}│${RESET}  Debugging:                                            ${CYAN}│${RESET}\n"
   printf "${CYAN}│${RESET}    ${GREEN}✓${RESET} debugpy enabled ${DIM}(attach via VS Code launch.json)${RESET}\n"
-  printf "${CYAN}│${RESET}    ${DIM}  backend=5678 orchestrator=5679${RESET}\n"
-  printf "${CYAN}│${RESET}    ${DIM}  runner=5682 voice-agent=5683${RESET}\n"
+  printf "${CYAN}│${RESET}    ${DIM}  backend=${_P_DBG_BACKEND} orchestrator=${_P_DBG_ORCHESTRATOR}${RESET}\n"
+  printf "${CYAN}│${RESET}    ${DIM}  runner=${_P_DBG_RUNNER} voice-agent=${_P_DBG_VOICE}${RESET}\n"
   printf "${CYAN}│${RESET}                                                        ${CYAN}│${RESET}\n"
 fi
 
@@ -303,8 +366,12 @@ printf "${CYAN}└────────────────────�
 printf "\n"
 
 # Confirm
-printf "${CYAN}▸ Proceed? [Y/n] ${RESET}"
-read -r _confirm
+if [[ -n "$_HEADLESS" ]]; then
+  _confirm=Y
+else
+  printf "${CYAN}▸ Proceed? [Y/n] ${RESET}"
+  read -r _confirm
+fi
 if [[ "${_confirm:-Y}" =~ ^[Nn] ]]; then
   log "Aborted. Set env vars and re-run (or put them in .env at the repo root):"
   printf "\n"
@@ -530,6 +597,7 @@ elif [[ "$_OIDC_MODE" == "remote-manual" ]]; then
   _KC_BASE_URL="${OIDC_ISSUER%/realms/*}"
   _KC_REALM="${OIDC_ISSUER##*/realms/}"
 
+  [[ -z "$_HEADLESS" ]] || err "Remote OIDC without AWS_PROFILE prompts for a secret; a headless slot cannot"
   printf "${CYAN}▸ Enter OIDC client secret (shared for all services): ${RESET}"
   read -r _shared_secret
   if [[ -z "$_shared_secret" ]]; then
@@ -562,6 +630,11 @@ fi
 log "Starting infrastructure..."
 
 cd "$LOCAL_DEV_DIR"
+# One realm path for every checkout, so the compose config (and Keycloak) is the same from any
+# worktree. Keycloak imports it only into an empty realm; a running Keycloak is never re-created.
+export NANNOS_KEYCLOAK_REALM_FILE="${NANNOS_HOME:-$HOME/.nannos}/keycloak/realm-export.json"
+mkdir -p "$(dirname "$NANNOS_KEYCLOAK_REALM_FILE")"
+cmp -s keycloak/realm-export.json "$NANNOS_KEYCLOAK_REALM_FILE" || cp keycloak/realm-export.json "$NANNOS_KEYCLOAK_REALM_FILE"
 docker compose up -d
 
 # Wait for PostgreSQL
@@ -573,6 +646,36 @@ until docker compose exec -T postgres-docstore pg_isready -U postgres >/dev/null
   sleep 1
 done
 ok "PostgreSQL is ready"
+
+# ─── 4b. Slot databases ──────────────────────────────────────────
+
+if [[ "$_SLOT" != 0 ]]; then
+  for _pair in "postgres-console:$_DB_CONSOLE" "postgres-docstore:$_DB_DOCSTORE"; do
+    _svc="${_pair%%:*}"; _db="${_pair#*:}"
+    if ! docker compose exec -T "$_svc" psql -U postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '$_db'" | grep -q 1; then
+      docker compose exec -T "$_svc" psql -U postgres -c "CREATE DATABASE \"$_db\"" >/dev/null
+      ok "Created database $_db"
+    fi
+  done
+fi
+
+# Rambler records which migrations ran, not what they contained. A slot's databases can outlive
+# a migration edit (`just down --keep-db`), so a slot keeps the hash of every migration file it
+# applied, beside the claim, and refuses to start when one has since changed: re-applying an
+# edited migration is not something Rambler does, and the schema would silently drift.
+_mig_hashes() {
+  (cd "$ROOT_DIR/packages/console-backend/sqlmigrations/ddl" && shasum -a 256 *.sql | sed 's/^/console /')
+  (cd "$ROOT_DIR/packages/orchestrator-agent/sqlmigrations/ddl" && shasum -a 256 *.sql | sed 's/^/docstore /')
+}
+if [[ "$_SLOT" != 0 ]]; then
+  _MIG_HASH_FILE="${NANNOS_SLOTS_DIR:-$HOME/.nannos/slots}/db-s${_SLOT}.sha256"
+  if [[ -f "$_MIG_HASH_FILE" ]]; then
+    _EDITED=$(_mig_hashes | awk 'NR == FNR { seen[$1 " " $3] = $2; next } ($1 " " $3) in seen && seen[$1 " " $3] != $2 { print $1 "/" $3 }' "$_MIG_HASH_FILE" -)
+    if [[ -n "$_EDITED" ]]; then
+      err "Migrations edited since slot $_SLOT applied them: $(echo $_EDITED). Run 'just db-reset $_SLOT'."
+    fi
+  fi
+fi
 
 # ─── 5. Run database migrations ──────────────────────────────────
 
@@ -595,12 +698,12 @@ docker run --rm \
   --user 0 \
   --entrypoint psql \
   -e PGPASSWORD=password \
-  "$DOCSTORE_MIGRATIONS_IMAGE" "postgresql://postgres:password@127.0.0.1:5402/docstore" -c "
+  "$DOCSTORE_MIGRATIONS_IMAGE" "postgresql://postgres:password@127.0.0.1:5402/$_DB_DOCSTORE" -c "
     CREATE EXTENSION IF NOT EXISTS vector;
   "
 
 # Run console-backend migrations (public schema on port 5401)
-log "Applying console-backend migrations (db: console, port: 5401)..."
+log "Applying console-backend migrations (db: $_DB_CONSOLE, port: 5401)..."
 docker run --rm \
   --network host \
   --user 0 \
@@ -608,13 +711,13 @@ docker run --rm \
   -e PGPORT=5401 \
   -e PGUSER=postgres \
   -e PGPASSWORD=password \
-  -e PGDATABASE=console \
+  -e PGDATABASE="$_DB_CONSOLE" \
   -e PGSCHEMA=public \
   -e RAMBLER_SSLMODE=disable \
   "$CONSOLE_MIGRATIONS_IMAGE"
 
 # Run orchestrator-agent migrations (public schema on port 5402)
-log "Applying orchestrator-agent migrations (db: docstore, port: 5402)..."
+log "Applying orchestrator-agent migrations (db: $_DB_DOCSTORE, port: 5402)..."
 docker run --rm \
   --network host \
   --user 0 \
@@ -622,20 +725,23 @@ docker run --rm \
   -e PGPORT=5402 \
   -e PGUSER=postgres \
   -e PGPASSWORD=password \
-  -e PGDATABASE=docstore \
+  -e PGDATABASE="$_DB_DOCSTORE" \
   -e PGSCHEMA=public \
   -e RAMBLER_SSLMODE=disable \
   "$DOCSTORE_MIGRATIONS_IMAGE"
 
 ok "Database migrations applied"
+if [[ "$_SLOT" != 0 ]]; then
+  _mig_hashes > "$_MIG_HASH_FILE"
+fi
 
 # Seed: make all users administrators for local dev
-docker compose exec -T postgres-console psql -U postgres -d console -c \
+docker compose exec -T postgres-console psql -U postgres -d "$_DB_CONSOLE" -c \
   "UPDATE users SET is_administrator = true WHERE is_administrator = false;" \
   >/dev/null 2>&1 || true
 
 # Seed: ensure test@local.dev user exists as admin (for first-time local dev)
-docker compose exec -T postgres-console psql -U postgres -d console -c \
+docker compose exec -T postgres-console psql -U postgres -d "$_DB_CONSOLE" -c \
   "INSERT INTO users (id, sub, email, first_name, last_name, is_administrator, role, status, created_at, updated_at)
    VALUES (gen_random_uuid(), 'local-test-user', 'test@local.dev', 'Test', 'User', true, 'admin', 'active', now(), now())
    ON CONFLICT (LOWER(email)) WHERE deleted_at IS NULL DO UPDATE SET is_administrator = true, role = 'admin';" \
@@ -649,8 +755,8 @@ log "Waiting for Keycloak..."
 KEYCLOAK_RETRIES=0
 until curl -sf http://localhost:8180/realms/nannos/.well-known/openid-configuration >/dev/null 2>&1; do
   KEYCLOAK_RETRIES=$((KEYCLOAK_RETRIES + 1))
-  if [[ $KEYCLOAK_RETRIES -ge 60 ]]; then
-    err "Keycloak did not become ready after 60s. Check: docker compose logs keycloak"
+  if [[ $KEYCLOAK_RETRIES -ge 240 ]]; then
+    err "Keycloak did not become ready after 240s. Check: docker compose logs keycloak"
   fi
   sleep 1
 done
@@ -738,6 +844,50 @@ curl -sf -X POST -H "Authorization: Bearer $KC_ADMIN_TOKEN" -H "Content-Type: ap
 
 ok "nannos-admin service account roles granted"
 
+# ─── 6d. Register this slot's URIs on the local realm ────────────
+# The realm export allows slot 0's ports only. A slot adds its own backend and frontend to the
+# agent-console client — read-modify-write, so it re-reads and retries in case another slot
+# was registering at the same moment. (Against a remote IdP the slot URIs are registered with
+# that IdP's client provisioning instead; see ADR-0016.)
+if [[ "$_SLOT" != 0 ]]; then
+  log "Registering slot $_SLOT on the local realm..."
+  _AC_UUID=$(curl -sf -H "Authorization: Bearer $KC_ADMIN_TOKEN" \
+    "http://localhost:8180/admin/realms/nannos/clients?clientId=agent-console" \
+    | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['id'])")
+  _SLOT_URIS_OK=""
+  for _try in 1 2 3; do
+    _AC_PATCH=$(curl -sf -H "Authorization: Bearer $KC_ADMIN_TOKEN" \
+      "http://localhost:8180/admin/realms/nannos/clients/$_AC_UUID" | python3 -c '
+import json, sys
+client = json.load(sys.stdin)
+origins = sys.argv[1:]
+patterns = [f"{o}/*" for o in origins]
+uris = client.get("redirectUris") or []
+web = client.get("webOrigins") or []
+attrs = client.get("attributes") or {}
+logout = [u for u in attrs.get("post.logout.redirect.uris", "").split("##") if u]
+missing = [u for u in patterns if u not in uris] + [o for o in origins if o not in web] + [u for u in patterns if u not in logout]
+if not missing:
+    print("")
+    sys.exit()
+attrs["post.logout.redirect.uris"] = "##".join(logout + [u for u in patterns if u not in logout])
+print(json.dumps({
+    "redirectUris": uris + [u for u in patterns if u not in uris],
+    "webOrigins": web + [o for o in origins if o not in web],
+    "attributes": attrs,
+}))
+' "http://localhost:${CONSOLE_BACKEND_PORT}" "$_FRONTEND_URL")
+    if [[ -z "$_AC_PATCH" ]]; then
+      _SLOT_URIS_OK=1
+      break
+    fi
+    curl -sf -X PUT -H "Authorization: Bearer $KC_ADMIN_TOKEN" -H "Content-Type: application/json" \
+      "http://localhost:8180/admin/realms/nannos/clients/$_AC_UUID" -d "$_AC_PATCH" >/dev/null || true
+  done
+  [[ -n "$_SLOT_URIS_OK" ]] || err "Could not register slot $_SLOT's URIs on the local realm's agent-console client"
+  ok "Slot $_SLOT registered on the local realm (localhost:${CONSOLE_BACKEND_PORT}, localhost:${_P_FRONTEND})"
+fi
+
 else
   log "Skipping local Keycloak (using external OIDC)"
 fi  # _OIDC_MODE
@@ -788,7 +938,6 @@ export GATEWAY_INGEST_TOKEN="${GATEWAY_INGEST_TOKEN:-sk-nannos-local-ingest}"
 # Pinned to match the prod base image (packages/litellm-proxy/Dockerfile) so local
 # reproduces prod's Vertex region-resolution behavior. Override with LITELLM_IMAGE.
 _LITELLM_IMAGE="${LITELLM_IMAGE:-ghcr.io/berriai/litellm:v1.103.0@sha256:bd089afdcd35b894b14a93f9743cdc8b591f82da1a38dd43a010a7b0c9de5fd7}"
-_GW_CONTAINER="nannos-litellm-proxy-local"
 
 log "Starting local Model Gateway (LiteLLM proxy) on :${LLM_GATEWAY_PORT}..."
 
@@ -796,10 +945,10 @@ log "Starting local Model Gateway (LiteLLM proxy) on :${LLM_GATEWAY_PORT}..."
 # (mirrors the prod shared-RDS pattern). store_model_in_db lets the console register
 # models at runtime — without it /model/new returns "No DB Connected". The container
 # reaches the host Postgres (published on :5401) via host.docker.internal.
-export LITELLM_DATABASE_URL="${LITELLM_DATABASE_URL:-postgresql://postgres:password@host.docker.internal:5401/console?schema=litellm}"
+export LITELLM_DATABASE_URL="${LITELLM_DATABASE_URL:-postgresql://postgres:password@host.docker.internal:5401/${_DB_CONSOLE}?schema=litellm}"
 # Run from $LOCAL_DEV_DIR — that's where the compose project lives (cwd has since
 # moved to a package dir, so `docker compose` must be pointed back at it).
-( cd "$LOCAL_DEV_DIR" && docker compose exec -T postgres-console psql -U postgres -d console \
+( cd "$LOCAL_DEV_DIR" && docker compose exec -T postgres-console psql -U postgres -d "$_DB_CONSOLE" \
   -c "CREATE SCHEMA IF NOT EXISTS litellm;" ) >/dev/null 2>&1 \
   && ok "Gateway DB schema 'litellm' ready (console Postgres)" \
   || warn "Could not pre-create the litellm schema; the proxy will attempt it on boot"
@@ -931,14 +1080,14 @@ docker run -d --name "$_GW_CONTAINER" \
   -e GATEWAY_INGEST_TOKEN="$GATEWAY_INGEST_TOKEN" \
   "$_LITELLM_IMAGE" --config /etc/litellm/config.yaml --port 4000 >/dev/null
 
-# Wait for the gateway to come up.
-for _i in $(seq 1 30); do
+# Wait for the gateway to come up (its Python import alone can take ~50 s on a busy machine).
+for _i in $(seq 1 90); do
   if curl -sf "http://localhost:${LLM_GATEWAY_PORT}/health/liveliness" >/dev/null 2>&1; then
     ok "Model Gateway ready at $LLM_GATEWAY_URL"
     ok "  LiteLLM admin UI: ${LLM_GATEWAY_URL}/ui (user: ${LITELLM_UI_USERNAME:-admin} / pass: ${LITELLM_UI_PASSWORD:-sk-nannos-local})"
     break
   fi
-  if [[ "$_i" == "30" ]]; then
+  if [[ "$_i" == "90" ]]; then
     err "Model Gateway did not become ready. Check: docker logs $_GW_CONTAINER"
   fi
   sleep 2
@@ -948,12 +1097,12 @@ done
 
 cd "$ROOT_DIR"
 
-log "Starting all services with mprocs..."
+if [[ -n "$_HEADLESS" ]]; then
+  log "Starting all services in the background (slot $_SLOT)..."
+else
+  log "Starting all services with mprocs..."
+fi
 printf "\n"
-
-# ── Create logs directory ──
-_LOG_DIR="$ROOT_DIR/logs"
-mkdir -p "$_LOG_DIR"
 
 # ── Resolve optional env vars ──
 # OPENAI_COMPATIBLE_* are gateway-config inputs only (a `local` model_list alias, see
@@ -981,9 +1130,13 @@ export TWILIO_VERIFY_API_KEY="${TWILIO_VERIFY_API_KEY:-}"
 export TWILIO_VERIFY_API_SECRET="${TWILIO_VERIFY_API_SECRET:-}"
 
 # ── Generate mprocs config ──
-MPROCS_CFG=$(mktemp /tmp/nannos-mprocs-XXXXXX)
-mv "$MPROCS_CFG" "${MPROCS_CFG}.yaml"
-MPROCS_CFG="${MPROCS_CFG}.yaml"
+if [[ "$_SLOT" != 0 ]]; then
+  MPROCS_CFG="$_SLOT_DIR/procs.yaml"
+else
+  MPROCS_CFG=$(mktemp /tmp/nannos-mprocs-XXXXXX)
+  mv "$MPROCS_CFG" "${MPROCS_CFG}.yaml"
+  MPROCS_CFG="${MPROCS_CFG}.yaml"
+fi
 
 # Build scenario label for info panel
 if [[ "$_OIDC_MODE" == "remote-ssm" ]]; then
@@ -1026,17 +1179,19 @@ _OPT_LINES=""
 _DEBUG_LINES=""
 if [[ -n "$_DEBUG_MODE" ]]; then
   _DEBUG_LINES="  Debugging (debugpy):
-    backend .......... localhost:5678
-    orchestrator ..... localhost:5679
-    runner ........... localhost:5682
-    voice-agent ...... localhost:5683
+    backend .......... localhost:${_P_DBG_BACKEND}
+    orchestrator ..... localhost:${_P_DBG_ORCHESTRATOR}
+    runner ........... localhost:${_P_DBG_RUNNER}
+    voice-agent ...... localhost:${_P_DBG_VOICE}
 "
 fi
 
-# Prepare Slack
-pushd "$ROOT_DIR/packages/client-slack"
-just prepare-start
-popd
+# Prepare Slack (slot 0 only: the channel clients each bind one external app)
+if [[ "$_SLOT" == 0 ]]; then
+  pushd "$ROOT_DIR/packages/client-slack"
+  just prepare-start
+  popd
+fi
 
 # Generate the info script
 _INFO_SCRIPT=$(mktemp /tmp/nannos-info-XXXXXX)
@@ -1053,12 +1208,12 @@ cat <<'EOF'
   Scenario: $_SCENARIO
 
   Services:
-    Console ........... http://localhost:5173
+    Console ........... ${_FRONTEND_URL}
     Backend API ....... http://localhost:${CONSOLE_BACKEND_PORT}
-    Orchestrator ...... http://localhost:10001
-    Agent Runner ...... http://localhost:5005
-    Voice Agent ....... http://localhost:8002
-    soffice-worker .... http://localhost:8090
+    Orchestrator ...... http://localhost:${_P_ORCHESTRATOR}
+    Agent Runner ...... http://localhost:${_P_RUNNER}
+    Voice Agent ....... http://localhost:${_P_VOICE}
+    soffice-worker .... http://localhost:${_P_SOFFICE}
     Model Gateway ..... $LLM_GATEWAY_URL  (LiteLLM proxy — see the 'litellm' tab)
     Keycloak .......... $_KC_BASE_URL
     PostgreSQL (console)       localhost:5401
@@ -1075,7 +1230,7 @@ ${_DEBUG_LINES}
   ──────────────────────────────────────────────────────────
 
   Getting Started:
-    1. Open http://localhost:5173 in your browser
+    1. Open ${_FRONTEND_URL} in your browser
     2. Log in with the credentials shown above
     3. Create or select an agent from the console
     4. Start chatting!
@@ -1110,7 +1265,7 @@ procs:
 
   console-backend:
     cwd: "$ROOT_DIR/packages/console-backend"
-    shell: "uv run python${_DEBUG_MODE:+ -m debugpy --listen 0.0.0.0:5678} -m uvicorn app:asgi_app --host 0.0.0.0 --port $CONSOLE_BACKEND_PORT --reload 2>&1 | tee $_LOG_DIR/console-backend.log"
+    shell: "uv run python${_DEBUG_MODE:+ -m debugpy --listen 0.0.0.0:${_P_DBG_BACKEND}} -m uvicorn app:asgi_app --host 0.0.0.0 --port $CONSOLE_BACKEND_PORT --reload 2>&1 | tee $_LOG_DIR/console-backend.log"
     env:
       # Read back at runtime by the CORS allowlist and the loopback MCP client.
       CONSOLE_BACKEND_PORT: "$CONSOLE_BACKEND_PORT"
@@ -1120,22 +1275,22 @@ procs:
       OIDC_CLIENT_SECRET: "$_OIDC_SECRET_BACKEND"
       OIDC_AUDIENCE: "agent-console"
       ORCHESTRATOR_CLIENT_ID: "orchestrator"
-      BASE_DOMAIN: "localhost:5173"
-      FRONTEND_URL: "http://localhost:5173"
-      ORCHESTRATOR_BASE_DOMAIN: "localhost:10001"
+      BASE_DOMAIN: "localhost:${_P_FRONTEND}"
+      FRONTEND_URL: "${_FRONTEND_URL}"
+      ORCHESTRATOR_BASE_DOMAIN: "localhost:${_P_ORCHESTRATOR}"
       ORCHESTRATOR_ENVIRONMENT: "local"
       KEYCLOAK_ADMIN_CLIENT_ID: "nannos-admin"
       KEYCLOAK_ADMIN_CLIENT_SECRET: "$_OIDC_SECRET_ADMIN"
-      KEYCLOAK_GROUP_NAME_PREFIX: "local-"
+      KEYCLOAK_GROUP_NAME_PREFIX: "${_GROUP_PREFIX}"
       POSTGRES_HOST: "localhost"
       POSTGRES_PORT: "5401"
-      POSTGRES_DB: "console"
+      POSTGRES_DB: "${_DB_CONSOLE}"
       POSTGRES_USER: "postgres"
       POSTGRES_PASSWORD: "password"
       POSTGRES_SCHEMA: "public"
       SCHEDULER_TICK_INTERVAL_SECONDS: "30"
       SCHEDULER_CLAIM_LIMIT: "10"
-      AGENT_RUNNER_URL: "http://localhost:5005"
+      AGENT_RUNNER_URL: "http://localhost:${_P_RUNNER}"
       LOG_LEVEL: "INFO"
       AZURE_OPENAI_API_KEY: "$AZURE_OPENAI_API_KEY"
       AZURE_API_BASE: "$AZURE_API_BASE"
@@ -1144,7 +1299,7 @@ procs:
       OBJECT_STORAGE_TYPE: "$OBJECT_STORAGE_TYPE"
       LOCAL_STORAGE_BASE_URL: "$LOCAL_STORAGE_BASE_URL"
       LOCAL_STORAGE_PATH: "$LOCAL_STORAGE_PATH"
-      VOICE_AGENT_URL: "http://localhost:8002"
+      VOICE_AGENT_URL: "http://localhost:${_P_VOICE}"
       CATALOG_VECTOR_BUCKET_NAME: "$CATALOG_VECTOR_BUCKET_NAME"
       CATALOG_THUMBNAILS_S3_BUCKET: "$CATALOG_THUMBNAILS_S3_BUCKET"
       CATALOG_VECTOR_STORE_BACKEND: "s3_vectors"
@@ -1162,7 +1317,7 @@ procs:
       LANGSMITH_PROJECT_ID: "${LANGSMITH_PROJECT_ID:-}"
       DOCSTORE_HOST: "localhost"
       DOCSTORE_PORT: "5402"
-      DOCSTORE_DB: "docstore"
+      DOCSTORE_DB: "${_DB_DOCSTORE}"
       DOCSTORE_USER: "postgres"
       DOCSTORE_PASSWORD: "password"
 
@@ -1172,12 +1327,12 @@ procs:
     env:
       POSTGRES_HOST: "localhost"
       POSTGRES_PORT: "5401"
-      POSTGRES_DB: "console"
+      POSTGRES_DB: "${_DB_CONSOLE}"
       POSTGRES_USER: "postgres"
       POSTGRES_PASSWORD: "password"
       POSTGRES_SCHEMA: "public"
       CONSOLE_BACKEND_URL: "http://localhost:${CONSOLE_BACKEND_PORT}"
-      SOFFICE_WORKER_URL: "http://localhost:8090"
+      SOFFICE_WORKER_URL: "http://localhost:${_P_SOFFICE}"
       CATALOG_VECTOR_BUCKET_NAME: "$CATALOG_VECTOR_BUCKET_NAME"
       CATALOG_THUMBNAILS_S3_BUCKET: "$CATALOG_THUMBNAILS_S3_BUCKET"
       CATALOG_VECTOR_STORE_BACKEND: "s3_vectors"
@@ -1196,26 +1351,26 @@ procs:
 
   soffice-worker:
     cwd: "$ROOT_DIR/packages/soffice-worker"
-    shell: "uv run uvicorn main:app --host 127.0.0.1 --port 8090 --reload 2>&1 | tee $_LOG_DIR/soffice-worker.log"
+    shell: "uv run uvicorn main:app --host 127.0.0.1 --port ${_P_SOFFICE} --reload 2>&1 | tee $_LOG_DIR/soffice-worker.log"
     env:
-      PORT: "8090"
+      PORT: "${_P_SOFFICE}"
       LOG_LEVEL: "INFO"
 
   orchestrator:
     cwd: "$ROOT_DIR/packages/orchestrator-agent"
-    shell: "uv run python${_DEBUG_MODE:+ -m debugpy --listen 0.0.0.0:5679} -m uvicorn main:app --host 0.0.0.0 --port 10001 --reload --reload-dir . --reload-dir ../agent-common/agent_common --log-config log_conf.yml --no-access-log 2>&1 | tee $_LOG_DIR/orchestrator.log"
+    shell: "uv run python${_DEBUG_MODE:+ -m debugpy --listen 0.0.0.0:${_P_DBG_ORCHESTRATOR}} -m uvicorn main:app --host 0.0.0.0 --port ${_P_ORCHESTRATOR} --reload --reload-dir . --reload-dir ../agent-common/agent_common --log-config log_conf.yml --no-access-log 2>&1 | tee $_LOG_DIR/orchestrator.log"
     env:
       OIDC_ISSUER: "$_OIDC_ISSUER"
       OIDC_CLIENT_ID: "orchestrator"
       OIDC_CLIENT_SECRET: "$_OIDC_SECRET_ORCHESTRATOR"
       ORCHESTRATOR_CLIENT_ID: "orchestrator"
       AGENT_ID: "1"
-      AGENT_BASE_URL: "http://localhost:10001"
+      AGENT_BASE_URL: "http://localhost:${_P_ORCHESTRATOR}"
       CONSOLE_BACKEND_URL: "http://localhost:${CONSOLE_BACKEND_PORT}"
-      CONSOLE_FRONTEND_URL: "http://localhost:5173"
+      CONSOLE_FRONTEND_URL: "${_FRONTEND_URL}"
       POSTGRES_HOST: "localhost"
       POSTGRES_PORT: "5402"
-      POSTGRES_DB: "docstore"
+      POSTGRES_DB: "${_DB_DOCSTORE}"
       POSTGRES_USER: "postgres"
       POSTGRES_PASSWORD: "password"
       POSTGRES_SCHEMA: "public"
@@ -1227,8 +1382,8 @@ procs:
       LANGSMITH_ENDPOINT: "$LANGSMITH_ENDPOINT"
       LOG_LEVEL: "INFO"
       USE_SHORT_PROMPTS: "true"
-      # Enable the wasm-sandboxed ``eval`` REPL. When on, the orchestrator reaches
-      # all its tools through ``eval`` (opinionated single exposure model — see
+      # Enable the wasm-sandboxed 'eval' REPL. When on, the orchestrator reaches
+      # all its tools through 'eval' (opinionated single exposure model — see
       # graph_factory); when off, tools stay natively bound. Set in the repo-root .env.
       CODE_INTERPRETER_PTC: "${CODE_INTERPRETER_PTC:-0}"
       AZURE_OPENAI_API_KEY: "$AZURE_OPENAI_API_KEY"
@@ -1253,16 +1408,16 @@ procs:
 
   runner:
     cwd: "$ROOT_DIR/packages/agent-runner"
-    shell: "uv run python${_DEBUG_MODE:+ -m debugpy --listen 0.0.0.0:5682} -m uvicorn main:app --host 0.0.0.0 --port 5005 --reload --reload-dir . --reload-dir ../agent-common/agent_common --log-config log_conf.yml --no-access-log 2>&1 | tee $_LOG_DIR/runner.log"
+    shell: "uv run python${_DEBUG_MODE:+ -m debugpy --listen 0.0.0.0:${_P_DBG_RUNNER}} -m uvicorn main:app --host 0.0.0.0 --port ${_P_RUNNER} --reload --reload-dir . --reload-dir ../agent-common/agent_common --log-config log_conf.yml --no-access-log 2>&1 | tee $_LOG_DIR/runner.log"
     env:
       OIDC_ISSUER: "$_OIDC_ISSUER"
       OIDC_CLIENT_ID: "agent-runner"
       OIDC_CLIENT_SECRET: "$_OIDC_SECRET_AGENT_RUNNER"
-      AGENT_BASE_URL: "http://localhost:5005"
+      AGENT_BASE_URL: "http://localhost:${_P_RUNNER}"
       CONSOLE_BACKEND_URL: "http://localhost:${CONSOLE_BACKEND_PORT}"
       POSTGRES_HOST: "localhost"
       POSTGRES_PORT: "5402"
-      POSTGRES_DB: "docstore"
+      POSTGRES_DB: "${_DB_DOCSTORE}"
       POSTGRES_USER: "postgres"
       POSTGRES_PASSWORD: "password"
       POSTGRES_SCHEMA: "public"
@@ -1290,13 +1445,13 @@ procs:
 
   voice-agent:
     cwd: "$ROOT_DIR/packages/voice-agent"
-    shell: "uv run python${_DEBUG_MODE:+ -m debugpy --listen 0.0.0.0:5683} main.py  --reload 2>&1 | tee $_LOG_DIR/voice-agent.log"
+    shell: "uv run python${_DEBUG_MODE:+ -m debugpy --listen 0.0.0.0:${_P_DBG_VOICE}} main.py  --reload 2>&1 | tee $_LOG_DIR/voice-agent.log"
     env:
       HOST: "localhost"
-      PORT: "8002"
+      PORT: "${_P_VOICE}"
       OIDC_ISSUER: "$_OIDC_ISSUER"
       OIDC_CLIENT_ID: "voice-agent"
-      VOICE_AGENT_BASE_URL: "http://localhost:8002"
+      VOICE_AGENT_BASE_URL: "http://localhost:${_P_VOICE}"
       CONSOLE_BACKEND_URL: "http://localhost:${CONSOLE_BACKEND_PORT}"
       PUBLIC_URL: "${PUBLIC_URL:-}"
       GCP_KEY: '$GCP_KEY'
@@ -1317,13 +1472,13 @@ procs:
       LANGSMITH_ENDPOINT: "$LANGSMITH_ENDPOINT"
       LOG_LEVEL: "INFO"
 
-  # `dev:link`, NOT `build:watch`. The console dev server compiles the SDK's
-  # source directly, so a `vite build --watch` here would rebuild a dist nobody
+  # 'dev:link', NOT 'build:watch'. The console dev server compiles the SDK's
+  # source directly, so a 'vite build --watch' here would rebuild a dist nobody
   # reads — while rewriting it non-atomically with renumbered rollup chunks,
   # which is what used to wedge the dev server mid-rebuild. dev:link keeps the
   # .d.ts (editor/tsc) and dist/styles.css (shadow-DOM embed mounts) in sync and
   # leaves dist/*.js alone. Consequence: dist JS goes stale during a session —
-  # re-run `npm run build` in packages/embed-sdk before a console prod build.
+  # re-run 'npm run build' in packages/embed-sdk before a console prod build.
   embed-sdk:
     cwd: "$ROOT_DIR/packages/embed-sdk"
     shell: "npm run dev:link 2>&1 | tee $_LOG_DIR/embed-sdk.log"
@@ -1331,7 +1486,13 @@ procs:
 
   frontend:
     cwd: "$ROOT_DIR/packages/console-frontend"
-    shell: "npx vite --host 0.0.0.0 --port 5173 2>&1 | tee $_LOG_DIR/frontend.log"
+    shell: "npx vite --host 0.0.0.0 --port ${_P_FRONTEND}${_HEADLESS:+ --strictPort} 2>&1 | tee $_LOG_DIR/frontend.log"
+YAML
+
+# The shared infrastructure's logs and the channel clients belong to slot 0: the clients each bind
+# one external app (a Slack app, a Google Chat bot), which a second stack cannot share.
+if [[ "$_SLOT" == 0 ]]; then
+cat >> "$MPROCS_CFG" <<YAML
 
   infra-logs:
     cwd: "$LOCAL_DEV_DIR"
@@ -1348,5 +1509,59 @@ procs:
     shell: "npm run dev"
     stop: "SIGKILL"
 YAML
+fi
 
-exec mprocs --config "$MPROCS_CFG"
+if [[ -z "$_HEADLESS" ]]; then
+  exec mprocs --config "$MPROCS_CFG"
+fi
+
+# ─── 9. Headless: start in the background, wait until healthy ──────
+# The procs file is the single definition of what runs; slot_procs.py starts each entry as its
+# own process group (stop = kill the group) and records the PIDs beside the claim.
+_slot_procs() {
+  uv run --quiet --no-project --with pyyaml python "$SCRIPT_DIR/local-dev/slot_procs.py" "$@"
+}
+_slot_procs start "$MPROCS_CFG" "$_SLOT_DIR" --skip info
+
+# Any HTTP answer counts as up (the orchestrator answers 401 without a token); 000 is no answer.
+_SLOT_CHECKS="console-backend=http://localhost:${CONSOLE_BACKEND_PORT}/api/v1/health
+frontend=${_FRONTEND_URL}/
+orchestrator=http://localhost:${_P_ORCHESTRATOR}/
+runner=http://localhost:${_P_RUNNER}/
+soffice-worker=http://localhost:${_P_SOFFICE}/health
+voice-agent=http://localhost:${_P_VOICE}/"
+_DEADLINE=$((SECONDS + ${NANNOS_SLOT_HEALTH_TIMEOUT:-420}))
+while :; do
+  _DOWN=""
+  while IFS='=' read -r _name _url; do
+    _code=$(curl -s -o /dev/null --max-time 3 -w '%{http_code}' "$_url" || true)
+    [[ "$_code" != "000" ]] || _DOWN="$_DOWN $_name"
+  done <<< "$_SLOT_CHECKS"
+  [[ -n "$_DOWN" ]] || break
+  if [[ $SECONDS -ge $_DEADLINE ]]; then
+    err "Slot $_SLOT not healthy:${_DOWN}. Logs: $_LOG_DIR"
+  fi
+  sleep 3
+done
+ok "Slot $_SLOT is up"
+
+python3 - "$_SLOT_DIR/slot.json" <<PYJSON
+import json, sys
+summary = {
+    "slot": $_SLOT,
+    "worktree": "$ROOT_DIR",
+    "console": "$_FRONTEND_URL",
+    "backend": "http://localhost:$CONSOLE_BACKEND_PORT",
+    "orchestrator": "http://localhost:$_P_ORCHESTRATOR",
+    "runner": "http://localhost:$_P_RUNNER",
+    "gateway": "http://localhost:$LLM_GATEWAY_PORT",
+    "databases": {"console": "$_DB_CONSOLE", "docstore": "$_DB_DOCSTORE"},
+    "postgres": {"console": "localhost:5401", "docstore": "localhost:5402"},
+    "idp": "$_OIDC_ISSUER",
+    "logs": "$_LOG_DIR",
+}
+if "$_DEBUG_MODE":
+    summary["debugpy"] = {"backend": $_P_DBG_BACKEND, "orchestrator": $_P_DBG_ORCHESTRATOR, "runner": $_P_DBG_RUNNER, "voice-agent": $_P_DBG_VOICE}
+with open(sys.argv[1], "w") as f:
+    json.dump(summary, f, indent=2)
+PYJSON

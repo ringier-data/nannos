@@ -47,7 +47,10 @@ services:
       KC_HOSTNAME_STRICT_HTTPS: "false"
       KC_HTTP_ENABLED: "true"
     volumes:
-      - ./keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+      # start-local.sh copies the realm to one fixed path for every checkout: a path relative to
+      # this file differs per worktree, so it changed the config hash and every start from
+      # another worktree re-created Keycloak (a ~110 s cold boot) under the stacks using it.
+      - ${NANNOS_KEYCLOAK_REALM_FILE:-./keycloak/realm-export.json}:/opt/keycloak/data/import/realm-export.json:ro
     healthcheck:
       test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q '200\\|UP' <&3"]
       interval: 5s

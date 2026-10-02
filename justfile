@@ -1166,20 +1166,53 @@ test-db-psql: test-db
 
 # Start all services locally (requires OPENAI_COMPATIBLE_BASE_URL)
 start-local *FLAGS:
+  ./scripts/local-dev/env-sync.sh --quiet
   ./scripts/start-local.sh {{FLAGS}}
 
-# Stop local infrastructure (PostgreSQL + Keycloak) and all services
+# Copy the gitignored env files (scripts/local-dev/worktree-env-files) from the main checkout into
+# this worktree; existing ones are kept, --force refreshes them. `up` and `start-local` run it.
+env-sync *FLAGS:
+  ./scripts/local-dev/env-sync.sh {{FLAGS}}
+
+# Stop local infrastructure (PostgreSQL + Keycloak) and all services — shared by every slot
 stop-local:
   tmux kill-session -t nannos 2>/dev/null || true
   docker rm -f nannos-litellm-proxy-local 2>/dev/null || true
   cd scripts/local-dev && docker compose down
+  @echo "⚠ The Postgres servers and Keycloak are shared: running slots ('just slots') lost them too."
 
-# Stop local infrastructure and delete all data
+# Stop local infrastructure and delete all data — every slot's databases included
 reset-local:
   tmux kill-session -t nannos 2>/dev/null || true
   docker rm -f nannos-litellm-proxy-local 2>/dev/null || true
   cd scripts/local-dev && docker compose down -v
   @echo "✓ Local infrastructure removed. Run 'just start-local' to start fresh."
+  @echo "⚠ Every slot's databases went with it: release the slots with 'just down N' or 'just slots-gc'."
+
+# ── Stack slots (ADR-0016): side-by-side stacks, one per worktree ──
+# A slot is a full stack on its own ports (4N000-4N999), databases, gateway and cookies,
+# beside slot 0 (`just start-local`). `up` is headless: it returns once the slot is healthy
+# and prints its URLs as JSON. Logs: ~/.nannos/slots/N/logs/.
+
+# Start this worktree's slot (or print it if it runs): --slot N, --local-idp, --debug
+up *FLAGS:
+  ./scripts/local-dev/slot.sh up {{FLAGS}}
+
+# Stop a slot and drop its databases (default: this worktree's); --keep-db keeps them
+down *ARGS:
+  ./scripts/local-dev/slot.sh down {{ARGS}}
+
+# List claimed slots and their state
+slots:
+  ./scripts/local-dev/slot.sh list
+
+# Release every slot whose services are all gone (stops containers, drops databases)
+slots-gc:
+  ./scripts/local-dev/slot.sh gc
+
+# Drop and re-create a slot's databases, re-applying this worktree's migrations
+db-reset *ARGS:
+  ./scripts/local-dev/slot.sh db-reset {{ARGS}}
 
 recon: # Reconcile local Kubernetes cluster with Flux (for testing manifests)
   #!/usr/bin/env bash

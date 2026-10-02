@@ -157,6 +157,18 @@ sleep 4 && tmux send-keys -t nannos "y" Enter            # answer Proceed?
 ```
 Service status is the left column of `tmux capture-pane -t nannos -p` (`UP`/`DOWN`).
 
+**Your own stack beside the others — slots (ADR-0016):** when the stack above belongs to someone
+else's work, or your branch changes migrations, run your own: `just up` from your worktree claims a
+slot (1–8), starts a full stack on its own ports, databases, gateway and cookies, waits until it
+is healthy and prints its URLs as JSON — no TTY, no prompt. Slot N's console is
+`http://localhost:4N173`, backend `:4N001`, orchestrator `:4N010` (shared Postgres `:5401`/`:5402`,
+databases `console_sN`/`docstore_sN`); logs in `~/.nannos/slots/N/logs/`. Running `up` again from
+the same worktree prints the running slot. `just down` stops it and drops its databases (always
+do this when you are done); `just slots` lists them; `just db-reset` re-migrates after you edit
+an already-applied migration (`up` refuses until you do). Slots have no Slack/Google Chat
+clients. A worktree without its own `.env` uses the main checkout's. `just up --local-idp` signs in
+against the local Keycloak (`test@local.dev` / `password`) instead of the remote IdP.
+
 **The `.env` file is gitignored and per-checkout** — it exists at the main repo root but **NOT in fresh git worktrees**. If `scripts/start-local.sh` reports no LLM provider / missing config, or `.env` is absent, **STOP and ask the user to provide it — never fabricate secrets, AWS profiles, or OIDC URLs.** Ask only for the *minimal subset the task needs*, not the whole file. Variables group by what they unlock:
 
 | Var(s) | Unlocks |
