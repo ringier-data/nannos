@@ -929,6 +929,11 @@ fi
 
 # ─── 6. Launch the stack (process-compose) ───────────────────────
 cd "$ROOT_DIR"
+# Each start begins its logs afresh (process-compose appends): a log shows this run only, not the
+# errors of the last one.
+for _log in $(sed -n 's|^ *log_location: ${NANNOS_LOG_DIR}/||p' "$LOCAL_DEV_DIR/process-compose.yaml"); do
+  : > "$_LOG_DIR/$_log"
+done
 _PC=(process-compose -f "$LOCAL_DEV_DIR/process-compose.yaml" --disable-dotenv
      -L "$_STACK_DIR/process-compose.log" -u "$_SOCK")
 rm -f "$_SOCK"

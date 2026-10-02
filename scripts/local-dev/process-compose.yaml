@@ -342,9 +342,12 @@ processes:
     working_dir: ${NANNOS_ROOT}/packages/console-frontend
     log_location: ${NANNOS_LOG_DIR}/frontend.log
     log_configuration: *log
+    # The console is nothing without its API: an open browser tab polls Socket.IO through the
+    # proxy, which only logs errors until the backend answers.
     depends_on:
       deps-frontend: {condition: process_completed_successfully}
       embed-sdk-build: {condition: process_completed_successfully}
+      console-backend: {condition: process_healthy}
     readiness_probe:
       http_get: {host: 127.0.0.1, port: ${NANNOS_FRONTEND_PORT:-5173}, path: /}
       <<: *probe
@@ -353,7 +356,7 @@ processes:
   # The channel clients each bind one external app (a Slack app, a Google Chat bot), which a
   # second stack cannot share; the shared infrastructure's logs are slot 0's to show.
   infra-logs:
-    command: "docker compose logs -f"
+    command: "docker compose logs -f --tail 200"
     working_dir: ${NANNOS_ROOT}/scripts/local-dev
     log_location: ${NANNOS_LOG_DIR}/infra.log
     log_configuration: *log
