@@ -75,6 +75,23 @@ def _resolve_ref(node: dict[str, Any], defs: dict[str, Any]) -> tuple[dict[str, 
     return node, None
 
 
+def _none_valued(properties: Any) -> set[str]:
+    """Names of the properties ``clean_schema_properties`` will drop: a None value is not a schema."""
+    if not isinstance(properties, dict):
+        return set()
+    return {k for k, v in properties.items() if v is None}
+
+
+def _prune_required(node: dict[str, Any], dropped: set[str]) -> None:
+    """Remove from ``required`` only the properties cleaning dropped.
+
+    Anything else stays required, including names that ``properties`` does not list
+    because ``allOf``, ``patternProperties`` or ``additionalProperties`` supply them.
+    """
+    if dropped and isinstance(node.get("required"), list):
+        node["required"] = [r for r in node["required"] if not (isinstance(r, str) and r in dropped)]
+
+
 def clean_schema_node(
     node: Any,
     level: CleanupLevel = CleanupLevel.MINIMAL,
@@ -197,9 +214,11 @@ def clean_schema_node(
 
     # --- Recurse into nested schemas ---
     if "properties" in node and isinstance(node["properties"], dict):
+        dropped = _none_valued(node["properties"])
         node["properties"] = clean_schema_properties(
             node["properties"], level, tool_name, _path, defs=defs, _seen=_seen, _depth=_depth
         )
+        _prune_required(node, dropped)
 
     if "items" in node and isinstance(node["items"], dict):
         node["items"] = clean_schema_node(
@@ -226,11 +245,16 @@ def clean_schema_properties(
     _seen: frozenset[str] = frozenset(),
     _depth: int = 0,
 ) -> dict[str, Any]:
-    """Recursively remove invalid property schemas with progressive cleanup levels.
+    """Recursively clean property schemas with progressive cleanup levels.
 
-    MINIMAL: Removes None values, empty dicts, and unwraps anyOf nullable types
+    MINIMAL: Removes None-valued properties and unwraps anyOf nullable types
     MODERATE: Also removes ALL enum constraints (global state space limit)
     AGGRESSIVE: Also removes format, min/max bounds, array length constraints
+
+    An empty schema (``{}``, e.g. Python ``Any`` or zod ``z.any()``) is kept as ``{}``,
+    including one that only becomes empty after cleaning (``{"default": None}``). It means
+    "any value", which every provider behind the gateway accepts; dropping it would leave
+    the model unable to send that argument, and a required one would fail every call.
 
     Args:
         properties: Properties dict from JSON Schema
@@ -247,22 +271,14 @@ def clean_schema_properties(
     for key, value in properties.items():
         prop_path = f"{_path}.{key}" if _path else key
 
-        # Remove None-valued and empty properties
+        # None is not a schema at all — drop the property
         if value is None:
             logger.debug(f"Removing property '{key}' with None value")
-            continue
-        if isinstance(value, dict) and not value:
-            logger.debug(f"Removing property '{key}' with empty dict")
             continue
 
         # Delegate full recursive cleaning to clean_schema_node
         if isinstance(value, dict):
-            result = clean_schema_node(value, level, tool_name, prop_path, defs=defs, _seen=_seen, _depth=_depth)
-            if not result:
-                # Schema reduced to empty dict (e.g. {"default": None}) — skip it
-                logger.debug(f"Removing property '{key}': schema reduced to empty after cleaning")
-                continue
-            cleaned[key] = result
+            cleaned[key] = clean_schema_node(value, level, tool_name, prop_path, defs=defs, _seen=_seen, _depth=_depth)
         else:
             cleaned[key] = value
 
@@ -318,13 +334,16 @@ def validate_and_clean_tool_dict(
 
     # Clean properties and sync required array
     if "properties" in params:
-        original_props = params["properties"]
-        cleaned_props = clean_schema_properties(original_props, level, tool_name, defs=defs)
-        params["properties"] = cleaned_props
-
-        # Remove from required any properties that were cleaned away
-        if "required" in params:
-            params["required"] = [r for r in params["required"] if r in cleaned_props]
+        dropped = _none_valued(params["properties"])
+        params["properties"] = clean_schema_properties(params["properties"], level, tool_name, defs=defs)
+        _prune_required(params, dropped)
+        # Binding path only (as before #328): a required name with no property behind it is refused
+        # by Gemini ("property is not defined"), and LiteLLM strips the allOf/patternProperties that
+        # could supply it. A non-list required is dropped, as clean_schema_node does for None.
+        if isinstance(params.get("required"), list):
+            params["required"] = [r for r in params["required"] if not isinstance(r, str) or r in params["properties"]]
+        else:
+            params.pop("required", None)
 
     return tool_dict
 
