@@ -100,5 +100,22 @@ if [[ "$1" == console ]]; then
   # The Model Gateway's own tables live in a `litellm` schema of the console database (mirrors
   # the deployments' shared database). The gateway step waits for this one.
   psql_in "$DB" "CREATE SCHEMA IF NOT EXISTS litellm"
+
+  # A slot's models come from its gateway config (models registered in another stack's
+  # database are not here), but which one serves the `chat` tier lives in model_defaults —
+  # empty in a new database, and agents refuse to run without it. The config's first model
+  # becomes the `chat` default (order litellm-local-models.yaml accordingly); every other tier
+  # falls back to `chat`. Only while `chat` is unset: a default chosen in the console stays.
+  if [[ "$SLOT" != 0 && -z "$(psql_in "$DB" "SELECT 1 FROM model_defaults WHERE role = 'chat'")" ]]; then
+    alias="$(sed -n 's/^[[:space:]]*-[[:space:]]*model_name:[[:space:]]*//p' "${NANNOS_GW_CONFIG:-/dev/null}" \
+      | tr -d "\"'" | awk 'NR == 1 {print $1}')"
+    if [[ -n "$alias" ]]; then
+      psql_in "$DB" "INSERT INTO model_defaults (role, model_alias) VALUES ('chat', '$alias') ON CONFLICT (role) DO NOTHING"
+      psql_in "$DB" "INSERT INTO model_alias_tiers (alias, role) VALUES ('$alias', 'chat') ON CONFLICT (alias, role) DO NOTHING"
+      echo "✓ Default chat model: $alias (the gateway config's first; change it in the console under Models → Defaults)"
+    else
+      echo "⚠ No models in the gateway config: set the chat default in the console (Models → Defaults)"
+    fi
+  fi
 fi
 echo "✓ $DB migrated"
