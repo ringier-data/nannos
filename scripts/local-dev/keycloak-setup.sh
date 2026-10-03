@@ -59,21 +59,26 @@ api POST "users/$SA_USER_ID/role-mappings/clients/$REALM_MGMT_UUID" "$ROLES" >/d
 echo "✓ nannos-admin service account roles granted"
 
 # Every stack on this machine signs in through agent-console: slot 0 on :5001 and slot N on
-# :4N001. This is the dev realm only, so its redirect URIs are a localhost wildcard instead of one
-# entry per slot (realm-export.json has it; a Keycloak imported before that gets it here).
+# :4N001. This is the dev realm only, so its redirect URIs are a loopback-port wildcard instead of
+# one entry per slot (realm-export.json has it; a Keycloak imported before that gets it here). The
+# ':' pins the host — Keycloak matches a trailing '*' as a prefix, so 'http://localhost*' would
+# also accept http://localhost.example.com; such entries are removed.
 AC_UUID=$(client_uuid agent-console)
 PATCH=$(api GET "clients/$AC_UUID" | python3 -c '
 import json, sys
 client = json.load(sys.stdin)
-wanted = ["http://localhost*", "http://127.0.0.1*"]
+wanted = ["http://localhost:*", "http://127.0.0.1:*"]
+too_broad = {"http://localhost*", "http://127.0.0.1*"}
 uris = client.get("redirectUris") or []
 attrs = client.get("attributes") or {}
 logout = [u for u in attrs.get("post.logout.redirect.uris", "").split("##") if u]
-if all(u in uris for u in wanted) and all(u in logout for u in wanted):
+new_uris = [u for u in uris if u not in too_broad] + [u for u in wanted if u not in uris]
+new_logout = [u for u in logout if u not in too_broad] + [u for u in wanted if u not in logout]
+if new_uris == uris and new_logout == logout:
     sys.exit()
-attrs["post.logout.redirect.uris"] = "##".join(logout + [u for u in wanted if u not in logout])
-print(json.dumps({"redirectUris": uris + [u for u in wanted if u not in uris], "attributes": attrs}))')
+attrs["post.logout.redirect.uris"] = "##".join(new_logout)
+print(json.dumps({"redirectUris": new_uris, "attributes": attrs}))')
 if [[ -n "$PATCH" ]]; then
   api PUT "clients/$AC_UUID" "$PATCH" >/dev/null
-  echo "✓ agent-console accepts every local stack (http://localhost*)"
+  echo "✓ agent-console accepts every local stack (http://localhost:*)"
 fi

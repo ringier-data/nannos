@@ -74,8 +74,10 @@ backend would land on 5401.
   `request.url_for`, and the Vite proxy rewrites `Host` to the backend (`changeOrigin`), so a slot
   already asks for exactly `http://localhost:4N001/api/v1/auth/login-callback`.
 - **The local Keycloak takes any local stack.** It is a development realm nobody else uses, so its
-  `agent-console` client allows `http://localhost*` (and `127.0.0.1*`) instead of one entry per
-  slot: no per-slot registration, and no lock around a read-modify-write of the client.
+  `agent-console` client allows `http://localhost:*` (and `127.0.0.1:*`) instead of one entry per
+  slot: no per-slot registration, and no lock around a read-modify-write of the client. The `:`
+  matters — Keycloak treats a trailing `*` as a prefix, and `http://localhost*` would also accept
+  `http://localhost.example.com`.
 - **Cookies are scoped by host, not port, so a slot names its own.** Two stacks on `localhost`
   overwrite each other's `a2a-chatui` session, and the Starlette `session` cookie that carries the
   OAuth state mid-sign-in. Both names are configurable (`SESSION_COOKIE_NAME`,
@@ -120,9 +122,10 @@ backend would land on 5401.
 - **A router on :5001 that sends each sign-in callback to the right slot.** Keeps the IdP client
   unchanged, but every callback arrives on the same host and port, so the router would have to
   recover the slot from the OIDC `state` or a cookie — a fragile layer in front of authentication.
-- **Wildcard redirect URIs on the real IdP.** The only wildcard the IdP offers is a trailing one,
-  so "any loopback port" becomes the prefix `http://localhost*` — which also matches hosts such as
-  `localhost.example.com`, on a client that production shares. (Acceptable on the local realm only.)
+- **Wildcard redirect URIs on the real IdP.** The only wildcard the IdP offers is a trailing prefix
+  match, so "any loopback port" becomes `http://localhost:*`: a sign-in code for the client that
+  production shares would go to whatever listens on any local port. A fixed list of eight slots
+  keeps that set closed. (Acceptable on the local realm only.)
 - **Caching the SSM secrets on disk between runs.** Saves seconds but leaves production secrets in
   plaintext under the home directory. Fetching them with batched `get-parameters` calls instead of
   one call per secret is fast enough.

@@ -189,8 +189,9 @@ else
   export SESSION_COOKIE_NAME="a2a-chatui-s${_SLOT}"
   export OAUTH_STATE_COOKIE_NAME="session-s${_SLOT}"
   export CORS_ALLOWED_CHAT_ORIGINS="${CORS_ALLOWED_CHAT_ORIGINS:+$CORS_ALLOWED_CHAT_ORIGINS,}http://localhost:${_P_FRONTEND},http://127.0.0.1:${_P_FRONTEND}"
-  # Uploads live and die with the slot's databases.
-  LOCAL_STORAGE_PATH="${LOCAL_STORAGE_PATH:-$_STACK_DIR/uploads}"
+  # Uploads live and die with the slot's databases — whatever the environment or .env says, which
+  # would otherwise share one directory between slots.
+  LOCAL_STORAGE_PATH="$_STACK_DIR/uploads"
 fi
 _DB_CONSOLE="$(slot_db_name "$_SLOT" console)"; _DB_DOCSTORE="$(slot_db_name "$_SLOT" docstore)"
 _FRONTEND_URL="http://localhost:${_P_FRONTEND}"
@@ -702,6 +703,9 @@ export NANNOS_LITELLM_IMAGE="${LITELLM_IMAGE:-ghcr.io/berriai/litellm:v1.103.0@s
 # runtime — without it /model/new returns "No DB Connected". The container reaches the host
 # Postgres (published on :5401) via host.docker.internal.
 export LITELLM_DATABASE_URL="${LITELLM_DATABASE_URL:-postgresql://postgres:password@host.docker.internal:5401/${_DB_CONSOLE}?schema=litellm}"
+# A slot's gateway keeps its registrations in its own database, whatever the environment says: a
+# shared one would share model registrations and tier chains between stacks (ADR-0016).
+[[ "$_SLOT" == 0 ]] || LITELLM_DATABASE_URL="postgresql://postgres:password@host.docker.internal:5401/${_DB_CONSOLE}?schema=litellm"
 
 # Resolve a path to its physical location (symlinks expanded).
 #
@@ -969,17 +973,11 @@ while :; do
       err "Slot $_SLOT failed to start — ${_VERDICT#failed: } (logs: $_LOG_DIR; 'process-compose attach -u $_SOCK' shows the stack)" ;;
   esac
   if [[ $SECONDS -ge $_DEADLINE ]]; then
-    err "Slot $_SLOT not ready after ${NANNOS_SLOT_HEALTH_TIMEOUT:-900}s (logs: $_LOG_DIR; 'process-compose attach -u $_SOCK' shows the stack)"
+    err "Slot $_SLOT not ready after ${NANNOS_SLOT_HEALTH_TIMEOUT:-900}s — ${_VERDICT#starting: } (logs: $_LOG_DIR; 'process-compose attach -u $_SOCK' shows the stack)"
   fi
-  _NOW="$(slot_pc "$_SLOT" process list -o json | python3 -c '
-import json, sys
-try:
-    print(" ".join(sorted(p["name"] for p in json.load(sys.stdin) if p["status"] not in ("Completed", "Disabled") and (p["status"] != "Running" or (p.get("has_ready_probe") and p.get("is_ready") != "Ready")))))
-except ValueError:
-    pass' || true)"
-  if [[ -n "$_NOW" && "$_NOW" != "$_LAST" ]]; then
-    log "Waiting for: $_NOW"
-    _LAST="$_NOW"
+  if [[ "$_VERDICT" != "$_LAST" ]]; then
+    log "Waiting for: ${_VERDICT#starting: }"
+    _LAST="$_VERDICT"
   fi
   sleep 3
 done

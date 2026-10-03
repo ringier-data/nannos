@@ -165,7 +165,8 @@ startup order (namespaces `1-infra`, `2-deps`, `3-backend`, `4-agents`, `5-front
 
 - **Data:** a slot's databases start empty (all migrations applied) and live until `just down`.
 - **Migrations:** `just restart` applies a new migration (it stops and starts the slot on its
-  databases). After editing an already-applied one, the slot refuses to start; `just db-reset`
+  databases; `just restart --local-idp` / `--debug` changes the slot's flags, as does `just up` with
+  other flags than the slot runs with). After editing an already-applied one, the slot refuses to start; `just db-reset`
   rebuilds the databases.
 - **A crashed service** stays exited: `just slots` shows the slot as `failed`, and `just up` names the
   process. Fix it and `just restart` (or restart just that process, above).

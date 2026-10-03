@@ -96,22 +96,35 @@ slot_kill_leftovers() {  # N
   for pg in $pgids; do kill -KILL -- "-$pg" 2>/dev/null || true; done
 }
 
-# Read slot N's process list and judge it: prints "ready", "starting" or "failed: <names>".
-# Failed: a setup step exited non-zero or was skipped (its dependency failed), or a service exited.
-# Ready: no failure, every setup step done and every service with a readiness probe ready.
+# Read slot N's process list and judge it: prints "ready", "starting: <names>" or
+# "failed: <names>". Failed: a setup step exited non-zero or was skipped (its dependency failed), or
+# a service exited. Ready: no failure, every setup step done and every service with a readiness
+# probe ready. Setup steps are the processes the stack's own process-compose.yaml runs once
+# (`availability: *once`, or restarted only on failure); everything else is a service.
 slot_pc_verdict() {  # N
+  local yaml
+  yaml="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["worktree"])' "$(slot_dir "$1")/stack.json" 2>/dev/null \
+    )/scripts/local-dev/process-compose.yaml"
   slot_pc "$1" process list -o json | python3 -c '
-import json, sys
+import json, re, sys
 try:
     procs = json.load(sys.stdin)
 except ValueError:
     print("failed: (no answer)"); sys.exit()
+one_shots = set()
+try:
+    text = open(sys.argv[1]).read().split("\nprocesses:\n", 1)[1]
+    for name, body in re.findall(r"^  ([a-z0-9-]+):\n((?:(?:    .*)?\n)*)", text, re.M):
+        if re.search(r"availability: \*once|restart: on_failure", body):
+            one_shots.add(name)
+except (OSError, IndexError):
+    pass
 failed, waiting = [], []
 for p in procs:
     status, name = p["status"], p["name"]
     if status == "Disabled":
         continue
-    one_shot = name in sys.argv[1].split()
+    one_shot = name in one_shots
     if status == "Skipped" or (status in ("Completed", "Error") and (not one_shot or p.get("exit_code") != 0)):
         failed.append(name)
     elif one_shot and status != "Completed":
@@ -121,15 +134,11 @@ for p in procs:
 if failed:
     print("failed: " + " ".join(sorted(failed)))
 elif waiting:
-    print("starting")
+    print("starting: " + " ".join(sorted(waiting)))
 else:
     print("ready")
-' "$SLOT_ONE_SHOTS"
+' "$yaml"
 }
-# The setup steps of process-compose.yaml (run once, exit 0); everything else is a service.
-SLOT_ONE_SHOTS="info infra migrate-console migrate-docstore keycloak-setup embed-sdk-build slack-migrate
-deps-console-backend deps-orchestrator deps-runner deps-voice-agent deps-soffice-worker deps-frontend
-deps-client-slack deps-client-slack-frontend deps-client-google-chat"
 
 # A kernel lock (flock) on a file, held through file descriptor FD by the calling shell: the
 # short Python child takes it on the shared open file, and it stays held until the shell closes

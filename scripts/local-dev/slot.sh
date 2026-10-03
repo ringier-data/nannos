@@ -47,7 +47,7 @@ _state() {  # N
   elif slot_pc_running "$1"; then
     case "$(slot_pc_verdict "$1")" in
       ready) echo running ;;
-      starting) echo starting ;;
+      starting*) echo starting ;;
       *) echo failed ;;
     esac
   else
@@ -77,10 +77,10 @@ _slot_arg() {  # [N]: the named slot, else this worktree's
 
 _port_in_use() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 
-_block_in_use() {  # N: is any port of the slot's block held by something?
+_block_in_use() {  # N: is any port of the slot's block held by something? Prints the first.
   local port
   for port in $(slot_all_ports "$1"); do
-    _port_in_use "$port" && return 0
+    _port_in_use "$port" && { echo "$port"; return 0; }
   done
   return 1
 }
@@ -101,17 +101,30 @@ _same_args() {  # N flags...
      == "$(printf '%s\n' "${@:2}" | grep . | sort | tr '\n' ' ')" ]]
 }
 
-# Start slot N's stack (claimed, not running) and wait until it is ready. The start lock tells
-# everyone else it is starting; the kernel drops it when this shell ends, however it ends.
+# Take slot N's start lock, held through FD 7 until _start is done. It tells everyone else the
+# slot is starting — `gc` and another `up` leave it alone, also while _stop runs before _start —
+# and the kernel drops it when this shell ends, however it ends.
+_begin() {  # N
+  slot_lock "$SLOTS_DIR/$1/start.flock" 7 1 || err "Slot $1 is already starting or stopping (log: $SLOTS_DIR/$1/up.log)"
+}
+
+# Start slot N's stack (claimed, not running; _begin first) and wait until it is ready.
 _start() {  # N
-  local n="$1" dir="$SLOTS_DIR/$1" args
+  local n="$1" dir="$SLOTS_DIR/$1" args worktree port
   args="$(_claim_field "$n" args)"
-  slot_lock "$dir/start.flock" 7 1 || err "Slot $n is already starting"
-  note "Starting slot $n for $(_claim_field "$n" worktree) (log: $dir/up.log)"
+  worktree="$(_claim_field "$n" worktree)"
+  [[ -n "$worktree" && -x "$worktree/scripts/start-local.sh" ]] \
+    || { slot_unlock 7; err "Slot $n's claim names no usable worktree ('$worktree'); 'just down $n' releases it"; }
+  # Ports are checked when a slot is claimed; by a restart, something else may have taken one.
+  if port="$(_block_in_use "$n")"; then
+    slot_unlock 7
+    err "Port $port of slot $n's block is held by another process ('lsof -nP -iTCP:$port -sTCP:LISTEN' names it)"
+  fi
+  note "Starting slot $n for $worktree (log: $dir/up.log)"
   # The lock stays with this shell (7>&-): the stack's process-compose instance, started by
   # start-local.sh, would otherwise inherit it and keep the slot "starting" for as long as it runs.
   # shellcheck disable=SC2086 # args are our own flags, no spaces
-  if "$(_claim_field "$n" worktree)/scripts/start-local.sh" --slot "$n" --headless $args > "$dir/up.log" 2>&1 7>&-; then
+  if "$worktree/scripts/start-local.sh" --slot "$n" --headless $args > "$dir/up.log" 2>&1 7>&-; then
     slot_unlock 7
     cat "$dir/stack.json"
     echo
@@ -136,6 +149,19 @@ _stop() {  # N
   rm -f "$(slot_sock "$n")"
 }
 
+# Stop slot N, drop its databases and remove its directory (start lock held: _begin).
+_release() {  # N
+  _stop "$1"
+  if ! slot_drop_databases "$1"; then
+    slot_unlock 7
+    note "Could not drop slot $1's databases (are $PG_CONSOLE_CONTAINER and $PG_DOCSTORE_CONTAINER running?); the slot stays claimed"
+    return 1
+  fi
+  rm -rf "${SLOTS_DIR:?}/$1"
+  slot_unlock 7
+  note "Slot $1 released"
+}
+
 cmd_up() {
   local want="" args=() n="" existing candidate
   while [[ $# -gt 0 ]]; do
@@ -155,11 +181,14 @@ cmd_up() {
   existing="$(_slot_of_worktree "$ROOT_DIR")"
   if [[ -n "$existing" ]]; then
     slot_unlock 8
+    [[ -z "$want" || "$want" == "$existing" ]] \
+      || err "This worktree already holds slot $existing; 'just down' releases it before 'just up --slot $want'"
     # Flags given that differ from the slot's: they would otherwise be ignored without a word
     # (a slot started without --local-idp kept signing in at the remote IdP).
     if [[ ${#args[@]} -gt 0 ]] && ! _same_args "$existing" "${args[@]}"; then
       [[ "$(_state "$existing")" != starting ]] || err "Slot $existing is still starting for this worktree (log: $SLOTS_DIR/$existing/up.log)"
       note "Slot $existing runs with '$(_claim_field "$existing" args)'; restarting it with '${args[*]}' on its databases"
+      _begin "$existing"
       _set_args "$existing" "${args[@]}"
       _stop "$existing"
       _start "$existing"
@@ -177,6 +206,7 @@ cmd_up() {
         err "Slot $existing of this worktree runs, but $(slot_pc_verdict "$existing" | sed 's/^failed: //') failed (logs: $SLOTS_DIR/$existing/logs). Fix it and 'just restart'." ;;
       dead)
         note "Slot $existing of this worktree is not running; starting it again on its databases"
+        _begin "$existing"
         _stop "$existing"
         _start "$existing"
         return ;;
@@ -188,7 +218,7 @@ cmd_up() {
   for candidate in $candidates; do
     [[ ! -d "$SLOTS_DIR/$candidate" ]] || continue
     # Something outside the slot registry (a leftover process) may still hold the block.
-    _block_in_use "$candidate" && continue
+    _block_in_use "$candidate" >/dev/null && continue
     mkdir "$SLOTS_DIR/$candidate"
     n="$candidate"
     break
@@ -204,6 +234,7 @@ print(json.dumps({"slot": int(slot), "worktree": worktree, "args": args,
                   "claimed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}, indent=2))
 ' "$n" "$ROOT_DIR" ${args[@]+"${args[@]}"} > "$SLOTS_DIR/$n/claim.json"
   slot_unlock 8
+  _begin "$n"
   _start "$n"
 }
 
@@ -216,7 +247,7 @@ cmd_restart() {
     esac
   done
   n="$(_slot_arg "$n")"
-  [[ "$(_state "$n")" != starting ]] || err "Slot $n is still starting (log: $SLOTS_DIR/$n/up.log)"
+  _begin "$n"
   [[ ${#args[@]} -eq 0 ]] || _set_args "$n" "${args[@]}"
   _stop "$n"
   _start "$n"
@@ -225,20 +256,16 @@ cmd_restart() {
 cmd_down() {
   local n
   n="$(_slot_arg "${1:-}")"
-  [[ "$(_state "$n")" != starting ]] || err "Slot $n is still starting (log: $SLOTS_DIR/$n/up.log); stop that first"
-  _stop "$n"
-  slot_drop_databases "$n" \
-    || err "Could not drop slot $n's databases (are $PG_CONSOLE_CONTAINER and $PG_DOCSTORE_CONTAINER running?); the slot stays claimed"
-  rm -rf "${SLOTS_DIR:?}/$n"
-  note "Slot $n released"
+  _begin "$n"
+  _release "$n"
 }
 
 cmd_db_reset() {
   local n
   n="$(_slot_arg "${1:-}")"
-  [[ "$(_state "$n")" != starting ]] || err "Slot $n is still starting (log: $SLOTS_DIR/$n/up.log)"
+  _begin "$n"
   _stop "$n"
-  slot_drop_databases "$n" || err "Could not drop slot $n's databases"
+  slot_drop_databases "$n" || { slot_unlock 7; err "Could not drop slot $n's databases"; }
   rm -rf "$SLOTS_DIR/$n/uploads"
   _start "$n"
 }
@@ -251,7 +278,7 @@ _slot0_worktree() {
   if slot_pc_running 0; then
     python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["worktree"])' "$SLOTS_DIR/0/stack.json" 2>/dev/null && return
   fi
-  pid="$(lsof -nP -iTCP:5001 -sTCP:LISTEN -t 2>/dev/null | head -1 || true)"
+  pid="$(lsof -nP -iTCP:"$(slot_port 0 backend)" -sTCP:LISTEN -t 2>/dev/null | head -1 || true)"
   [[ -n "$pid" ]] || return 0
   cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' || true)"
   [[ -n "$cwd" ]] || return 0
@@ -269,7 +296,11 @@ cmd_list() {
   printf "$row" SLOT STATE CONSOLE BRANCH WORKTREE
   slot0="$(_slot0_worktree)"
   if [[ -n "$slot0" ]]; then
-    printf "$row" 0 running "http://localhost:5173" "$(_branch_of "$slot0")" "$slot0"
+    local state0=legacy  # started before process-compose: found by its backend port only
+    if slot_pc_running 0; then
+      case "$(slot_pc_verdict 0)" in ready) state0=running ;; starting*) state0=starting ;; *) state0=failed ;; esac
+    fi
+    printf "$row" 0 "$state0" "http://localhost:$(slot_port 0 frontend)" "$(_branch_of "$slot0")" "$slot0"
   fi
   for n in 1 2 3 4 5 6 7 8; do
     [[ -f "$SLOTS_DIR/$n/claim.json" ]] || continue
@@ -285,13 +316,9 @@ cmd_gc() {
   for n in 1 2 3 4 5 6 7 8; do
     [[ -d "$SLOTS_DIR/$n" ]] || continue
     if [[ ! -f "$SLOTS_DIR/$n/claim.json" ]] || [[ "$(_state "$n")" == dead ]]; then
-      _stop "$n"
-      if slot_drop_databases "$n"; then
-        rm -rf "${SLOTS_DIR:?}/$n"
-        note "Slot $n released"
-      else
-        note "Could not drop slot $n's databases; it stays claimed"
-      fi
+      # A restart in progress holds the start lock (and its slot reads as dead while it stops).
+      slot_lock "$SLOTS_DIR/$n/start.flock" 7 0 2>/dev/null || continue
+      _release "$n" || true
     fi
   done
   slot_unlock 8
@@ -305,8 +332,31 @@ cmd_sock() {
   slot_sock "${n:-0}"
 }
 
+# For stop-local / reset-local, which take the shared PostgreSQL and Keycloak away: stop every
+# slot's stack first (claims and databases kept: 'just up' starts it again), or release them all.
+cmd_stop_all() {
+  local n
+  for n in 1 2 3 4 5 6 7 8; do
+    [[ -f "$SLOTS_DIR/$n/claim.json" ]] || continue
+    slot_lock "$SLOTS_DIR/$n/start.flock" 7 0 2>/dev/null || { note "Slot $n is starting; left alone"; continue; }
+    _stop "$n"
+    slot_unlock 7
+    note "Slot $n stopped (its databases are kept; 'just up' from its worktree starts it again)"
+  done
+}
+cmd_down_all() {
+  local n
+  for n in 1 2 3 4 5 6 7 8; do
+    [[ -d "$SLOTS_DIR/$n" ]] || continue
+    slot_lock "$SLOTS_DIR/$n/start.flock" 7 0 2>/dev/null || { note "Slot $n is starting; left alone"; continue; }
+    _release "$n" || true
+  done
+}
+
 case "${1:-}" in
   up) shift; cmd_up "$@" ;;
+  stop-all) shift; cmd_stop_all ;;
+  down-all) shift; cmd_down_all ;;
   sock) shift; cmd_sock "$@" ;;
   restart) shift; cmd_restart "$@" ;;
   down) shift; cmd_down "$@" ;;

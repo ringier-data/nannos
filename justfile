@@ -1181,20 +1181,20 @@ start-local *FLAGS:
 env-sync *FLAGS:
   ./scripts/local-dev/env-sync.sh {{FLAGS}}
 
-# Stop slot 0 and the local infrastructure (PostgreSQL + Keycloak) — which every slot shares
+# Stop slot 0, every slot's stack (claims and databases kept) and the shared infrastructure
 stop-local:
   -process-compose down -u "${NANNOS_SLOTS_DIR:-$HOME/.nannos/slots}/0/pc.sock" 2>/dev/null
   docker rm -f nannos-litellm-proxy-local 2>/dev/null || true
+  ./scripts/local-dev/slot.sh stop-all
   cd scripts/local-dev && docker compose down
-  @echo "⚠ The Postgres servers and Keycloak are shared: running slots ('just slots') lost them too."
 
-# Stop local infrastructure and delete all data — every slot's databases included
+# Stop everything and delete all local data — every slot is released
 reset-local:
   -process-compose down -u "${NANNOS_SLOTS_DIR:-$HOME/.nannos/slots}/0/pc.sock" 2>/dev/null
   docker rm -f nannos-litellm-proxy-local 2>/dev/null || true
+  ./scripts/local-dev/slot.sh down-all
   cd scripts/local-dev && docker compose down -v
-  @echo "✓ Local infrastructure removed. Run 'just start-local' to start fresh."
-  @echo "⚠ Every slot's databases went with it: release running slots with 'just down N' or 'just slots-gc'."
+  @echo "✓ Local infrastructure removed, every slot released. Run 'just start-local' to start fresh."
 
 # ── Stack slots (ADR-0016): side-by-side stacks, one per worktree ──
 # A slot is a full stack on its own ports (4N000-4N999), databases, gateway and cookies,
