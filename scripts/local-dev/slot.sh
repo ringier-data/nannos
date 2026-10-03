@@ -17,6 +17,8 @@ set -euo pipefail
 #   slot.sh down [N]                                stop a slot, drop its databases, release it
 #   slot.sh list                                    every running stack, slot 0 included
 #   slot.sh gc                                      release every slot whose instance is gone
+#                                                   (not the ones stop-local stopped)
+#   slot.sh stop-all | down-all                     for stop-local / reset-local
 #   slot.sh db-reset [N]                            drop the databases and start again
 #
 # N defaults to this worktree's slot. One worktree holds at most one slot; `up` from a worktree
@@ -135,12 +137,14 @@ _start() {  # N
     slot_unlock 7
     err "Port $port of slot $n's block is held by another process ('lsof -nP -iTCP:$port -sTCP:LISTEN' names it)"
   fi
-  rm -f "$dir/stopped"
   note "Starting slot $n for $worktree (log: $dir/up.log)"
   # The lock stays with this shell (7>&-): the stack's process-compose instance, started by
   # start-local.sh, would otherwise inherit it and keep the slot "starting" for as long as it runs.
   # shellcheck disable=SC2086 # args are our own flags, no spaces
   if "$worktree/scripts/start-local.sh" --slot "$n" --headless $args > "$dir/up.log" 2>&1 7>&-; then
+    # Only now: a start that fails early (an expired SSO session, Docker down) leaves no instance,
+    # and a slot stopped on purpose must not then read as dead to gc.
+    rm -f "$dir/stopped"
     slot_unlock 7
     cat "$dir/stack.json"
     echo
@@ -330,6 +334,7 @@ _branch_of() {  # worktree
 
 cmd_list() {
   local n slot0
+  _need_pc
   local row='%-5s %-9s %-24s %-36s %s\n'
   printf "$row" SLOT STATE CONSOLE BRANCH WORKTREE
   slot0="$(_slot0_worktree)"
@@ -349,6 +354,8 @@ cmd_list() {
 
 cmd_gc() {
   local n
+  # Without process-compose every running slot would read as dead — and be released.
+  _need_pc
   # Under the claim lock throughout: a slot found dead is released before anyone can claim it.
   slot_lock "$CLAIM_LOCK" 8
   for n in 1 2 3 4 5 6 7 8; do
@@ -377,10 +384,13 @@ cmd_stop_all() {
   for n in 1 2 3 4 5 6 7 8; do
     [[ -f "$SLOTS_DIR/$n/claim.json" ]] || continue
     slot_lock "$SLOTS_DIR/$n/start.flock" 7 0 2>/dev/null || { busy="$busy $n"; continue; }
-    _stop "$n"
-    touch "$SLOTS_DIR/$n/stopped"
+    # Only a slot that runs is stopped on purpose; a dead one stays dead, for gc to release.
+    if slot_pc_running "$n"; then
+      _stop "$n"
+      touch "$SLOTS_DIR/$n/stopped"
+    fi
     slot_unlock 7
-    note "Slot $n stopped (claim and databases kept; 'just up' from its worktree starts it again)"
+    [[ ! -f "$SLOTS_DIR/$n/stopped" ]] || note "Slot $n stopped (claim and databases kept; 'just up' from its worktree starts it again)"
   done
   # A slot mid-start would lose the infrastructure under it: stop here, before compose down.
   [[ -z "$busy" ]] || err "Slot(s)$busy are starting or stopping; try again once they are done"
@@ -410,5 +420,5 @@ case "${1:-}" in
   list) shift; cmd_list ;;
   gc) shift; cmd_gc ;;
   db-reset) shift; cmd_db_reset "$@" ;;
-  *) sed -n '4,22p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+  *) sed -n '/^# ─── Local stack slots/,/^$/p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

@@ -1201,12 +1201,13 @@ reset-local:
 # beside slot 0 (`just start-local`). `up` is headless: it returns once the slot is ready
 # and prints its URLs as JSON. Logs: ~/.nannos/slots/N/logs/.
 
-# Start this worktree's slot (or print it if it runs): --slot N, --local-idp, --debug
+# Start this worktree's slot (or print it if it runs): --slot N, --local-idp, --debug; --remote-idp /
+# --no-debug remove a flag (a changed flag restarts the slot on its databases)
 up *FLAGS:
   ./scripts/local-dev/slot.sh up {{FLAGS}}
 
 # Stop and start a slot again on its databases, applying new migrations (default: this worktree's);
-# --local-idp / --debug given replace the slot's flags
+# --local-idp / --debug add a flag, --remote-idp / --no-debug remove one
 restart *ARGS:
   ./scripts/local-dev/slot.sh restart {{ARGS}}
 
