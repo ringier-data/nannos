@@ -477,6 +477,8 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             entitlement_version=entitlement_version,
             settings_version=settings_version,
             language=user.language,
+            # Only when set: omitting it keeps UserConfig's DEFAULT_TIMEZONE default.
+            **({"timezone": user.timezone} if user.timezone else {}),
             custom_prompt=user.custom_prompt,
             local_subagents=user.local_subagents,
             agent_metadata=user.agent_metadata,
