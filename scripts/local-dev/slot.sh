@@ -374,14 +374,14 @@ cmd_sock() {
 # For stop-local / reset-local, which take the shared PostgreSQL and Keycloak away: stop every
 # slot's stack first (claims and databases kept: 'just up' starts it again), or release them all.
 cmd_stop_all() {
-  local n busy=""
+  local n busy="" was_running
   for n in 1 2 3 4 5 6 7 8; do
     [[ -f "$SLOTS_DIR/$n/claim.json" ]] || continue
     slot_lock "$SLOTS_DIR/$n/start.flock" 7 0 2>/dev/null || { busy="$busy $n"; continue; }
-    if slot_pc_running "$n"; then
-      _stop "$n"
-      note "Slot $n stopped (claim and databases kept; 'just up' from its worktree starts it again)"
-    fi
+    # Always stopped: a slot whose instance died may still have orphans and a gateway running.
+    was_running=""; slot_pc_running "$n" && was_running=1
+    _stop "$n"
+    [[ -z "$was_running" ]] || note "Slot $n stopped (claim and databases kept; 'just up' from its worktree starts it again)"
     slot_unlock 7
   done
   # A slot mid-start would lose the infrastructure under it: stop here, before compose down.
@@ -389,6 +389,8 @@ cmd_stop_all() {
 }
 cmd_down_all() {
   local n
+  # Under the claim lock throughout: no `up` can start a slot while it is being removed.
+  slot_lock "$CLAIM_LOCK" 8
   # Nothing is released while a slot is starting: reset-local stops before compose down.
   for n in 1 2 3 4 5 6 7 8; do
     [[ -d "$SLOTS_DIR/$n" ]] || continue
