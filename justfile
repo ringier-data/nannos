@@ -1101,7 +1101,14 @@ _start-test-db:
 _build-migrations:
   #!/usr/bin/env bash
   set -e
-  docker build -t {{_migrations_image}} {{_migrations_dir}}
+  # Local-only image: the context's own builder skips a docker-container builder's export+load
+  # (where buildx has one; plain `docker build` has no --builder flag).
+  ctx="$(docker context show 2>/dev/null || true)"
+  if [[ -n "$ctx" ]] && docker buildx inspect "$ctx" >/dev/null 2>&1; then
+    docker build --builder "$ctx" -t {{_migrations_image}} {{_migrations_dir}}
+  else
+    docker build -t {{_migrations_image}} {{_migrations_dir}}
+  fi
 
 # Run migrations against a given port
 [private]
@@ -1163,22 +1170,72 @@ test-db-psql: test-db
 
 # ─── Local Development ────────────────────────────────────────────
 
-# Start all services locally (requires OPENAI_COMPATIBLE_BASE_URL)
+# Start all services locally — slot 0, in the process-compose TUI (requires an LLM source in .env).
+# Prints the plan and starts without asking (./scripts/start-local.sh alone still asks).
 start-local *FLAGS:
-  ./scripts/start-local.sh {{FLAGS}}
+  ./scripts/local-dev/env-sync.sh --quiet
+  ./scripts/start-local.sh --yes {{FLAGS}}
 
-# Stop local infrastructure (PostgreSQL + Keycloak) and all services
+# Copy the gitignored env files (scripts/local-dev/worktree-env-files) from the main checkout into
+# this worktree; existing ones are kept, --force refreshes them. `up` and `start-local` run it.
+env-sync *FLAGS:
+  ./scripts/local-dev/env-sync.sh {{FLAGS}}
+
+# Stop slot 0, every slot's stack (claims and databases kept) and the shared infrastructure
 stop-local:
-  tmux kill-session -t nannos 2>/dev/null || true
+  -process-compose down -u "${NANNOS_SLOTS_DIR:-$HOME/.nannos/slots}/0/pc.sock" 2>/dev/null
   docker rm -f nannos-litellm-proxy-local 2>/dev/null || true
+  ./scripts/local-dev/slot.sh stop-all
   cd scripts/local-dev && docker compose down
 
-# Stop local infrastructure and delete all data
+# Stop everything and delete all local data — every slot is released
 reset-local:
-  tmux kill-session -t nannos 2>/dev/null || true
+  -process-compose down -u "${NANNOS_SLOTS_DIR:-$HOME/.nannos/slots}/0/pc.sock" 2>/dev/null
   docker rm -f nannos-litellm-proxy-local 2>/dev/null || true
+  ./scripts/local-dev/slot.sh down-all
   cd scripts/local-dev && docker compose down -v
-  @echo "✓ Local infrastructure removed. Run 'just start-local' to start fresh."
+  @echo "✓ Local infrastructure removed, every slot released. Run 'just start-local' to start fresh."
+
+# ── Stack slots (ADR-0016): side-by-side stacks, one per worktree ──
+# A slot is a full stack on its own ports (4N000-4N999), databases, gateway and cookies,
+# beside slot 0 (`just start-local`). `up` is headless: it returns once the slot is ready
+# and prints its URLs as JSON. Logs: ~/.nannos/slots/N/logs/.
+
+# Start this worktree's slot (or print it if it runs): --slot N, --local-idp, --debug; --remote-idp /
+# --no-debug remove a flag (a changed flag restarts the slot on its databases)
+up *FLAGS:
+  ./scripts/local-dev/slot.sh up {{FLAGS}}
+
+# Stop and start a slot again on its databases, applying new migrations (default: this worktree's);
+# --local-idp / --debug add a flag, --remote-idp / --no-debug remove one
+restart *ARGS:
+  ./scripts/local-dev/slot.sh restart {{ARGS}}
+
+# Stop a slot, drop its databases and release it (default: this worktree's)
+down *ARGS:
+  ./scripts/local-dev/slot.sh down {{ARGS}}
+
+# List running stacks — slot 0 (whichever checkout runs start-local) and every slot — with branch and worktree
+slots:
+  ./scripts/local-dev/slot.sh list
+
+# Release every slot whose worktree is gone (stops its stack, drops its databases)
+slots-gc:
+  ./scripts/local-dev/slot.sh gc
+
+# Dependency tree of a running stack with each process's state (default: this worktree's slot, else slot 0)
+graph N="":
+  @sock="$(./scripts/local-dev/slot.sh sock {{N}})" && process-compose graph -u "$sock" 2>/dev/null \
+    || { echo "No stack is running on $sock (see 'just slots')" >&2; exit 1; }
+
+# Startup critical chain of a running stack: when each process became ready and how long it took
+startup N="":
+  @sock="$(./scripts/local-dev/slot.sh sock {{N}})" && process-compose analyze critical-chain -u "$sock" 2>/dev/null \
+    || { echo "No stack is running on $sock (see 'just slots')" >&2; exit 1; }
+
+# Drop and re-create a slot's databases, re-applying this worktree's migrations
+db-reset *ARGS:
+  ./scripts/local-dev/slot.sh db-reset {{ARGS}}
 
 recon: # Reconcile local Kubernetes cluster with Flux (for testing manifests)
   #!/usr/bin/env bash

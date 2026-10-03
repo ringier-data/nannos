@@ -1,0 +1,487 @@
+# The local Nannos stack, for process-compose (https://f1bonacc1.github.io/process-compose/).
+#
+# Started by scripts/start-local.sh — slot 0 with the TUI (`just start-local`), slots 1-8 headless
+# (`just up`, ADR-0016) — never by hand: the script assembles what this file reads and exports it.
+# Everything that differs per stack is a ${VAR} (process-compose substitutes the environment into
+# the whole file before parsing it; `$$` is a literal `$` for the shell). Secrets are never
+# substituted here: the processes inherit them from the environment start-local.sh exports.
+#
+# Setup steps are one-shot processes (`restart: "no"`, chained with process_completed_successfully)
+# so independent ones run in parallel; services wait for the setup they need and, where another
+# service must answer first, for its readiness probe (process_healthy).
+#
+# Stack env (all exported by start-local.sh):
+#   NANNOS_ROOT, NANNOS_SLOT, NANNOS_STACK_DIR, NANNOS_LOG_DIR      checkout, slot, state, logs
+#   CONSOLE_BACKEND_PORT, NANNOS_{FRONTEND,ORCHESTRATOR,RUNNER,VOICE,SOFFICE}_PORT, LLM_GATEWAY_PORT
+#   NANNOS_DB_CONSOLE, NANNOS_DB_DOCSTORE, NANNOS_GW_CONTAINER, NANNOS_GROUP_PREFIX
+#   NANNOS_OIDC_MODE, NANNOS_OIDC_ISSUER, NANNOS_OIDC_SECRET_{BACKEND,ORCHESTRATOR,ADMIN,RUNNER}
+#   NANNOS_DEBUGPY_{BACKEND,ORCHESTRATOR,RUNNER,VOICE}            "-m debugpy --listen …" or empty
+#   NANNOS_CHANNEL_CLIENTS_OFF                                     true except in slot 0
+#   NANNOS_CATALOG_AUTO_SYNC, NANNOS_FRONTEND_URL
+
+version: "0.5"
+
+x-log: &log
+  # Plain lines, as the service wrote them (the default is JSON with metadata).
+  fields_order: ["message"]
+  no_metadata: true
+  no_color: true
+  disable_json: true
+  flush_each_line: true
+  rotation:
+    max_size_mb: 100
+    max_backups: 1
+
+# Node processes whose children can outlive a SIGTERM to the group: stopped with SIGKILL, as
+# mprocs stopped them.
+x-kill: &kill
+  signal: 9
+
+x-once: &once
+  restart: "no"
+
+# Readiness: the service answers 2xx (the agents on their public agent card), checked by ready.sh,
+# which stops asking once it did. A probe that keeps failing kills the process, so the threshold
+# covers a slow first boot (uv syncing, a CPU-saturated machine) — a crash still shows at once as
+# the process exiting.
+x-probe: &probe
+  initial_delay_seconds: 2
+  period_seconds: 2
+  timeout_seconds: 4
+  failure_threshold: 450
+
+# Namespaces group the processes by role, numbered in startup order so the TUI sorted by namespace
+# (key C) reads top-down: 1-infra (shared infrastructure, migrations, Keycloak), 2-deps (package
+# installs), 3-backend (gateway, console-backend, workers), 4-agents, 5-frontend, 6-channels (Slack,
+# Google Chat — slot 0 only). `process-compose namespace restart 4-agents -u …` restarts a group;
+# `just graph` draws the dependency tree, `just startup` what held the start up.
+processes:
+  # ── Setup ────────────────────────────────────────────────────────────────────────────────────
+  info:
+    namespace: 1-infra
+    command: "cat '${NANNOS_STACK_DIR}/info.txt'"
+    availability: *once
+
+  infra:
+    namespace: 1-infra
+    command: "'${NANNOS_ROOT}/scripts/local-dev/infra.sh'"
+    log_location: ${NANNOS_LOG_DIR}/infra-setup.log
+    log_configuration: *log
+    availability: *once
+
+  migrate-console:
+    namespace: 1-infra
+    command: "'${NANNOS_ROOT}/scripts/local-dev/migrate.sh' console"
+    log_location: ${NANNOS_LOG_DIR}/migrate-console.log
+    log_configuration: *log
+    availability: *once
+    depends_on:
+      infra: {condition: process_completed_successfully}
+
+  migrate-docstore:
+    namespace: 1-infra
+    command: "'${NANNOS_ROOT}/scripts/local-dev/migrate.sh' docstore"
+    log_location: ${NANNOS_LOG_DIR}/migrate-docstore.log
+    log_configuration: *log
+    availability: *once
+    depends_on:
+      infra: {condition: process_completed_successfully}
+
+  keycloak-setup:
+    namespace: 1-infra
+    command: "'${NANNOS_ROOT}/scripts/local-dev/keycloak-setup.sh'"
+    log_location: ${NANNOS_LOG_DIR}/keycloak-setup.log
+    log_configuration: *log
+    # Keycloak may still be booting (~110 s cold): try again until it answers.
+    availability:
+      restart: on_failure
+      backoff_seconds: 3
+      max_restarts: 100
+    depends_on:
+      infra: {condition: process_completed_successfully}
+
+  deps-console-backend:
+    namespace: 2-deps
+    log_location: ${NANNOS_LOG_DIR}/deps-console-backend.log
+    log_configuration: *log
+    command: "uv sync --quiet"
+    working_dir: ${NANNOS_ROOT}/packages/console-backend
+    availability: *once
+  deps-orchestrator:
+    namespace: 2-deps
+    log_location: ${NANNOS_LOG_DIR}/deps-orchestrator.log
+    log_configuration: *log
+    command: "uv sync --quiet"
+    working_dir: ${NANNOS_ROOT}/packages/orchestrator-agent
+    availability: *once
+  deps-runner:
+    namespace: 2-deps
+    log_location: ${NANNOS_LOG_DIR}/deps-runner.log
+    log_configuration: *log
+    command: "uv sync --quiet"
+    working_dir: ${NANNOS_ROOT}/packages/agent-runner
+    availability: *once
+  deps-voice-agent:
+    namespace: 2-deps
+    log_location: ${NANNOS_LOG_DIR}/deps-voice-agent.log
+    log_configuration: *log
+    command: "uv sync --quiet"
+    working_dir: ${NANNOS_ROOT}/packages/voice-agent
+    availability: *once
+  deps-soffice-worker:
+    namespace: 2-deps
+    log_location: ${NANNOS_LOG_DIR}/deps-soffice-worker.log
+    log_configuration: *log
+    command: "uv sync --quiet"
+    working_dir: ${NANNOS_ROOT}/packages/soffice-worker
+    availability: *once
+  deps-frontend:
+    namespace: 2-deps
+    log_location: ${NANNOS_LOG_DIR}/deps-frontend.log
+    log_configuration: *log
+    command: "npm install --silent --no-save"
+    working_dir: ${NANNOS_ROOT}/packages/console-frontend
+    availability: *once
+
+  # @nannos/embed-sdk is a workspace package whose exports point at dist/. The dev server reads
+  # the SDK's SOURCE (serve-only aliases in the console's vite.config.ts), but tsconfig has no paths
+  # mapping — so the IDE and `tsc -b` still typecheck against dist/*.d.ts, and `npm run build`
+  # still bundles dist. Build once here so both are valid; the `embed-sdk` service then keeps only
+  # the .d.ts and the stylesheet fresh.
+  embed-sdk-build:
+    namespace: 2-deps
+    command: "npm run build --silent"
+    working_dir: ${NANNOS_ROOT}/packages/embed-sdk
+    log_location: ${NANNOS_LOG_DIR}/embed-sdk-build.log
+    log_configuration: *log
+    availability: *once
+    depends_on:
+      deps-frontend: {condition: process_completed_successfully}
+
+  # ── Model Gateway ────────────────────────────────────────────────────────────────────────────
+  gateway:
+    namespace: 3-backend
+    command: "rm -f '${NANNOS_STACK_DIR}/ready/gateway'; exec '${NANNOS_ROOT}/scripts/local-dev/gateway.sh'"
+    log_location: ${NANNOS_LOG_DIR}/litellm.log
+    log_configuration: *log
+    depends_on:
+      migrate-console: {condition: process_completed_successfully}
+    readiness_probe:
+      exec:
+        command: "'${NANNOS_ROOT}/scripts/local-dev/ready.sh' '${NANNOS_STACK_DIR}' gateway http://127.0.0.1:${LLM_GATEWAY_PORT:-4000}/health/liveliness"
+      <<: *probe
+    shutdown:
+      command: "docker stop -t 10 '${NANNOS_GW_CONTAINER}'"
+      timeout_seconds: 20
+
+  # ── Services ─────────────────────────────────────────────────────────────────────────────────
+  console-backend:
+    namespace: 3-backend
+    command: "rm -f '${NANNOS_STACK_DIR}/ready/console-backend'; exec uv run python ${NANNOS_DEBUGPY_BACKEND} -m uvicorn app:asgi_app --host 0.0.0.0 --port ${CONSOLE_BACKEND_PORT:-5001} --reload"
+    working_dir: ${NANNOS_ROOT}/packages/console-backend
+    log_location: ${NANNOS_LOG_DIR}/console-backend.log
+    log_configuration: *log
+    environment:
+      - "FIRST_USER_IS_ADMIN=true"
+      - "OIDC_ISSUER=${NANNOS_OIDC_ISSUER}"
+      - "OIDC_CLIENT_ID=agent-console"
+      - "OIDC_CLIENT_SECRET=${NANNOS_OIDC_SECRET_BACKEND}"
+      - "OIDC_AUDIENCE=agent-console"
+      - "ORCHESTRATOR_CLIENT_ID=orchestrator"
+      - "BASE_DOMAIN=localhost:${NANNOS_FRONTEND_PORT:-5173}"
+      - "FRONTEND_URL=${NANNOS_FRONTEND_URL}"
+      - "ORCHESTRATOR_BASE_DOMAIN=localhost:${NANNOS_ORCHESTRATOR_PORT:-10001}"
+      - "ORCHESTRATOR_ENVIRONMENT=local"
+      - "KEYCLOAK_ADMIN_CLIENT_ID=nannos-admin"
+      - "KEYCLOAK_ADMIN_CLIENT_SECRET=${NANNOS_OIDC_SECRET_ADMIN}"
+      - "KEYCLOAK_GROUP_NAME_PREFIX=${NANNOS_GROUP_PREFIX:-local-}"
+      - "POSTGRES_HOST=localhost"
+      - "POSTGRES_PORT=5401"
+      - "POSTGRES_DB=${NANNOS_DB_CONSOLE:-console}"
+      - "POSTGRES_USER=postgres"
+      - "POSTGRES_PASSWORD=password"
+      - "POSTGRES_SCHEMA=public"
+      - "DOCSTORE_HOST=localhost"
+      - "DOCSTORE_PORT=5402"
+      - "DOCSTORE_DB=${NANNOS_DB_DOCSTORE:-docstore}"
+      - "DOCSTORE_USER=postgres"
+      - "DOCSTORE_PASSWORD=password"
+      - "SCHEDULER_TICK_INTERVAL_SECONDS=30"
+      - "SCHEDULER_CLAIM_LIMIT=10"
+      - "AGENT_RUNNER_URL=http://localhost:${NANNOS_RUNNER_PORT:-5005}"
+      - "VOICE_AGENT_URL=http://localhost:${NANNOS_VOICE_PORT:-8002}"
+      - "LOG_LEVEL=INFO"
+      - "CATALOG_VECTOR_STORE_BACKEND=s3_vectors"
+      - "CATALOG_SUMMARIZATION_MODEL_ID=eu.anthropic.claude-haiku-4-5-20251001-v1:0"
+      - "GOOGLE_OAUTH_REDIRECT_URI=http://localhost:${CONSOLE_BACKEND_PORT:-5001}/api/v1/catalogs/connect/callback"
+    depends_on:
+      deps-console-backend: {condition: process_completed_successfully}
+      migrate-console: {condition: process_completed_successfully}
+      migrate-docstore: {condition: process_completed_successfully}
+      keycloak-setup: {condition: process_completed_successfully}
+      gateway: {condition: process_healthy}
+    readiness_probe:
+      exec:
+        command: "'${NANNOS_ROOT}/scripts/local-dev/ready.sh' '${NANNOS_STACK_DIR}' console-backend http://127.0.0.1:${CONSOLE_BACKEND_PORT:-5001}/api/v1/health"
+      <<: *probe
+
+  catalog-worker:
+    namespace: 3-backend
+    command: "uv run python ${NANNOS_MEMPROFILE_ARGS} catalog_worker.py"
+    working_dir: ${NANNOS_ROOT}/packages/console-backend
+    log_location: ${NANNOS_LOG_DIR}/catalog-worker.log
+    log_configuration: *log
+    environment:
+      - "POSTGRES_HOST=localhost"
+      - "POSTGRES_PORT=5401"
+      - "POSTGRES_DB=${NANNOS_DB_CONSOLE:-console}"
+      - "POSTGRES_USER=postgres"
+      - "POSTGRES_PASSWORD=password"
+      - "POSTGRES_SCHEMA=public"
+      - "CONSOLE_BACKEND_URL=http://localhost:${CONSOLE_BACKEND_PORT:-5001}"
+      - "SOFFICE_WORKER_URL=http://localhost:${NANNOS_SOFFICE_PORT:-8090}"
+      - "CATALOG_VECTOR_STORE_BACKEND=s3_vectors"
+      - "CATALOG_SUMMARIZATION_MODEL_ID=eu.anthropic.claude-haiku-4-5-20251001-v1:0"
+      - "CATALOG_AUTO_SYNC_ENABLED=${NANNOS_CATALOG_AUTO_SYNC:-true}"
+      - "CATALOG_SYNC_INTERVAL_SECONDS=86400"
+      - "CATALOG_SYNC_TICK_INTERVAL_SECONDS=300"
+      - "CATALOG_SYNC_MAX_CONCURRENT=3"
+      - "CATALOG_WORKER_POLL_INTERVAL=5"
+      - "LOG_LEVEL=INFO"
+    depends_on:
+      deps-console-backend: {condition: process_completed_successfully}
+      migrate-console: {condition: process_completed_successfully}
+    # The worker has no reloader of its own.
+    watch:
+      paths:
+        - path: ${NANNOS_ROOT}/packages/console-backend
+          include: ["**/*.py"]
+          exclude: ["**/.venv/**", "**/tests/**"]
+
+  soffice-worker:
+    namespace: 3-backend
+    command: "rm -f '${NANNOS_STACK_DIR}/ready/soffice-worker'; exec uv run uvicorn main:app --host 127.0.0.1 --port ${NANNOS_SOFFICE_PORT:-8090} --reload"
+    working_dir: ${NANNOS_ROOT}/packages/soffice-worker
+    log_location: ${NANNOS_LOG_DIR}/soffice-worker.log
+    log_configuration: *log
+    environment:
+      - "PORT=${NANNOS_SOFFICE_PORT:-8090}"
+      - "LOG_LEVEL=INFO"
+    depends_on:
+      deps-soffice-worker: {condition: process_completed_successfully}
+    readiness_probe:
+      exec:
+        command: "'${NANNOS_ROOT}/scripts/local-dev/ready.sh' '${NANNOS_STACK_DIR}' soffice-worker http://127.0.0.1:${NANNOS_SOFFICE_PORT:-8090}/health"
+      <<: *probe
+
+  orchestrator:
+    namespace: 4-agents
+    command: "rm -f '${NANNOS_STACK_DIR}/ready/orchestrator'; exec uv run python ${NANNOS_DEBUGPY_ORCHESTRATOR} -m uvicorn main:app --host 0.0.0.0 --port ${NANNOS_ORCHESTRATOR_PORT:-10001} --reload --reload-dir . --reload-dir ../agent-common/agent_common --log-config log_conf.yml --no-access-log"
+    working_dir: ${NANNOS_ROOT}/packages/orchestrator-agent
+    log_location: ${NANNOS_LOG_DIR}/orchestrator.log
+    log_configuration: *log
+    environment:
+      - "OIDC_ISSUER=${NANNOS_OIDC_ISSUER}"
+      - "OIDC_CLIENT_ID=orchestrator"
+      - "OIDC_CLIENT_SECRET=${NANNOS_OIDC_SECRET_ORCHESTRATOR}"
+      - "ORCHESTRATOR_CLIENT_ID=orchestrator"
+      - "AGENT_ID=1"
+      - "AGENT_BASE_URL=http://localhost:${NANNOS_ORCHESTRATOR_PORT:-10001}"
+      - "CONSOLE_BACKEND_URL=http://localhost:${CONSOLE_BACKEND_PORT:-5001}"
+      - "CONSOLE_FRONTEND_URL=${NANNOS_FRONTEND_URL}"
+      # The checkpointer reuses this connection (docstore database, public schema).
+      - "POSTGRES_HOST=localhost"
+      - "POSTGRES_PORT=5402"
+      - "POSTGRES_DB=${NANNOS_DB_DOCSTORE:-docstore}"
+      - "POSTGRES_USER=postgres"
+      - "POSTGRES_PASSWORD=password"
+      - "POSTGRES_SCHEMA=public"
+      - "LOG_LEVEL=INFO"
+      - "USE_SHORT_PROMPTS=true"
+    depends_on:
+      deps-orchestrator: {condition: process_completed_successfully}
+      migrate-docstore: {condition: process_completed_successfully}
+      gateway: {condition: process_healthy}
+      console-backend: {condition: process_healthy}
+    readiness_probe:
+      exec:
+        command: "'${NANNOS_ROOT}/scripts/local-dev/ready.sh' '${NANNOS_STACK_DIR}' orchestrator http://127.0.0.1:${NANNOS_ORCHESTRATOR_PORT:-10001}/.well-known/agent-card.json"
+      <<: *probe
+
+  runner:
+    namespace: 4-agents
+    command: "rm -f '${NANNOS_STACK_DIR}/ready/runner'; exec uv run python ${NANNOS_DEBUGPY_RUNNER} -m uvicorn main:app --host 0.0.0.0 --port ${NANNOS_RUNNER_PORT:-5005} --reload --reload-dir . --reload-dir ../agent-common/agent_common --log-config log_conf.yml --no-access-log"
+    working_dir: ${NANNOS_ROOT}/packages/agent-runner
+    log_location: ${NANNOS_LOG_DIR}/runner.log
+    log_configuration: *log
+    environment:
+      - "OIDC_ISSUER=${NANNOS_OIDC_ISSUER}"
+      - "OIDC_CLIENT_ID=agent-runner"
+      - "OIDC_CLIENT_SECRET=${NANNOS_OIDC_SECRET_RUNNER}"
+      - "AGENT_BASE_URL=http://localhost:${NANNOS_RUNNER_PORT:-5005}"
+      - "CONSOLE_BACKEND_URL=http://localhost:${CONSOLE_BACKEND_PORT:-5001}"
+      - "POSTGRES_HOST=localhost"
+      - "POSTGRES_PORT=5402"
+      - "POSTGRES_DB=${NANNOS_DB_DOCSTORE:-docstore}"
+      - "POSTGRES_USER=postgres"
+      - "POSTGRES_PASSWORD=password"
+      - "POSTGRES_SCHEMA=public"
+      - "LOG_LEVEL=INFO"
+    depends_on:
+      deps-runner: {condition: process_completed_successfully}
+      migrate-docstore: {condition: process_completed_successfully}
+      gateway: {condition: process_healthy}
+      console-backend: {condition: process_healthy}
+    readiness_probe:
+      exec:
+        command: "'${NANNOS_ROOT}/scripts/local-dev/ready.sh' '${NANNOS_STACK_DIR}' runner http://127.0.0.1:${NANNOS_RUNNER_PORT:-5005}/.well-known/agent-card.json"
+      <<: *probe
+
+  voice-agent:
+    namespace: 4-agents
+    command: "rm -f '${NANNOS_STACK_DIR}/ready/voice-agent'; exec uv run python ${NANNOS_DEBUGPY_VOICE} main.py --reload"
+    working_dir: ${NANNOS_ROOT}/packages/voice-agent
+    log_location: ${NANNOS_LOG_DIR}/voice-agent.log
+    log_configuration: *log
+    environment:
+      - "HOST=localhost"
+      - "PORT=${NANNOS_VOICE_PORT:-8002}"
+      - "OIDC_ISSUER=${NANNOS_OIDC_ISSUER}"
+      - "OIDC_CLIENT_ID=voice-agent"
+      - "VOICE_AGENT_BASE_URL=http://localhost:${NANNOS_VOICE_PORT:-8002}"
+      - "CONSOLE_FRONTEND_URL=${NANNOS_FRONTEND_URL}"
+      - "CONSOLE_BACKEND_URL=http://localhost:${CONSOLE_BACKEND_PORT:-5001}"
+      - "CALL_TIMEOUT_SECONDS=600"
+      - "TWILIO_PHONE_NUMBER=+358454917751"
+      - "TWILIO_REGION=ie1"
+      - "TWILIO_EDGE=dublin"
+      - "LOG_LEVEL=INFO"
+    depends_on:
+      deps-voice-agent: {condition: process_completed_successfully}
+      console-backend: {condition: process_healthy}
+    readiness_probe:
+      exec:
+        command: "'${NANNOS_ROOT}/scripts/local-dev/ready.sh' '${NANNOS_STACK_DIR}' voice-agent http://127.0.0.1:${NANNOS_VOICE_PORT:-8002}/.well-known/agent-card.json"
+      <<: *probe
+
+  # 'dev:link', NOT 'build:watch'. The console dev server compiles the SDK's source directly, so
+  # a 'vite build --watch' here would rebuild a dist nobody reads — while rewriting it
+  # non-atomically with renumbered rollup chunks, which is what used to wedge the dev server
+  # mid-rebuild. dev:link keeps the .d.ts (editor/tsc) and dist/styles.css (shadow-DOM embed
+  # mounts) in sync and leaves dist/*.js alone. Consequence: dist JS goes stale during a session —
+  # re-run 'npm run build' in packages/embed-sdk before a console prod build.
+  # Tailwind's --watch exits when its stdin closes, and a process here gets /dev/null: feed it a
+  # pipe that stays open while the command runs (and ends with it, $$$$ being its pid after exec).
+  embed-sdk:
+    namespace: 5-frontend
+    shutdown: *kill
+    command: |
+      exec 0< <(while kill -0 $$$$ 2>/dev/null; do sleep 2; done)
+      exec npm run dev:link
+    working_dir: ${NANNOS_ROOT}/packages/embed-sdk
+    log_location: ${NANNOS_LOG_DIR}/embed-sdk.log
+    log_configuration: *log
+    depends_on:
+      embed-sdk-build: {condition: process_completed_successfully}
+
+  frontend:
+    namespace: 5-frontend
+    command: "rm -f '${NANNOS_STACK_DIR}/ready/frontend'; exec npx vite --host 0.0.0.0 --port ${NANNOS_FRONTEND_PORT:-5173} --strictPort"
+    working_dir: ${NANNOS_ROOT}/packages/console-frontend
+    log_location: ${NANNOS_LOG_DIR}/frontend.log
+    log_configuration: *log
+    # The console is nothing without its API and the orchestrator: an open browser tab reconnects
+    # at once, and until both answer only produces proxy and agent-card errors.
+    depends_on:
+      deps-frontend: {condition: process_completed_successfully}
+      embed-sdk-build: {condition: process_completed_successfully}
+      console-backend: {condition: process_healthy}
+      orchestrator: {condition: process_healthy}
+    readiness_probe:
+      exec:
+        command: "'${NANNOS_ROOT}/scripts/local-dev/ready.sh' '${NANNOS_STACK_DIR}' frontend http://127.0.0.1:${NANNOS_FRONTEND_PORT:-5173}/"
+      <<: *probe
+
+  # ── Slot 0 only ──────────────────────────────────────────────────────────────────────────────
+  # The channel clients each bind one external app (a Slack app, a Google Chat bot), which a
+  # second stack cannot share; the shared infrastructure's logs are slot 0's to show.
+  infra-logs:
+    namespace: 1-infra
+    command: "docker compose logs -f --tail 200"
+    working_dir: ${NANNOS_ROOT}/scripts/local-dev
+    log_location: ${NANNOS_LOG_DIR}/infra.log
+    log_configuration: *log
+    disabled: ${NANNOS_CHANNEL_CLIENTS_OFF:-false}
+    depends_on:
+      infra: {condition: process_completed_successfully}
+
+  # --no-save: a start installs what the lockfiles say and never rewrites them.
+  deps-client-slack:
+    namespace: 6-channels
+    log_location: ${NANNOS_LOG_DIR}/deps-client-slack.log
+    log_configuration: *log
+    command: "npm install --silent --no-save"
+    working_dir: ${NANNOS_ROOT}/packages/client-slack
+    availability: *once
+    disabled: ${NANNOS_CHANNEL_CLIENTS_OFF:-false}
+  deps-client-slack-frontend:
+    namespace: 6-channels
+    log_location: ${NANNOS_LOG_DIR}/deps-client-slack-frontend.log
+    log_configuration: *log
+    command: "npm install --silent --no-save"
+    working_dir: ${NANNOS_ROOT}/packages/client-slack-frontend
+    availability: *once
+    disabled: ${NANNOS_CHANNEL_CLIENTS_OFF:-false}
+  deps-client-google-chat:
+    namespace: 6-channels
+    log_location: ${NANNOS_LOG_DIR}/deps-client-google-chat.log
+    log_configuration: *log
+    command: "npm install --silent --no-save"
+    working_dir: ${NANNOS_ROOT}/packages/client-google-chat
+    availability: *once
+    disabled: ${NANNOS_CHANNEL_CLIENTS_OFF:-false}
+
+  slack-migrate:
+    namespace: 6-channels
+    command: "just migrate"
+    working_dir: ${NANNOS_ROOT}/packages/client-slack
+    log_location: ${NANNOS_LOG_DIR}/slack-migrate.log
+    log_configuration: *log
+    availability: *once
+    disabled: ${NANNOS_CHANNEL_CLIENTS_OFF:-false}
+
+  slack:
+    namespace: 6-channels
+    shutdown: *kill
+    command: "[ -f .env ] || cp .env.example .env; exec ./wait-for-postgres.sh postgres:password@localhost:4700/nannos -- npm run dev"
+    working_dir: ${NANNOS_ROOT}/packages/client-slack
+    log_location: ${NANNOS_LOG_DIR}/slack.log
+    log_configuration: *log
+    disabled: ${NANNOS_CHANNEL_CLIENTS_OFF:-false}
+    # It registers its delivery channel with console-backend on start.
+    depends_on:
+      deps-client-slack: {condition: process_completed_successfully}
+      slack-migrate: {condition: process_completed_successfully}
+      console-backend: {condition: process_healthy}
+
+  slack-frontend:
+    namespace: 6-channels
+    shutdown: *kill
+    command: "npm run dev"
+    working_dir: ${NANNOS_ROOT}/packages/client-slack-frontend
+    log_location: ${NANNOS_LOG_DIR}/slack-frontend.log
+    log_configuration: *log
+    disabled: ${NANNOS_CHANNEL_CLIENTS_OFF:-false}
+    depends_on:
+      deps-client-slack-frontend: {condition: process_completed_successfully}
+
+  google-chat:
+    namespace: 6-channels
+    shutdown: *kill
+    command: "[ -f .env ] || cp .env.example .env; exec npm run dev"
+    working_dir: ${NANNOS_ROOT}/packages/client-google-chat
+    log_location: ${NANNOS_LOG_DIR}/google-chat.log
+    log_configuration: *log
+    disabled: ${NANNOS_CHANNEL_CLIENTS_OFF:-false}
+    depends_on:
+      deps-client-google-chat: {condition: process_completed_successfully}

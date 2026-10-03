@@ -436,7 +436,11 @@ class Config(BaseModel):
     )
     secret_key: str = Field(default_factory=lambda: os.getenv("SECRET_KEY", "change-me-in-production"))
     session_ttl_seconds: int = Field(default=2592000)  # 30 days
-    cookie_name: str = Field(default="a2a-chatui")
+    # Both cookie names are overridable so local stacks side by side on `localhost` (ADR-0016) keep
+    # separate sessions: browsers scope cookies by host, not port. The second carries Authlib's
+    # OAuth state during a sign-in (Starlette's SessionMiddleware).
+    cookie_name: str = Field(default_factory=lambda: os.getenv("SESSION_COOKIE_NAME", "a2a-chatui"))
+    oauth_state_cookie_name: str = Field(default_factory=lambda: os.getenv("OAUTH_STATE_COOKIE_NAME", "session"))
     # Public URL of the console. Its /api is this backend (the ingress in deployments, the
     # Vite proxy locally), so links to the console's own login are built from it. The
     # default suits local development only; the API server refuses to start without

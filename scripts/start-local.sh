@@ -3,8 +3,10 @@ set -euo pipefail
 
 # ─── Nannos Local Development Startup ──────────────────────────────
 #
-# Starts all services from a clean clone.
-# Prerequisites: docker, uv, node/npm, tmux
+# Starts all services from a clean clone, as one process-compose stack
+# (scripts/local-dev/process-compose.yaml): this script assembles its configuration and
+# secrets, process-compose runs the setup steps and the services.
+# Prerequisites: docker, uv, node/npm, process-compose
 #
 # Usage:
 #   OPENAI_COMPATIBLE_BASE_URL=http://localhost:1234 ./scripts/start-local.sh
@@ -15,9 +17,15 @@ set -euo pipefail
 # Both can be combined to enable local + cloud models simultaneously.
 #
 # Flags:
-#   --debug   Start Python services with debugpy for VS Code debugging
-#             (ports: backend=5678, orchestrator=5679,
-#              runner=5682, voice-agent=5683)
+#   --debug      Start Python services with debugpy for VS Code debugging
+#                (ports: backend=5678, orchestrator=5679,
+#                 runner=5682, voice-agent=5683; offset per slot)
+#   --slot N     Run as stack slot N (1-8) beside slot 0 and the others (ADR-0016), always
+#                with --headless. Claimed and driven by `just up` / `just down`; not by hand.
+#   --headless   Start the stack detached instead of in the process-compose TUI, wait until it
+#                is ready and exit (slots only).
+#   --local-idp  Use the local Keycloak even when .env names a remote OIDC_ISSUER.
+#   --yes        Start without asking to confirm the plan (`just start-local` passes it).
 #
 # The base URL should point to the root of your LLM server — /v1 is appended
 # automatically if absent (works with LM Studio, Ollama, vLLM, etc.).
@@ -71,24 +79,39 @@ set -euo pipefail
 # ─── 0. Parse flags ────────────────────────────────────────────────
 
 _DEBUG_MODE=""
+_SLOT=0
+_HEADLESS=""
+_FORCE_LOCAL_IDP=""
+_ASSUME_YES=""
 while [[ $# -gt 0 ]]; do
   case $1 in
     --debug) _DEBUG_MODE=1; shift ;;
+    --slot) _SLOT="${2:-}"; shift 2 ;;
+    --headless) _HEADLESS=1; shift ;;
+    --local-idp) _FORCE_LOCAL_IDP=1; shift ;;
+    -y|--yes) _ASSUME_YES=1; shift ;;
     *) echo "Unknown flag: $1"; exit 1 ;;
   esac
 done
+if [[ ! "$_SLOT" =~ ^[0-8]$ ]]; then
+  echo "--slot takes 1-8 (slot 0 is the default stack)"; exit 1
+fi
+if [[ -n "$_HEADLESS" && "$_SLOT" == 0 ]]; then
+  echo "--headless runs a slot (1-8); use 'just up'"; exit 1
+fi
+# A slot runs headless only: its claim and its stack are driven by `just up` / `just down`.
+if [[ "$_SLOT" != 0 && -z "$_HEADLESS" ]]; then
+  echo "A slot runs headless; start it with 'just up'"; exit 1
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 LOCAL_DEV_DIR="$SCRIPT_DIR/local-dev"
+# shellcheck source=local-dev/slot-common.sh
+source "$LOCAL_DEV_DIR/slot-common.sh"
 
-# Port console-backend listens on, and that every other service is pointed at.
-# Overridable for when something else already holds the default:
-#   CONSOLE_BACKEND_PORT=5002 ./scripts/start-local.sh
-# Exported so the frontend's vite proxy picks the same value up.
-export CONSOLE_BACKEND_PORT="${CONSOLE_BACKEND_PORT:-5001}"
-
-# Source .env from repo root if present (does not override existing env vars)
+# Source .env from repo root if present. A fresh worktree has none (it is gitignored):
+# `just start-local` and `just up` copy it from the main checkout first (`just env-sync`).
 _DOTENV_LOADED=false
 if [[ -f "$ROOT_DIR/.env" ]]; then
   set -a
@@ -96,6 +119,83 @@ if [[ -f "$ROOT_DIR/.env" ]]; then
   set +a
   _DOTENV_LOADED=true
 fi
+if [[ -n "$_FORCE_LOCAL_IDP" ]]; then
+  unset OIDC_ISSUER
+fi
+# Slot 0's backend and gateway ports can be set in the environment or .env (a slot's cannot).
+_ENV_BACKEND_PORT="${CONSOLE_BACKEND_PORT:-}"
+_ENV_GATEWAY_PORT="${LLM_GATEWAY_PORT:-}"
+
+# ─── 0b. Stack slot (ADR-0016) ─────────────────────────────────────
+# Slot 0 is the stack this script has always started. Slots 1-8 run beside it and each other:
+# slot N owns the port block 4N000-4N999, its own databases on the shared Postgres servers, its
+# own Model Gateway container, its own cookie names and IdP group prefix.
+_STACK_DIR="$(slot_dir "$_SLOT")"
+_SOCK="$(slot_sock "$_SLOT")"
+export CONSOLE_BACKEND_PORT="$(slot_port "$_SLOT" backend)"
+LLM_GATEWAY_PORT="$(slot_port "$_SLOT" gateway)"
+_P_FRONTEND="$(slot_port "$_SLOT" frontend)"; _P_ORCHESTRATOR="$(slot_port "$_SLOT" orchestrator)"
+_P_RUNNER="$(slot_port "$_SLOT" runner)"; _P_VOICE="$(slot_port "$_SLOT" voice)"
+_P_SOFFICE="$(slot_port "$_SLOT" soffice)"
+_P_DBG_BACKEND="$(slot_port "$_SLOT" dbg_backend)"; _P_DBG_ORCHESTRATOR="$(slot_port "$_SLOT" dbg_orchestrator)"
+_P_DBG_RUNNER="$(slot_port "$_SLOT" dbg_runner)"; _P_DBG_VOICE="$(slot_port "$_SLOT" dbg_voice)"
+if [[ "$_SLOT" == 0 ]]; then
+  # Overridable for when something else already holds the default:
+  #   CONSOLE_BACKEND_PORT=5002 ./scripts/start-local.sh
+  # Exported so the frontend's vite proxy picks the same value up.
+  export CONSOLE_BACKEND_PORT="${_ENV_BACKEND_PORT:-$CONSOLE_BACKEND_PORT}"
+  LLM_GATEWAY_PORT="${_ENV_GATEWAY_PORT:-$LLM_GATEWAY_PORT}"
+  _GW_CONTAINER="nannos-litellm-proxy-local"
+  _GROUP_PREFIX="local-"
+  _LOG_DIR="$ROOT_DIR/logs"
+  if slot_pc_running 0; then
+    _RUNNING_IN="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["worktree"])' "$_STACK_DIR/stack.json" 2>/dev/null || echo "another checkout")"
+    echo "Slot 0 already runs (from $_RUNNING_IN). Stop it first: quit its TUI, or 'just stop-local'."; exit 1
+  fi
+  # Another stack on slot 0's ports — one started before process-compose (mprocs), or anything
+  # else — would make every service fail on "address in use", and the gateway step would remove
+  # its gateway container (same name). Refuse before touching anything. A gateway container of
+  # ours left alone on its port is a leftover the gateway step replaces.
+  _HELD=""
+  for _name in backend frontend orchestrator runner voice soffice gateway; do
+    _port="$(slot_port 0 "$_name")"
+    [[ "$_name" == backend ]] && _port="$CONSOLE_BACKEND_PORT"
+    [[ "$_name" == gateway ]] && _port="$LLM_GATEWAY_PORT"
+    _pid="$(lsof -nP -iTCP:"$_port" -sTCP:LISTEN -t 2>/dev/null | head -1 || true)"
+    [[ -n "$_pid" ]] || continue
+    _container="$(docker ps --filter "publish=$_port" --format '{{.Names}}' 2>/dev/null | head -1 || true)"
+    if [[ -n "$_container" ]]; then
+      [[ "$_name" == gateway && "$_container" == "$_GW_CONTAINER" ]] && continue
+      _HELD="$_HELD
+  :$_port ($_name) — Docker container $_container"
+    else
+      _cwd="$(lsof -a -p "$_pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' || true)"
+      _where="$(git -C "${_cwd:-/}" rev-parse --show-toplevel 2>/dev/null || echo "${_cwd:-unknown directory}")"
+      _HELD="$_HELD
+  :$_port ($_name) — $(ps -o comm= -p "$_pid" 2>/dev/null | xargs basename 2>/dev/null) (pid $_pid) in $_where"
+    fi
+  done
+  if [[ -n "$_HELD" ]]; then
+    echo "Slot 0's ports are in use — another stack (an mprocs-era start-local?) or another process:$_HELD"
+    echo "Stop it first (quit its mprocs/TUI, or 'just stop-local')."; exit 1
+  fi
+else
+  [[ -f "$_STACK_DIR/claim.json" ]] || { echo "Slot $_SLOT is not claimed. Start a slot with 'just up'."; exit 1; }
+  _GW_CONTAINER="nannos-gw-s${_SLOT}"
+  _GROUP_PREFIX="local-s${_SLOT}-"
+  _LOG_DIR="$_STACK_DIR/logs"
+  # Browsers scope cookies by host, not port: without their own names, slots on localhost would
+  # sign each other out. The browser's Origin is the slot's frontend, which Socket.IO checks.
+  export SESSION_COOKIE_NAME="a2a-chatui-s${_SLOT}"
+  export OAUTH_STATE_COOKIE_NAME="session-s${_SLOT}"
+  export CORS_ALLOWED_CHAT_ORIGINS="${CORS_ALLOWED_CHAT_ORIGINS:+$CORS_ALLOWED_CHAT_ORIGINS,}http://localhost:${_P_FRONTEND},http://127.0.0.1:${_P_FRONTEND}"
+  # Uploads live and die with the slot's databases — whatever the environment or .env says, which
+  # would otherwise share one directory between slots.
+  LOCAL_STORAGE_PATH="$_STACK_DIR/uploads"
+fi
+_DB_CONSOLE="$(slot_db_name "$_SLOT" console)"; _DB_DOCSTORE="$(slot_db_name "$_SLOT" docstore)"
+_FRONTEND_URL="http://localhost:${_P_FRONTEND}"
+mkdir -p "$_STACK_DIR" "$_LOG_DIR"
 
 CYAN='\033[1;36m'
 GREEN='\033[1;32m'
@@ -109,6 +209,42 @@ ok()   { printf "${GREEN}✓ %s${RESET}\n" "$*"; }
 warn() { printf "${YELLOW}⚠ %s${RESET}\n" "$*"; }
 err()  { printf "${RED}✗ %s${RESET}\n" "$*"; exit 1; }
 
+# Read SSM parameters in batches: `_ssm_load VAR=/ssm/name ...` sets each VAR whose parameter SSM
+# returns and leaves the others unset. `get-parameters` takes up to ten names per call; one call
+# per secret cost ~4 s each, fifteen times on every start. A batch fails as a whole when one of
+# its names is denied, so a failed batch is read again one name at a time — one optional secret
+# the profile may not read must not cost the required ones.
+_ssm_emit() {  # get-parameter(s) JSON on stdin, VAR=/name pairs as arguments
+  python3 -c '
+import json, shlex, sys
+doc = json.load(sys.stdin)
+params = doc.get("Parameters") or ([doc["Parameter"]] if "Parameter" in doc else [])
+values = {p["Name"]: p["Value"] for p in params}
+for pair in sys.argv[1:]:
+    var, name = pair.split("=", 1)
+    if name in values:
+        print(f"{var}={shlex.quote(values[name])}")
+' "$@"
+}
+_ssm_load() {
+  local _pairs=("$@") _names=() _p _n _i=0 _out _err
+  for _p in "${_pairs[@]}"; do _names+=("${_p#*=}"); done
+  _err="$(mktemp)"
+  while [[ $_i -lt ${#_names[@]} ]]; do
+    if _out=$(aws ssm get-parameters --names "${_names[@]:$_i:10}" --with-decryption --output json 2>"$_err"); then
+      eval "$(printf '%s' "$_out" | _ssm_emit "${_pairs[@]}")"
+    else
+      warn "Batched SSM read failed ($(head -1 "$_err")); reading those secrets one by one"
+      for _n in "${_names[@]:$_i:10}"; do
+        _out=$(aws ssm get-parameter --name "$_n" --with-decryption --output json 2>/dev/null) || continue
+        eval "$(printf '%s' "$_out" | _ssm_emit "${_pairs[@]}")"
+      done
+    fi
+    _i=$((_i + 10))
+  done
+  rm -f "$_err"
+}
+
 # ─── 1. Check prerequisites ───────────────────────────────────────
 
 log "Checking prerequisites..."
@@ -118,11 +254,12 @@ command -v docker  >/dev/null 2>&1 || missing+=(docker)
 command -v uv      >/dev/null 2>&1 || missing+=(uv)
 command -v node    >/dev/null 2>&1 || missing+=(node)
 command -v npm     >/dev/null 2>&1 || missing+=(npm)
+command -v process-compose >/dev/null 2>&1 || missing+=(process-compose)
 
 if [[ ${#missing[@]} -gt 0 ]]; then
   err "Missing required tools: ${missing[*]}
   Install them:
-    brew install docker uv node tmux"
+    brew install docker uv node f1bonacc1/tap/process-compose"
 fi
 
 docker info >/dev/null 2>&1 || err "Docker daemon is not running"
@@ -227,15 +364,20 @@ printf "${CYAN}│${RESET}                                                      
 printf "${CYAN}│${RESET}  Infrastructure:                                       ${CYAN}│${RESET}\n"
 printf "${CYAN}│${RESET}    ${GREEN}✓${RESET} PostgreSQL (console)       ${DIM}(Docker, localhost:5401)${RESET}\n"
 printf "${CYAN}│${RESET}    ${GREEN}✓${RESET} PostgreSQL (docstore)      ${DIM}(Docker, localhost:5402; also holds checkpoints)${RESET}\n"
-printf "${CYAN}│${RESET}    ${GREEN}✓${RESET} Model Gateway   ${DIM}(LiteLLM proxy, Docker, localhost:${LLM_GATEWAY_PORT:-4000}; tab + logs/litellm.log)${RESET}\n"
+printf "${CYAN}│${RESET}    ${GREEN}✓${RESET} Model Gateway   ${DIM}(LiteLLM proxy, Docker, localhost:${LLM_GATEWAY_PORT}; process 'gateway')${RESET}\n"
 if [[ "$_OIDC_MODE" == "local" ]]; then
   printf "${CYAN}│${RESET}    ${GREEN}✓${RESET} Keycloak        ${DIM}(Docker, localhost:8180)${RESET}\n"
 else
   printf "${CYAN}│${RESET}    ${DIM}✗ Keycloak        (skipped — using remote OIDC)${RESET}\n"
 fi
 printf "${CYAN}│${RESET}    ${GREEN}✓${RESET} DB migrations   ${DIM}(Rambler, auto-applied)${RESET}\n"
-printf "${CYAN}│${RESET}    ${GREEN}✓${RESET} Slack (FE+BE)   ${DIM}(Docker)${RESET}\n"
-printf "${CYAN}│${RESET}    ${GREEN}✓${RESET} Google Chat     ${DIM}(Node.js)${RESET}\n"
+if [[ "$_SLOT" == 0 ]]; then
+  printf "${CYAN}│${RESET}    ${GREEN}✓${RESET} Slack (FE+BE)   ${DIM}(Docker)${RESET}\n"
+  printf "${CYAN}│${RESET}    ${GREEN}✓${RESET} Google Chat     ${DIM}(Node.js)${RESET}\n"
+else
+  printf "${CYAN}│${RESET}    ${DIM}✗ Slack, Google Chat (slot 0 only)${RESET}\n"
+  printf "${CYAN}│${RESET}    ${GREEN}✓${RESET} Slot $_SLOT          ${DIM}(ports 4${_SLOT}000-4${_SLOT}999, databases $_DB_CONSOLE/$_DB_DOCSTORE)${RESET}\n"
+fi
 
 printf "${CYAN}│${RESET}                                                        ${CYAN}│${RESET}\n"
 
@@ -244,8 +386,8 @@ printf "${CYAN}│${RESET}                                                      
 if [[ -n "$_DEBUG_MODE" ]]; then
   printf "${CYAN}│${RESET}  Debugging:                                            ${CYAN}│${RESET}\n"
   printf "${CYAN}│${RESET}    ${GREEN}✓${RESET} debugpy enabled ${DIM}(attach via VS Code launch.json)${RESET}\n"
-  printf "${CYAN}│${RESET}    ${DIM}  backend=5678 orchestrator=5679${RESET}\n"
-  printf "${CYAN}│${RESET}    ${DIM}  runner=5682 voice-agent=5683${RESET}\n"
+  printf "${CYAN}│${RESET}    ${DIM}  backend=${_P_DBG_BACKEND} orchestrator=${_P_DBG_ORCHESTRATOR}${RESET}\n"
+  printf "${CYAN}│${RESET}    ${DIM}  runner=${_P_DBG_RUNNER} voice-agent=${_P_DBG_VOICE}${RESET}\n"
   printf "${CYAN}│${RESET}                                                        ${CYAN}│${RESET}\n"
 fi
 
@@ -283,8 +425,12 @@ printf "${CYAN}└────────────────────�
 printf "\n"
 
 # Confirm
-printf "${CYAN}▸ Proceed? [Y/n] ${RESET}"
-read -r _confirm
+if [[ -n "$_HEADLESS" || -n "$_ASSUME_YES" ]]; then
+  _confirm=Y
+else
+  printf "${CYAN}▸ Proceed? [Y/n] ${RESET}"
+  read -r _confirm
+fi
 if [[ "${_confirm:-Y}" =~ ^[Nn] ]]; then
   log "Aborted. Set env vars and re-run (or put them in .env at the repo root):"
   printf "\n"
@@ -374,17 +520,41 @@ TWILIO_VERIFY_API_SECRET="${TWILIO_VERIFY_API_SECRET:-}"
 if [[ "$_HAS_AWS" == true ]]; then
   log "Fetching secrets from AWS SSM (profile: $AWS_PROFILE)..."
 
+  _SSM_PAIRS=(
+    _SSM_AZURE=/nannos/azure-ai-api-key
+    _SSM_GCP=/nannos/infrastructure-agents/gcp-key
+    _SSM_LANGSMITH=/nannos/infrastructure-agents/langsmith-api-key
+    _SSM_GOAUTH_ID=/nannos/infrastructure-agents/google-oauth-client-id
+    _SSM_GOAUTH_SECRET=/nannos/infrastructure-agents/google-oauth-client-secret
+    _SSM_TWILIO_SID=/nannos/twilio/account-sid
+    _SSM_TWILIO_KEY=/nannos/twilio/api-key
+    _SSM_TWILIO_SECRET=/nannos/twilio/api-secret
+    _SSM_TWILIO_VSID=/nannos/twilio/verify-service-sid
+    _SSM_TWILIO_VKEY=/nannos/twilio/verify-api-key
+    _SSM_TWILIO_VSECRET=/nannos/twilio/verify-api-secret
+  )
+  # The remote-OIDC client secrets ride in the same batch (read in "OIDC configuration" below).
+  if [[ "$_OIDC_MODE" == "remote-ssm" ]]; then
+    _SSM_PAIRS+=(
+      _SSM_KC_CONSOLE=/nannos/keycloak/agent-console-client-secret
+      _SSM_KC_ORCHESTRATOR=/nannos/keycloak/orchestrator-secret
+      _SSM_KC_ADMIN=/nannos/keycloak/nannos-admin-secret
+      _SSM_KC_RUNNER=/nannos/keycloak/agent-runner-secret
+    )
+  fi
+  _ssm_load "${_SSM_PAIRS[@]}"
+
   # One Azure resource: the Nannos AI Foundry one. A key already set (e.g. in .env) wins.
   if [[ -z "$AZURE_AI_API_KEY" && -z "$AZURE_OPENAI_API_KEY" ]]; then
-    if _AZURE_KEY=$(aws ssm get-parameter --name /nannos/azure-ai-api-key --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
-      AZURE_AI_API_KEY="$_AZURE_KEY"
+    if [[ -n "${_SSM_AZURE:-}" ]]; then
+      AZURE_AI_API_KEY="$_SSM_AZURE"
     else
       warn "Could not fetch /nannos/azure-ai-api-key from SSM — Azure models disabled"
     fi
   fi
 
-  if _GCP_KEY=$(aws ssm get-parameter --name /nannos/infrastructure-agents/gcp-key --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
-    GCP_KEY="$_GCP_KEY"
+  if [[ -n "${_SSM_GCP:-}" ]]; then
+    GCP_KEY="$_SSM_GCP"
     GCP_PROJECT_ID="rcplus-alloy-gcp"
     GCP_LOCATION="global"
     ok "GCP Vertex AI configured"
@@ -393,8 +563,8 @@ if [[ "$_HAS_AWS" == true ]]; then
   fi
 
   if [[ -z "${LANGSMITH_API_KEY:-}" ]]; then
-    if _LS_KEY=$(aws ssm get-parameter --name /nannos/infrastructure-agents/langsmith-api-key --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
-      LANGSMITH_API_KEY="$_LS_KEY"
+    if [[ -n "${_SSM_LANGSMITH:-}" ]]; then
+      LANGSMITH_API_KEY="$_SSM_LANGSMITH"
       LANGSMITH_TRACING="true"
       LANGSMITH_ENDPOINT="https://eu.api.smith.langchain.com"
       LANGSMITH_PROJECT="dev-nannos-agent-framework"
@@ -414,41 +584,31 @@ if [[ "$_HAS_AWS" == true ]]; then
   CATALOG_THUMBNAILS_S3_BUCKET="dev-nannos-infrastructure-agents-catalog-thumbnails"
 
   # Google OAuth for catalog Drive sync (optional)
-  if _GOAUTH_ID=$(aws ssm get-parameter --name /nannos/infrastructure-agents/google-oauth-client-id --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
-    GOOGLE_OAUTH_CLIENT_ID="$_GOAUTH_ID"
+  if [[ -n "${_SSM_GOAUTH_ID:-}" ]]; then
+    GOOGLE_OAUTH_CLIENT_ID="$_SSM_GOAUTH_ID"
     ok "Google OAuth client ID loaded from SSM"
   else
     warn "Could not fetch Google OAuth client ID from SSM — catalog Drive sync disabled"
   fi
-  if _GOAUTH_SECRET=$(aws ssm get-parameter --name /nannos/infrastructure-agents/google-oauth-client-secret --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
-    GOOGLE_OAUTH_CLIENT_SECRET="$_GOAUTH_SECRET"
+  if [[ -n "${_SSM_GOAUTH_SECRET:-}" ]]; then
+    GOOGLE_OAUTH_CLIENT_SECRET="$_SSM_GOAUTH_SECRET"
     ok "Google OAuth client secret loaded from SSM"
   else
     warn "Could not fetch Google OAuth client secret from SSM"
   fi
 
   # Twilio credentials (optional — needed for voice agent + phone verification)
-  if _TWILIO_SID=$(aws ssm get-parameter --name /nannos/twilio/account-sid --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
-    TWILIO_ACCOUNT_SID="$_TWILIO_SID"
+  if [[ -n "${_SSM_TWILIO_SID:-}" ]]; then
+    TWILIO_ACCOUNT_SID="$_SSM_TWILIO_SID"
     ok "Twilio Account SID loaded from SSM"
   else
     warn "Could not fetch Twilio Account SID from SSM — voice calls and phone verification disabled"
   fi
-  if _TWILIO_KEY=$(aws ssm get-parameter --name /nannos/twilio/api-key --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
-    TWILIO_API_KEY="$_TWILIO_KEY"
-  fi
-  if _TWILIO_SECRET=$(aws ssm get-parameter --name /nannos/twilio/api-secret --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
-    TWILIO_API_SECRET="$_TWILIO_SECRET"
-  fi
-  if _TWILIO_VSID=$(aws ssm get-parameter --name /nannos/twilio/verify-service-sid --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
-    TWILIO_VERIFY_SERVICE_SID="$_TWILIO_VSID"
-  fi
-  if _TWILIO_VKEY=$(aws ssm get-parameter --name /nannos/twilio/verify-api-key --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
-    TWILIO_VERIFY_API_KEY="$_TWILIO_VKEY"
-  fi
-  if _TWILIO_VSECRET=$(aws ssm get-parameter --name /nannos/twilio/verify-api-secret --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
-    TWILIO_VERIFY_API_SECRET="$_TWILIO_VSECRET"
-  fi
+  TWILIO_API_KEY="${_SSM_TWILIO_KEY:-$TWILIO_API_KEY}"
+  TWILIO_API_SECRET="${_SSM_TWILIO_SECRET:-$TWILIO_API_SECRET}"
+  TWILIO_VERIFY_SERVICE_SID="${_SSM_TWILIO_VSID:-$TWILIO_VERIFY_SERVICE_SID}"
+  TWILIO_VERIFY_API_KEY="${_SSM_TWILIO_VKEY:-$TWILIO_VERIFY_API_KEY}"
+  TWILIO_VERIFY_API_SECRET="${_SSM_TWILIO_VSECRET:-$TWILIO_VERIFY_API_SECRET}"
 
   ok "AWS resources configured (dev environment)"
 fi
@@ -480,33 +640,14 @@ if [[ "$_OIDC_MODE" == "remote-ssm" ]]; then
   _KC_BASE_URL="${OIDC_ISSUER%/realms/*}"
   _KC_REALM="${OIDC_ISSUER##*/realms/}"
 
-  log "Fetching OIDC secrets from AWS SSM..."
-
-  if _secret=$(aws ssm get-parameter --name /nannos/keycloak/agent-console-client-secret --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
-    _OIDC_SECRET_BACKEND="$_secret"
-  else
-    err "Failed to fetch agent-console OIDC secret from SSM"
-  fi
-
-  if _secret=$(aws ssm get-parameter --name /nannos/keycloak/orchestrator-secret --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
-    _OIDC_SECRET_ORCHESTRATOR="$_secret"
-  else
-    err "Failed to fetch orchestrator OIDC secret from SSM"
-  fi
-
-  if _secret=$(aws ssm get-parameter --name /nannos/keycloak/nannos-admin-secret --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
-    _OIDC_SECRET_ADMIN="$_secret"
-  else
-    warn "Could not fetch nannos-admin secret — Keycloak group sync disabled"
-    _OIDC_SECRET_ADMIN=""
-  fi
-
-  if _secret=$(aws ssm get-parameter --name /nannos/keycloak/agent-runner-secret --output json --with-decryption 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['Parameter']['Value'])" 2>/dev/null); then
-    _OIDC_SECRET_AGENT_RUNNER="$_secret"
-  else
-    warn "Could not fetch agent-runner secret — agent runner will use backend secret"
-    _OIDC_SECRET_AGENT_RUNNER=""
-  fi
+  [[ -n "${_SSM_KC_CONSOLE:-}" ]] || err "Failed to fetch agent-console OIDC secret from SSM"
+  _OIDC_SECRET_BACKEND="$_SSM_KC_CONSOLE"
+  [[ -n "${_SSM_KC_ORCHESTRATOR:-}" ]] || err "Failed to fetch orchestrator OIDC secret from SSM"
+  _OIDC_SECRET_ORCHESTRATOR="$_SSM_KC_ORCHESTRATOR"
+  _OIDC_SECRET_ADMIN="${_SSM_KC_ADMIN:-}"
+  [[ -n "$_OIDC_SECRET_ADMIN" ]] || warn "Could not fetch nannos-admin secret — Keycloak group sync disabled"
+  _OIDC_SECRET_AGENT_RUNNER="${_SSM_KC_RUNNER:-}"
+  [[ -n "$_OIDC_SECRET_AGENT_RUNNER" ]] || warn "Could not fetch agent-runner secret — agent runner will use backend secret"
 
   ok "OIDC secrets loaded from SSM"
 
@@ -515,6 +656,7 @@ elif [[ "$_OIDC_MODE" == "remote-manual" ]]; then
   _KC_BASE_URL="${OIDC_ISSUER%/realms/*}"
   _KC_REALM="${OIDC_ISSUER##*/realms/}"
 
+  [[ -z "$_HEADLESS" ]] || err "Remote OIDC without AWS_PROFILE prompts for a secret; a headless slot cannot"
   printf "${CYAN}▸ Enter OIDC client secret (shared for all services): ${RESET}"
   read -r _shared_secret
   if [[ -z "$_shared_secret" ]]; then
@@ -542,277 +684,59 @@ else
   LOCAL_STORAGE_PATH=""
 fi
 
-# ─── 4. Start infrastructure (PostgreSQL + Keycloak) ──────────────
-
-log "Starting infrastructure..."
-
-cd "$LOCAL_DEV_DIR"
-docker compose up -d
-
-# Wait for PostgreSQL
-log "Waiting for PostgreSQL..."
-until docker compose exec -T postgres-console pg_isready -U postgres >/dev/null 2>&1; do
-  sleep 1
-done
-until docker compose exec -T postgres-docstore pg_isready -U postgres >/dev/null 2>&1; do
-  sleep 1
-done
-ok "PostgreSQL is ready"
-
-# ─── 5. Run database migrations ──────────────────────────────────
-
-log "Running database migrations (Rambler)..."
-
-CONSOLE_MIGRATIONS_IMAGE="nannos-console-migrations:local"
-DOCSTORE_MIGRATIONS_IMAGE="nannos-docstore-migrations:local"
-
-# Build both migration images
-docker build -t "$CONSOLE_MIGRATIONS_IMAGE" "$ROOT_DIR/packages/console-backend/sqlmigrations" --quiet
-docker build -t "$DOCSTORE_MIGRATIONS_IMAGE" "$ROOT_DIR/packages/orchestrator-agent/sqlmigrations" --quiet
-
-# Install pgvector extension on the docstore database
-docker run --rm \
-  --network host \
-  --user 0 \
-  --entrypoint psql \
-  -e PGPASSWORD=password \
-  "$DOCSTORE_MIGRATIONS_IMAGE" "postgresql://postgres:password@127.0.0.1:5402/docstore" -c "
-    CREATE EXTENSION IF NOT EXISTS vector;
-  "
-
-# Run console-backend migrations (public schema on port 5401)
-log "Applying console-backend migrations (db: console, port: 5401)..."
-docker run --rm \
-  --network host \
-  --user 0 \
-  -e PGHOST=127.0.0.1 \
-  -e PGPORT=5401 \
-  -e PGUSER=postgres \
-  -e PGPASSWORD=password \
-  -e PGDATABASE=console \
-  -e PGSCHEMA=public \
-  -e RAMBLER_SSLMODE=disable \
-  "$CONSOLE_MIGRATIONS_IMAGE"
-
-# Run orchestrator-agent migrations (public schema on port 5402)
-log "Applying orchestrator-agent migrations (db: docstore, port: 5402)..."
-docker run --rm \
-  --network host \
-  --user 0 \
-  -e PGHOST=127.0.0.1 \
-  -e PGPORT=5402 \
-  -e PGUSER=postgres \
-  -e PGPASSWORD=password \
-  -e PGDATABASE=docstore \
-  -e PGSCHEMA=public \
-  -e RAMBLER_SSLMODE=disable \
-  "$DOCSTORE_MIGRATIONS_IMAGE"
-
-ok "Database migrations applied"
-
-# Seed: make all users administrators for local dev
-docker compose exec -T postgres-console psql -U postgres -d console -c \
-  "UPDATE users SET is_administrator = true WHERE is_administrator = false;" \
-  >/dev/null 2>&1 || true
-
-# Seed: ensure test@local.dev user exists as admin (for first-time local dev)
-docker compose exec -T postgres-console psql -U postgres -d console -c \
-  "INSERT INTO users (id, sub, email, first_name, last_name, is_administrator, role, status, created_at, updated_at)
-   VALUES (gen_random_uuid(), 'local-test-user', 'test@local.dev', 'Test', 'User', true, 'admin', 'active', now(), now())
-   ON CONFLICT (LOWER(email)) WHERE deleted_at IS NULL DO UPDATE SET is_administrator = true, role = 'admin';" \
-  >/dev/null 2>&1 || true
-
-# ─── 6. Wait for Keycloak ────────────────────────────────────────
-
-if [[ "$_OIDC_MODE" == "local" ]]; then
-
-log "Waiting for Keycloak..."
-KEYCLOAK_RETRIES=0
-until curl -sf http://localhost:8180/realms/nannos/.well-known/openid-configuration >/dev/null 2>&1; do
-  KEYCLOAK_RETRIES=$((KEYCLOAK_RETRIES + 1))
-  if [[ $KEYCLOAK_RETRIES -ge 60 ]]; then
-    err "Keycloak did not become ready after 60s. Check: docker compose logs keycloak"
-  fi
-  sleep 1
-done
-ok "Keycloak is ready (realm: nannos)"
-
-# ─── 6b. Fix Keycloak client secrets ─────────────────────────────
-# Keycloak ignores the "secret" field in realm exports and generates random ones.
-# We force all confidential clients to use "local-secret" via the Admin API.
-
-log "Configuring Keycloak client secrets..."
-
-# Keycloak 26.x defaults the master realm to sslRequired!=NONE, blocking HTTP
-# admin token requests from the host. Disable it via kcadm.sh (internal HTTP).
-docker compose exec -T keycloak /opt/keycloak/bin/kcadm.sh update realms/master \
-  -s sslRequired=NONE \
-  --server http://localhost:8080 --realm master --user admin --password admin \
-  >/dev/null 2>&1 || warn "Could not disable master realm SSL (may already be NONE)"
-
-KC_ADMIN_TOKEN=""
-for i in $(seq 1 15); do
-  KC_ADMIN_TOKEN=$(curl -s -X POST http://localhost:8180/realms/master/protocol/openid-connect/token \
-    -d "grant_type=password" \
-    -d "client_id=admin-cli" \
-    -d "username=admin" \
-    -d "password=admin" \
-    | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('access_token',''))" || true)
-  [[ -n "$KC_ADMIN_TOKEN" ]] && break
-  sleep 2
-done
-
-if [[ -z "$KC_ADMIN_TOKEN" ]]; then
-  err "Failed to obtain Keycloak admin token after retries. Check: docker compose logs keycloak"
-fi
-
-for CLIENT_ID in agent-console orchestrator nannos-admin; do
-  # Get the internal UUID for this client
-  CLIENT_UUID=$(curl -sf -H "Authorization: Bearer $KC_ADMIN_TOKEN" \
-    "http://localhost:8180/admin/realms/nannos/clients?clientId=$CLIENT_ID" \
-    | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['id'])")
-
-  # Set the secret to "local-secret"
-  curl -sf -X PUT -H "Authorization: Bearer $KC_ADMIN_TOKEN" -H "Content-Type: application/json" \
-    "http://localhost:8180/admin/realms/nannos/clients/$CLIENT_UUID" \
-    -d "{\"secret\": \"local-secret\"}" >/dev/null
-
-done
-
-ok "Keycloak client secrets configured"
-
-# ─── 6c. Grant nannos-admin service account realm-management roles ──
-# The realm export doesn't include service account role mappings, so we
-# assign them here to allow the backend to manage groups/users in Keycloak.
-
-log "Granting nannos-admin service account roles..."
-
-NANNOS_ADMIN_UUID=$(curl -sf -H "Authorization: Bearer $KC_ADMIN_TOKEN" \
-  "http://localhost:8180/admin/realms/nannos/clients?clientId=nannos-admin" \
-  | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['id'])")
-
-# Get the service account user for nannos-admin
-SA_USER_ID=$(curl -sf -H "Authorization: Bearer $KC_ADMIN_TOKEN" \
-  "http://localhost:8180/admin/realms/nannos/clients/$NANNOS_ADMIN_UUID/service-account-user" \
-  | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
-
-# Get the realm-management client UUID
-REALM_MGMT_UUID=$(curl -sf -H "Authorization: Bearer $KC_ADMIN_TOKEN" \
-  "http://localhost:8180/admin/realms/nannos/clients?clientId=realm-management" \
-  | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['id'])")
-
-# Get available realm-management roles and assign the needed ones
-ROLES_JSON=$(curl -sf -H "Authorization: Bearer $KC_ADMIN_TOKEN" \
-  "http://localhost:8180/admin/realms/nannos/clients/$REALM_MGMT_UUID/roles")
-
-ROLES_TO_ASSIGN=$(echo "$ROLES_JSON" | python3 -c "
-import sys, json
-roles = json.load(sys.stdin)
-needed = ['manage-users', 'view-users', 'query-groups', 'query-users']
-selected = [r for r in roles if r['name'] in needed]
-print(json.dumps(selected))
-")
-
-curl -sf -X POST -H "Authorization: Bearer $KC_ADMIN_TOKEN" -H "Content-Type: application/json" \
-  "http://localhost:8180/admin/realms/nannos/users/$SA_USER_ID/role-mappings/clients/$REALM_MGMT_UUID" \
-  -d "$ROLES_TO_ASSIGN" >/dev/null
-
-ok "nannos-admin service account roles granted"
-
-else
-  log "Skipping local Keycloak (using external OIDC)"
-fi  # _OIDC_MODE
-
-# ─── 7. Install dependencies ─────────────────────────────────────
-
-log "Installing Python dependencies..."
-cd "$ROOT_DIR"
-
-# Sync all Python packages in parallel
-for pkg in orchestrator-agent agent-runner console-backend soffice-worker; do
-  (cd "packages/$pkg" && uv sync --quiet) &
-done
-(cd "packages/voice-agent" && uv sync --quiet) &
-wait
-ok "Python dependencies installed"
-
-log "Installing frontend dependencies..."
-cd "$ROOT_DIR/packages/console-frontend"
-npm install --silent 2>/dev/null
-ok "Frontend dependencies installed"
-
-# @nannos/embed-sdk is a workspace package whose exports point at dist/. The dev
-# server reads the SDK's SOURCE (serve-only aliases in the console's
-# vite.config.ts), but tsconfig has no paths mapping — so the IDE and `tsc -b`
-# still typecheck against dist/*.d.ts, and `npm run build` still bundles dist.
-# Build once here so both are valid; the "embed-sdk" mprocs process then keeps
-# only the .d.ts and the stylesheet fresh (see the note there).
-log "Building embed-sdk..."
-(cd "$ROOT_DIR/packages/embed-sdk" && npm run build --silent >/dev/null 2>&1) \
-  || err "embed-sdk build failed — run 'npm run build' in packages/embed-sdk"
-ok "embed-sdk built"
-
-# ─── 7b. Local Model Gateway (LiteLLM proxy) ───────────────────────
-# Gateway-only architecture: all LLM calls route through the proxy,
-# there is no per-provider fallback. Auto-launch a local proxy fronting whatever
-# creds / local LLM are available, and point the services at it.
-LLM_GATEWAY_PORT="${LLM_GATEWAY_PORT:-4000}"
+# ─── 4. Model Gateway configuration ──────────────────────────────
+# The gateway itself is a process of the stack (scripts/local-dev/gateway.sh); its config and
+# credentials are assembled here, where the secrets are.
+export LLM_GATEWAY_PORT
 export LLM_GATEWAY_URL="http://localhost:${LLM_GATEWAY_PORT}"
 export LLM_GATEWAY_API_KEY="sk-nannos-local"
-# Master key for the proxy management API (/model/*). Locally it equals the app key;
-# in real envs they differ (master key only on proxy + console-backend).
-# Exported so console-backend (launched via mprocs below) can register/list models.
+# Master key for the proxy management API (/model/*). Locally it equals the app key; in real envs
+# they differ (master key only on proxy + console-backend), which console-backend reads.
 export LITELLM_MASTER_KEY="${LITELLM_MASTER_KEY:-sk-nannos-local}"
-# Shared secret for proxy → console-backend cost ingestion. Exported so console-backend
-# (launched via mprocs below) accepts it on /api/v1/usage/gateway-batch-log.
+# Shared secret for proxy → console-backend cost ingestion (/api/v1/usage/gateway-batch-log).
 export GATEWAY_INGEST_TOKEN="${GATEWAY_INGEST_TOKEN:-sk-nannos-local-ingest}"
-# Pinned to match the prod base image (packages/litellm-proxy/Dockerfile) so local
-# reproduces prod's Vertex region-resolution behavior. Override with LITELLM_IMAGE.
-_LITELLM_IMAGE="${LITELLM_IMAGE:-ghcr.io/berriai/litellm:v1.103.0@sha256:bd089afdcd35b894b14a93f9743cdc8b591f82da1a38dd43a010a7b0c9de5fd7}"
-_GW_CONTAINER="nannos-litellm-proxy-local"
-
-log "Starting local Model Gateway (LiteLLM proxy) on :${LLM_GATEWAY_PORT}..."
-
-# Local gateway DB: reuse the console Postgres with a dedicated `litellm` schema
-# (mirrors the prod shared-RDS pattern). store_model_in_db lets the console register
-# models at runtime — without it /model/new returns "No DB Connected". The container
-# reaches the host Postgres (published on :5401) via host.docker.internal.
-export LITELLM_DATABASE_URL="${LITELLM_DATABASE_URL:-postgresql://postgres:password@host.docker.internal:5401/console?schema=litellm}"
-# Run from $LOCAL_DEV_DIR — that's where the compose project lives (cwd has since
-# moved to a package dir, so `docker compose` must be pointed back at it).
-( cd "$LOCAL_DEV_DIR" && docker compose exec -T postgres-console psql -U postgres -d console \
-  -c "CREATE SCHEMA IF NOT EXISTS litellm;" ) >/dev/null 2>&1 \
-  && ok "Gateway DB schema 'litellm' ready (console Postgres)" \
-  || warn "Could not pre-create the litellm schema; the proxy will attempt it on boot"
+# Pinned to match the prod base image (packages/litellm-proxy/Dockerfile) so local reproduces
+# prod's Vertex region-resolution behavior. Override with LITELLM_IMAGE.
+export NANNOS_LITELLM_IMAGE="${LITELLM_IMAGE:-ghcr.io/berriai/litellm:v1.103.0@sha256:bd089afdcd35b894b14a93f9743cdc8b591f82da1a38dd43a010a7b0c9de5fd7}"
+# Local gateway DB: the stack's console database, `litellm` schema (created by migrate-console;
+# mirrors the prod shared-RDS pattern). store_model_in_db lets the console register models at
+# runtime — without it /model/new returns "No DB Connected". The container reaches the host
+# Postgres (published on :5401) via host.docker.internal.
+export LITELLM_DATABASE_URL="${LITELLM_DATABASE_URL:-postgresql://postgres:password@host.docker.internal:5401/${_DB_CONSOLE}?schema=litellm}"
+# A slot's gateway keeps its registrations in its own database, whatever the environment says: a
+# shared one would share model registrations and tier chains between stacks (ADR-0016).
+[[ "$_SLOT" == 0 ]] || LITELLM_DATABASE_URL="postgresql://postgres:password@host.docker.internal:5401/${_DB_CONSOLE}?schema=litellm"
 
 # Resolve a path to its physical location (symlinks expanded).
 #
-# On macOS /tmp is a symlink to /private/tmp. Docker Desktop shares the physical
-# path, so bind-mounting a /tmp/... path can silently create an empty DIRECTORY
-# inside the VM instead of mounting the file. The proxy then dies with
-# "IsADirectoryError: '/etc/litellm/config.yaml'", and the GCP service-account
-# mount below fails *silently* — GOOGLE_APPLICATION_CREDENTIALS ends up pointing
-# at a directory, so Vertex auth just doesn't work with nothing in the logs.
+# On macOS /tmp is a symlink to /private/tmp. Docker Desktop shares the physical path, so
+# bind-mounting a /tmp/... path can silently create an empty DIRECTORY inside the VM instead of
+# mounting the file. The proxy then dies with "IsADirectoryError: '/etc/litellm/config.yaml'", and
+# the GCP service-account mount fails *silently* — GOOGLE_APPLICATION_CREDENTIALS ends up pointing
+# at a directory, so Vertex auth just doesn't work with nothing in the logs. The files live in the
+# stack directory now, but $HOME (or NANNOS_SLOTS_DIR) can be a symlink too.
 #
 # `pwd -P` is POSIX and a no-op on Linux, where /tmp is a real directory.
 _physical_path() { cd "$(dirname "$1")" && printf '%s/%s\n' "$(pwd -P)" "$(basename "$1")"; }
 
-# Generate the local gateway config on the fly (ephemeral, never committed — the assembled
-# config is deployment-specific). Three sources, each owning what only it can own:
+mkdir -p "$_STACK_DIR/gateway"
+# The config holds a local LLM's API key and the SA file a GCP key: this user's eyes only.
+chmod 700 "$_STACK_DIR/gateway"
+
+# The gateway config is assembled for this start (never committed — it is deployment-specific).
+# Three sources, each owning what only it can own:
 #   settings     -> packages/litellm-proxy/litellm-settings.yaml (shared with deployments)
 #   general_*    -> inline below (names env vars that differ per environment)
 #   model_list   -> $LITELLM_LOCAL_MODELS_FILE when set, else the committed example.
-_GW_CONFIG=$(_physical_path "$(mktemp /tmp/nannos-litellm-XXXXXX).yaml")
+_GW_CONFIG="$(_physical_path "$_STACK_DIR/gateway/config.yaml")"
 
-# Settings come from the committed, SHARED settings file — the same blocks a deployment's
-# own config.yaml is expected to carry. Do not inline them here: they used to live in this
-# heredoc AND in each deployment's mounted config, kept in step only by comments claiming they
-# matched. Nothing verifies such a claim, and a deployment left on num_retries: 0 has no
-# retries and no failover at all (nannos#204).
+# Settings come from the committed, SHARED settings file — the same blocks a deployment's own
+# config.yaml is expected to carry. Do not inline them here: they used to live in this script AND
+# in each deployment's mounted config, kept in step only by comments claiming they matched.
+# Nothing verifies such a claim, and a deployment left on num_retries: 0 has no retries and no
+# failover at all (nannos#204).
 _GW_SETTINGS="$ROOT_DIR/packages/litellm-proxy/litellm-settings.yaml"
-if [[ ! -f "$_GW_SETTINGS" ]]; then
-  err "Missing gateway settings file: $_GW_SETTINGS"
-fi
+[[ -f "$_GW_SETTINGS" ]] || err "Missing gateway settings file: $_GW_SETTINGS"
 cat "$_GW_SETTINGS" > "$_GW_CONFIG"
 
 # general_settings stays here: it names env vars that legitimately differ per environment
@@ -825,8 +749,8 @@ general_settings:
   database_url: os.environ/LITELLM_DATABASE_URL
 EOF
 
-# model_list: deployment-specific (model ids, regions, provider deployments), so it lives in
-# a gitignored YAML file rather than this committed script. Resolution order:
+# model_list: deployment-specific (model ids, regions, provider deployments), so it lives in a
+# gitignored YAML file rather than this committed script. Resolution order:
 #   1. $LITELLM_LOCAL_MODELS_FILE if set, else ./litellm-local-models.yaml (gitignored)
 #   2. ./litellm-local-models.example.yaml (committed template) as a fallback
 #   3. empty model_list (register models at runtime via the Model Gateway admin UI)
@@ -858,115 +782,118 @@ if [[ "$_HAS_LOCAL_LLM" == true ]]; then
 EOF
   ok "Gateway: local model '${OPENAI_COMPATIBLE_MODEL:-default}' → ${_GW_LOCAL_BASE}"
 fi
+export NANNOS_GW_CONFIG="$_GW_CONFIG"
 
-# When using an AWS profile, export its (temporary) credentials so the container
-# can reach Bedrock — the SDK profile/SSO chain isn't visible inside the container.
-_GW_AWS_ENV=()
+# The profile's (temporary) credentials, for the gateway container to reach Bedrock: the SDK's
+# profile/SSO chain isn't visible inside it. Under their own names, so only the gateway gets them;
+# the services keep resolving the profile, which refreshes.
+unset NANNOS_GW_AWS_ACCESS_KEY_ID NANNOS_GW_AWS_SECRET_ACCESS_KEY NANNOS_GW_AWS_SESSION_TOKEN
 if [[ "$_HAS_AWS" == true ]]; then
-  if _CREDS=$(aws configure export-credentials --profile "$AWS_PROFILE" --format env 2>/dev/null); then
-    eval "$_CREDS"
-    _GW_AWS_ENV=(-e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN)
+  if _CREDS=$(aws configure export-credentials --profile "$AWS_PROFILE" --format process 2>/dev/null); then
+    eval "$(printf '%s' "$_CREDS" | python3 -c '
+import json, shlex, sys
+c = json.load(sys.stdin)
+for var, key in (("ACCESS_KEY_ID", "AccessKeyId"), ("SECRET_ACCESS_KEY", "SecretAccessKey"), ("SESSION_TOKEN", "SessionToken")):
+    if c.get(key):
+        print(f"export NANNOS_GW_AWS_{var}={shlex.quote(c[key])}")
+')"
   else
     warn "Could not export AWS credentials for the gateway — Bedrock models may not work locally"
   fi
 fi
 
-# Pod-level Vertex auth via ADC, mirroring deployment (k8s projects GCP_KEY to a file and points
-# GOOGLE_APPLICATION_CREDENTIALS at it; see the gitops litellm-proxy.yaml). Write the SA JSON to a
-# temp file and mount it so google.auth.default() resolves Vertex creds for BOTH config-defined and
-# runtime-registered (DB) models — the latter do NOT resolve os.environ/GCP_KEY, exactly as in
-# deployment, which is why console registrations must carry no vertex_credentials. Pointing ADC at
-# a real file also avoids the GCE-metadata-probe hang you get when only GCP_KEY is set. (The GCP_KEY
-# env below stays for config-defined model_list entries that still reference os.environ/GCP_KEY.)
-_GW_GCP_ENV=()
+# Pod-level Vertex auth via ADC, mirroring deployment: see scripts/local-dev/gateway.sh.
+unset NANNOS_GW_GCP_SA
+rm -f "$_STACK_DIR/gateway/gcp-sa.json"
 if [[ -n "${GCP_KEY:-}" ]]; then
-  _GW_GCP_SA=$(_physical_path "$(mktemp /tmp/nannos-litellm-gcp-XXXXXX).json")
-  printf '%s' "$GCP_KEY" > "$_GW_GCP_SA"
-  _GW_GCP_ENV=(-v "$_GW_GCP_SA:/secrets/gcp/sa.json:ro" -e GOOGLE_APPLICATION_CREDENTIALS=/secrets/gcp/sa.json)
+  (umask 077 && printf '%s' "$GCP_KEY" > "$_STACK_DIR/gateway/gcp-sa.json")
+  export NANNOS_GW_GCP_SA="$(_physical_path "$_STACK_DIR/gateway/gcp-sa.json")"
 fi
 
-docker rm -f "$_GW_CONTAINER" >/dev/null 2>&1 || true
-docker run -d --name "$_GW_CONTAINER" \
-  -p "${LLM_GATEWAY_PORT}:4000" \
-  --add-host=host.docker.internal:host-gateway \
-  -v "$_GW_CONFIG:/etc/litellm/config.yaml:ro" \
-  -v "$ROOT_DIR/packages/litellm-proxy/custom_logger.py:/etc/litellm/custom_logger.py:ro" \
-  -v "$ROOT_DIR/packages/ringier-a2a-sdk/ringier_a2a_sdk/model_capabilities.py:/etc/litellm/nannos_model_capabilities.py:ro" \
-  -e PYTHONPATH=/etc/litellm \
-  -e LITELLM_MASTER_KEY="$LLM_GATEWAY_API_KEY" \
-  -e LITELLM_DATABASE_URL="$LITELLM_DATABASE_URL" \
-  -e UI_USERNAME="${LITELLM_UI_USERNAME:-admin}" \
-  -e UI_PASSWORD="${LITELLM_UI_PASSWORD:-sk-nannos-local}" \
-  -e AWS_BEDROCK_REGION="${AWS_BEDROCK_REGION:-eu-central-1}" \
-  -e AWS_REGION="${AWS_BEDROCK_REGION:-eu-central-1}" \
-  "${_GW_AWS_ENV[@]}" \
-  -e AZURE_API_BASE="${AZURE_API_BASE:-}" \
-  -e AZURE_OPENAI_API_KEY="${AZURE_OPENAI_API_KEY:-}" \
-  -e AZURE_AI_API_BASE="${AZURE_AI_API_BASE:-}" \
-  -e AZURE_AI_API_KEY="${AZURE_AI_API_KEY:-}" \
-  -e GCP_PROJECT_ID="${GCP_PROJECT_ID:-}" \
-  -e GCP_KEY="${GCP_KEY:-}" \
-  "${_GW_GCP_ENV[@]}" \
-  -e DEFAULT_VERTEXAI_LOCATION="${DEFAULT_VERTEXAI_LOCATION:-eu}" \
-  -e CONSOLE_BACKEND_URL="http://host.docker.internal:${CONSOLE_BACKEND_PORT}" \
-  -e GATEWAY_INGEST_TOKEN="$GATEWAY_INGEST_TOKEN" \
-  "$_LITELLM_IMAGE" --config /etc/litellm/config.yaml --port 4000 >/dev/null
+# ─── 5. Stack environment ─────────────────────────────────────────
+# What scripts/local-dev/process-compose.yaml reads (see its header), and what every process of
+# the stack inherits. Values that differ between services are set per process there.
 
-# Wait for the gateway to come up.
-for _i in $(seq 1 30); do
-  if curl -sf "http://localhost:${LLM_GATEWAY_PORT}/health/liveliness" >/dev/null 2>&1; then
-    ok "Model Gateway ready at $LLM_GATEWAY_URL"
-    ok "  LiteLLM admin UI: ${LLM_GATEWAY_URL}/ui (user: ${LITELLM_UI_USERNAME:-admin} / pass: ${LITELLM_UI_PASSWORD:-sk-nannos-local})"
-    break
-  fi
-  if [[ "$_i" == "30" ]]; then
-    err "Model Gateway did not become ready. Check: docker logs $_GW_CONTAINER"
-  fi
-  sleep 2
-done
-
-# ─── 8. Launch services via mprocs ─────────────────────────────────
-
-cd "$ROOT_DIR"
-
-log "Starting all services with mprocs..."
-printf "\n"
-
-# ── Create logs directory ──
-_LOG_DIR="$ROOT_DIR/logs"
-mkdir -p "$_LOG_DIR"
-
-# ── Resolve optional env vars ──
-# OPENAI_COMPATIBLE_* are gateway-config inputs only (a `local` model_list alias, see
-# above) — they're NOT exported to the services, which reach the local model through the
-# gateway like any other provider. Kept as plain shell vars for the status line.
-OPENAI_COMPATIBLE_BASE_URL="${OPENAI_COMPATIBLE_BASE_URL:-}"
-OPENAI_COMPATIBLE_MODEL="${OPENAI_COMPATIBLE_MODEL:-}"
+# OPENAI_COMPATIBLE_* are gateway-config inputs only (the `local` model above) — the services
+# reach the local model through the gateway like any other provider.
+unset OPENAI_COMPATIBLE_BASE_URL OPENAI_COMPATIBLE_MODEL OPENAI_COMPATIBLE_API_KEY
 export MCP_GATEWAY_URL="${MCP_GATEWAY_URL:-}"
 export MCP_GATEWAY_CLIENT_ID="${MCP_GATEWAY_CLIENT_ID:-gatana}"
 export LANGSMITH_TRACING="${LANGSMITH_TRACING:-false}"
-export LANGSMITH_API_KEY="${LANGSMITH_API_KEY:-}"
-export LANGSMITH_PROJECT="${LANGSMITH_PROJECT:-}"
-export LANGSMITH_ENDPOINT="${LANGSMITH_ENDPOINT:-}"
-export LANGSMITH_ORGANIZATION_ID="${LANGSMITH_ORGANIZATION_ID:-}"
+export LANGSMITH_API_KEY="${LANGSMITH_API_KEY:-}" LANGSMITH_PROJECT="${LANGSMITH_PROJECT:-}"
+export LANGSMITH_ENDPOINT="${LANGSMITH_ENDPOINT:-}" LANGSMITH_ORGANIZATION_ID="${LANGSMITH_ORGANIZATION_ID:-}"
 export LANGSMITH_PROJECT_ID="${LANGSMITH_PROJECT_ID:-}"
-export CATALOG_VECTOR_BUCKET_NAME="${CATALOG_VECTOR_BUCKET_NAME:-}"
-export CATALOG_THUMBNAILS_S3_BUCKET="${CATALOG_THUMBNAILS_S3_BUCKET:-}"
-export GOOGLE_OAUTH_CLIENT_ID="${GOOGLE_OAUTH_CLIENT_ID:-}"
-export GOOGLE_OAUTH_CLIENT_SECRET="${GOOGLE_OAUTH_CLIENT_SECRET:-}"
-export TWILIO_ACCOUNT_SID="${TWILIO_ACCOUNT_SID:-}"
-export TWILIO_API_KEY="${TWILIO_API_KEY:-}"
-export TWILIO_API_SECRET="${TWILIO_API_SECRET:-}"
-export TWILIO_VERIFY_SERVICE_SID="${TWILIO_VERIFY_SERVICE_SID:-}"
-export TWILIO_VERIFY_API_KEY="${TWILIO_VERIFY_API_KEY:-}"
-export TWILIO_VERIFY_API_SECRET="${TWILIO_VERIFY_API_SECRET:-}"
+export AZURE_OPENAI_API_KEY AZURE_API_BASE AZURE_AI_API_KEY AZURE_AI_API_BASE AWS_BEDROCK_REGION
+export GCP_KEY GCP_PROJECT_ID GCP_LOCATION
+export CHECKPOINT_S3_BUCKET_NAME DOCUMENT_STORE_S3_BUCKET FILES_S3_BUCKET
+export OBJECT_STORAGE_TYPE LOCAL_STORAGE_BASE_URL LOCAL_STORAGE_PATH
+export CATALOG_VECTOR_BUCKET_NAME CATALOG_THUMBNAILS_S3_BUCKET
+export GOOGLE_OAUTH_CLIENT_ID GOOGLE_OAUTH_CLIENT_SECRET
+export TWILIO_ACCOUNT_SID TWILIO_API_KEY TWILIO_API_SECRET
+export TWILIO_VERIFY_SERVICE_SID TWILIO_VERIFY_API_KEY TWILIO_VERIFY_API_SECRET
+export AUTO_APPROVE_MAX_SYSTEM_PROMPT_LENGTH="${AUTO_APPROVE_MAX_SYSTEM_PROMPT_LENGTH:-500}"
+export AUTO_APPROVE_MAX_MCP_TOOLS_COUNT="${AUTO_APPROVE_MAX_MCP_TOOLS_COUNT:-3}"
+# Enable the wasm-sandboxed 'eval' REPL. When on, the orchestrator reaches all its tools through
+# 'eval' (opinionated single exposure model — see graph_factory); when off, tools stay natively
+# bound. Set in the repo-root .env.
+export CODE_INTERPRETER_PTC="${CODE_INTERPRETER_PTC:-0}"
+export PUBLIC_URL="${PUBLIC_URL:-}"
+# Optional settings reach the services only when set: an empty one is not "unset" to them
+# (agent-runner's sandbox pool fails on int("") of an empty SANDBOX_POOL_CAPACITY).
+for _var in SANDBOX_PROVIDER SANDBOX_POOL_CAPACITY SANDBOX_WARM_TTL GATANA_ORG_ID GATANA_API_KEY GATANA_ORG_CAPACITY; do
+  if [[ -n "${!_var:-}" ]]; then export "${_var?}"; else unset "$_var"; fi
+done
 
-# ── Generate mprocs config ──
-MPROCS_CFG=$(mktemp /tmp/nannos-mprocs-XXXXXX)
-mv "$MPROCS_CFG" "${MPROCS_CFG}.yaml"
-MPROCS_CFG="${MPROCS_CFG}.yaml"
+export NANNOS_ROOT="$ROOT_DIR" NANNOS_SLOT="$_SLOT" NANNOS_STACK_DIR="$_STACK_DIR" NANNOS_LOG_DIR="$_LOG_DIR"
+export NANNOS_FRONTEND_PORT="$_P_FRONTEND" NANNOS_ORCHESTRATOR_PORT="$_P_ORCHESTRATOR"
+export NANNOS_RUNNER_PORT="$_P_RUNNER" NANNOS_VOICE_PORT="$_P_VOICE" NANNOS_SOFFICE_PORT="$_P_SOFFICE"
+export NANNOS_FRONTEND_URL="$_FRONTEND_URL"
+export NANNOS_DB_CONSOLE="$_DB_CONSOLE" NANNOS_DB_DOCSTORE="$_DB_DOCSTORE"
+export NANNOS_GW_CONTAINER="$_GW_CONTAINER" NANNOS_GROUP_PREFIX="$_GROUP_PREFIX"
+export NANNOS_OIDC_MODE="$_OIDC_MODE" NANNOS_OIDC_ISSUER="$_OIDC_ISSUER"
+export NANNOS_OIDC_SECRET_BACKEND="$_OIDC_SECRET_BACKEND" NANNOS_OIDC_SECRET_ORCHESTRATOR="$_OIDC_SECRET_ORCHESTRATOR"
+export NANNOS_OIDC_SECRET_ADMIN="$_OIDC_SECRET_ADMIN" NANNOS_OIDC_SECRET_RUNNER="$_OIDC_SECRET_AGENT_RUNNER"
+export NANNOS_CATALOG_AUTO_SYNC=true
+export NANNOS_MEMPROFILE_ARGS="${_MEMPROFILE:+-m memray run --native --follow-fork -o memray-worker.bin}"
+for _svc in BACKEND ORCHESTRATOR RUNNER VOICE; do
+  _var="_P_DBG_${_svc}"
+  if [[ -n "$_DEBUG_MODE" ]]; then
+    export "NANNOS_DEBUGPY_${_svc}=-m debugpy --listen 0.0.0.0:${!_var}"
+  else
+    export "NANNOS_DEBUGPY_${_svc}="
+  fi
+done
+if [[ "$_SLOT" == 0 ]]; then
+  export NANNOS_CHANNEL_CLIENTS_OFF=false
+else
+  export NANNOS_CHANNEL_CLIENTS_OFF=true
+fi
 
-# Build scenario label for info panel
+# The stack's summary: what `just up` prints, `just slots` reads, and the `info` process shows.
+python3 - "$_STACK_DIR/stack.json" <<PYJSON
+import json, sys
+summary = {
+    "slot": $_SLOT,
+    "worktree": "$ROOT_DIR",
+    "console": "$_FRONTEND_URL",
+    "backend": "http://localhost:$CONSOLE_BACKEND_PORT",
+    "orchestrator": "http://localhost:$_P_ORCHESTRATOR",
+    "runner": "http://localhost:$_P_RUNNER",
+    "voice-agent": "http://localhost:$_P_VOICE",
+    "gateway": "http://localhost:$LLM_GATEWAY_PORT",
+    "databases": {"console": "$_DB_CONSOLE", "docstore": "$_DB_DOCSTORE"},
+    "postgres": {"console": "localhost:5401", "docstore": "localhost:5402"},
+    "idp": "$_OIDC_ISSUER",
+    "logs": "$_LOG_DIR",
+    "control": "process-compose attach -u $_SOCK",
+}
+if "$_DEBUG_MODE":
+    summary["debugpy"] = {"backend": $_P_DBG_BACKEND, "orchestrator": $_P_DBG_ORCHESTRATOR, "runner": $_P_DBG_RUNNER, "voice-agent": $_P_DBG_VOICE}
+with open(sys.argv[1], "w") as f:
+    json.dump(summary, f, indent=2)
+PYJSON
+
+# Build scenario label for the info process
 if [[ "$_OIDC_MODE" == "remote-ssm" ]]; then
   _SCENARIO="Local + AWS + Remote OIDC"
 elif [[ "$_OIDC_MODE" == "remote-manual" ]]; then
@@ -976,358 +903,85 @@ elif [[ "$_HAS_AWS" == true ]]; then
 else
   _SCENARIO="Full Local"
 fi
-
-# Build LLM lines
-_LLM_LINES=""
-if [[ "$_HAS_LOCAL_LLM" == true ]]; then
-  _line="Local LLM: ${OPENAI_COMPATIBLE_BASE_URL:-}"
-  [[ -n "${OPENAI_COMPATIBLE_MODEL:-}" ]] && _line="$_line (model: $OPENAI_COMPATIBLE_MODEL)"
-  _LLM_LINES="    ✓ $_line"$'\n'
-fi
-if [[ "$_HAS_AWS" == true ]]; then
-  _LLM_LINES="${_LLM_LINES}    ✓ AWS Bedrock (region: $AWS_BEDROCK_REGION)"$'\n'
-  [[ -n "$GCP_KEY" ]]              && _LLM_LINES="${_LLM_LINES}    ✓ GCP Vertex AI"$'\n'
-fi
-# Azure no longer depends on AWS: the key can come from .env alone.
-[[ -n "$AZURE_AI_API_KEY" ]] && _LLM_LINES="${_LLM_LINES}    ✓ Azure (Nannos AI Foundry)"$'\n'
-
-# Build auth line
 if [[ "$_OIDC_MODE" == "local" ]]; then
   _AUTH_LINE="Local Keycloak (localhost:8180) — test@local.dev / password"
 else
   _AUTH_LINE="Remote OIDC: $_OIDC_ISSUER"
 fi
+{
+  printf '\n  Nannos local stack — slot %s (%s)\n\n' "$_SLOT" "$_SCENARIO"
+  printf '  Console ........... %s\n' "$_FRONTEND_URL"
+  printf '  Backend API ....... http://localhost:%s\n' "$CONSOLE_BACKEND_PORT"
+  printf '  Orchestrator ...... http://localhost:%s\n' "$_P_ORCHESTRATOR"
+  printf '  Agent Runner ...... http://localhost:%s\n' "$_P_RUNNER"
+  printf '  Voice Agent ....... http://localhost:%s\n' "$_P_VOICE"
+  printf '  soffice-worker .... http://localhost:%s\n' "$_P_SOFFICE"
+  printf '  Model Gateway ..... %s  (admin UI /ui: %s / %s)\n' "$LLM_GATEWAY_URL" "${LITELLM_UI_USERNAME:-admin}" "${LITELLM_UI_PASSWORD:-sk-nannos-local}"
+  printf '  Keycloak .......... %s\n' "$_KC_BASE_URL"
+  printf '  PostgreSQL ........ localhost:5401/%s, localhost:5402/%s (also holds checkpoints)\n' "$_DB_CONSOLE" "$_DB_DOCSTORE"
+  printf '\n  Authentication: %s\n' "$_AUTH_LINE"
+  if [[ -n "$_DEBUG_MODE" ]]; then
+    printf '  debugpy: backend=%s orchestrator=%s runner=%s voice-agent=%s\n' \
+      "$_P_DBG_BACKEND" "$_P_DBG_ORCHESTRATOR" "$_P_DBG_RUNNER" "$_P_DBG_VOICE"
+  fi
+  printf '\n  Logs: %s/<service>.log\n' "$_LOG_DIR"
+  printf '  Services reload when you edit code. Setup steps (infra, migrate-*, deps-*, ...) run once.\n'
+  if [[ -z "$_HEADLESS" ]]; then
+    printf '  Quit the TUI (F10, or Ctrl+C) to stop the stack.\n'
+  fi
+  printf '  From another terminal: process-compose attach -u %s\n\n' "$_SOCK"
+} > "$_STACK_DIR/info.txt"
 
-# Build optional lines
-_OPT_LINES=""
-[[ "$_HAS_MCP" == true ]] && _OPT_LINES="${_OPT_LINES}    ✓ MCP Gateway: $MCP_GATEWAY_URL"$'\n'
-[[ -n "${LANGSMITH_API_KEY:-}" ]] && _OPT_LINES="${_OPT_LINES}    ✓ LangSmith tracing enabled"$'\n'
+# ─── 6. Launch the stack (process-compose) ───────────────────────
+cd "$ROOT_DIR"
+# Each start begins its logs afresh (process-compose appends): a log shows this run only, not the
+# errors of the last one.
+rm -rf "$_STACK_DIR/ready"
+for _log in $(sed -n 's|^ *log_location: ${NANNOS_LOG_DIR}/||p' "$LOCAL_DEV_DIR/process-compose.yaml"); do
+  : > "$_LOG_DIR/$_log"
+done
+# The stack runs from a copy of its definition in the stack's directory, which is also what the
+# slot's verdict reads: a branch switch in the checkout must not change either under a running stack.
+cp "$LOCAL_DEV_DIR/process-compose.yaml" "$_STACK_DIR/process-compose.yaml"
+_PC=(process-compose -f "$_STACK_DIR/process-compose.yaml" --disable-dotenv
+     -L "$_STACK_DIR/process-compose.log" -u "$_SOCK")
+rm -f "$_SOCK"
 
-# Build debug lines
-_DEBUG_LINES=""
-if [[ -n "$_DEBUG_MODE" ]]; then
-  _DEBUG_LINES="  Debugging (debugpy):
-    backend .......... localhost:5678
-    orchestrator ..... localhost:5679
-    runner ........... localhost:5682
-    voice-agent ...... localhost:5683
-"
+# Whatever is left of an earlier run of this stack (a process that outlived its shutdown) would
+# hold a port or a database connection: stop it first.
+slot_kill_leftovers "$_SLOT"
+
+if [[ -z "$_HEADLESS" ]]; then
+  log "Starting the stack with process-compose (slot $_SLOT)..."
+  # Not exec: once the TUI is quit, stop anything of the stack that outlived the shutdown.
+  _PC_EXIT=0
+  "${_PC[@]}" up --hide-disabled || _PC_EXIT=$?
+  slot_kill_leftovers "$_SLOT"
+  rm -f "$_SOCK"
+  exit "$_PC_EXIT"
 fi
 
-# Prepare Slack
-pushd "$ROOT_DIR/packages/client-slack"
-just prepare-start
-popd
-
-# Generate the info script
-_INFO_SCRIPT=$(mktemp /tmp/nannos-info-XXXXXX)
-mv "$_INFO_SCRIPT" "${_INFO_SCRIPT}.sh"
-_INFO_SCRIPT="${_INFO_SCRIPT}.sh"
-cat > "$_INFO_SCRIPT" <<INFOSCRIPT
-#!/usr/bin/env bash
-cat <<'EOF'
-
-  ┌──────────────────────────────────────────────────────────┐
-  │  Nannos Local Development                                │
-  └──────────────────────────────────────────────────────────┘
-
-  Scenario: $_SCENARIO
-
-  Services:
-    Console ........... http://localhost:5173
-    Backend API ....... http://localhost:${CONSOLE_BACKEND_PORT}
-    Orchestrator ...... http://localhost:10001
-    Agent Runner ...... http://localhost:5005
-    Voice Agent ....... http://localhost:8002
-    soffice-worker .... http://localhost:8090
-    Model Gateway ..... $LLM_GATEWAY_URL  (LiteLLM proxy — see the 'litellm' tab)
-    Keycloak .......... $_KC_BASE_URL
-    PostgreSQL (console)       localhost:5401
-    PostgreSQL (docstore)      localhost:5402  (also holds checkpoints)
-
-  LLM Providers:
-${_LLM_LINES}
-  Authentication:
-    ✓ $_AUTH_LINE
-${_OPT_LINES:+
-  Optional:
-$_OPT_LINES}
-${_DEBUG_LINES}
-  ──────────────────────────────────────────────────────────
-
-  Getting Started:
-    1. Open http://localhost:5173 in your browser
-    2. Log in with the credentials shown above
-    3. Create or select an agent from the console
-    4. Start chatting!
-
-  Tips:
-    • Use the mprocs tabs above to switch between service logs
-    • Services auto-reload when you edit code
-    • Check individual service tabs if something looks wrong
-    • Press Ctrl+C or 'q' in mprocs to stop everything
-    • Log files: $_LOG_DIR/<service>.log
-
-  ──────────────────────────────────────────────────────────
-  MPROCS CONFIG: $MPROCS_CFG
-
-EOF
-sleep 30d
-INFOSCRIPT
-chmod +x "$_INFO_SCRIPT"
-
-cat > "$MPROCS_CFG" <<YAML
-procs:
-  info:
-    shell: "bash $_INFO_SCRIPT"
-    stop: "SIGKILL"
-
-  litellm:
-    # The Model Gateway runs as a detached Docker container (started in §7b),
-    # so it has no foreground process of its own. Stream its container logs into
-    # a tab + logs/litellm.log so it's visible alongside the other services.
-    shell: "docker logs -f $_GW_CONTAINER 2>&1 | tee $_LOG_DIR/litellm.log"
-    stop: "SIGKILL"
-
-  console-backend:
-    cwd: "$ROOT_DIR/packages/console-backend"
-    shell: "uv run python${_DEBUG_MODE:+ -m debugpy --listen 0.0.0.0:5678} -m uvicorn app:asgi_app --host 0.0.0.0 --port $CONSOLE_BACKEND_PORT --reload 2>&1 | tee $_LOG_DIR/console-backend.log"
-    env:
-      # Read back at runtime by the CORS allowlist and the loopback MCP client.
-      CONSOLE_BACKEND_PORT: "$CONSOLE_BACKEND_PORT"
-      FIRST_USER_IS_ADMIN: "true"
-      OIDC_ISSUER: "$_OIDC_ISSUER"
-      OIDC_CLIENT_ID: "agent-console"
-      OIDC_CLIENT_SECRET: "$_OIDC_SECRET_BACKEND"
-      OIDC_AUDIENCE: "agent-console"
-      ORCHESTRATOR_CLIENT_ID: "orchestrator"
-      BASE_DOMAIN: "localhost:5173"
-      FRONTEND_URL: "http://localhost:5173"
-      ORCHESTRATOR_BASE_DOMAIN: "localhost:10001"
-      ORCHESTRATOR_ENVIRONMENT: "local"
-      KEYCLOAK_ADMIN_CLIENT_ID: "nannos-admin"
-      KEYCLOAK_ADMIN_CLIENT_SECRET: "$_OIDC_SECRET_ADMIN"
-      KEYCLOAK_GROUP_NAME_PREFIX: "local-"
-      POSTGRES_HOST: "localhost"
-      POSTGRES_PORT: "5401"
-      POSTGRES_DB: "console"
-      POSTGRES_USER: "postgres"
-      POSTGRES_PASSWORD: "password"
-      POSTGRES_SCHEMA: "public"
-      SCHEDULER_TICK_INTERVAL_SECONDS: "30"
-      SCHEDULER_CLAIM_LIMIT: "10"
-      AGENT_RUNNER_URL: "http://localhost:5005"
-      LOG_LEVEL: "INFO"
-      AZURE_OPENAI_API_KEY: "$AZURE_OPENAI_API_KEY"
-      AZURE_API_BASE: "$AZURE_API_BASE"
-      AWS_BEDROCK_REGION: "$AWS_BEDROCK_REGION"
-      FILES_S3_BUCKET: "$FILES_S3_BUCKET"
-      OBJECT_STORAGE_TYPE: "$OBJECT_STORAGE_TYPE"
-      LOCAL_STORAGE_BASE_URL: "$LOCAL_STORAGE_BASE_URL"
-      LOCAL_STORAGE_PATH: "$LOCAL_STORAGE_PATH"
-      VOICE_AGENT_URL: "http://localhost:8002"
-      CATALOG_VECTOR_BUCKET_NAME: "$CATALOG_VECTOR_BUCKET_NAME"
-      CATALOG_THUMBNAILS_S3_BUCKET: "$CATALOG_THUMBNAILS_S3_BUCKET"
-      CATALOG_VECTOR_STORE_BACKEND: "s3_vectors"
-      CATALOG_SUMMARIZATION_MODEL_ID: "eu.anthropic.claude-haiku-4-5-20251001-v1:0"
-      GOOGLE_OAUTH_CLIENT_ID: "$GOOGLE_OAUTH_CLIENT_ID"
-      GOOGLE_OAUTH_CLIENT_SECRET: "$GOOGLE_OAUTH_CLIENT_SECRET"
-      GOOGLE_OAUTH_REDIRECT_URI: "http://localhost:${CONSOLE_BACKEND_PORT}/api/v1/catalogs/connect/callback"
-      TWILIO_ACCOUNT_SID: "$TWILIO_ACCOUNT_SID"
-      TWILIO_VERIFY_SERVICE_SID: "$TWILIO_VERIFY_SERVICE_SID"
-      TWILIO_VERIFY_API_KEY: "$TWILIO_VERIFY_API_KEY"
-      TWILIO_VERIFY_API_SECRET: "$TWILIO_VERIFY_API_SECRET"
-      AUTO_APPROVE_MAX_SYSTEM_PROMPT_LENGTH: "${AUTO_APPROVE_MAX_SYSTEM_PROMPT_LENGTH:-500}"
-      AUTO_APPROVE_MAX_MCP_TOOLS_COUNT: "${AUTO_APPROVE_MAX_MCP_TOOLS_COUNT:-3}"
-      LANGSMITH_ORGANIZATION_ID: "${LANGSMITH_ORGANIZATION_ID:-}"
-      LANGSMITH_PROJECT_ID: "${LANGSMITH_PROJECT_ID:-}"
-      DOCSTORE_HOST: "localhost"
-      DOCSTORE_PORT: "5402"
-      DOCSTORE_DB: "docstore"
-      DOCSTORE_USER: "postgres"
-      DOCSTORE_PASSWORD: "password"
-
-  catalog-worker:
-    cwd: "$ROOT_DIR/packages/console-backend"
-    shell: "uv run python${_MEMPROFILE:+ -m memray run --native --follow-fork -o memray-worker.bin} catalog_worker.py 2>&1 | tee $_LOG_DIR/catalog-worker.log"
-    env:
-      POSTGRES_HOST: "localhost"
-      POSTGRES_PORT: "5401"
-      POSTGRES_DB: "console"
-      POSTGRES_USER: "postgres"
-      POSTGRES_PASSWORD: "password"
-      POSTGRES_SCHEMA: "public"
-      CONSOLE_BACKEND_URL: "http://localhost:${CONSOLE_BACKEND_PORT}"
-      SOFFICE_WORKER_URL: "http://localhost:8090"
-      CATALOG_VECTOR_BUCKET_NAME: "$CATALOG_VECTOR_BUCKET_NAME"
-      CATALOG_THUMBNAILS_S3_BUCKET: "$CATALOG_THUMBNAILS_S3_BUCKET"
-      CATALOG_VECTOR_STORE_BACKEND: "s3_vectors"
-      CATALOG_SUMMARIZATION_MODEL_ID: "eu.anthropic.claude-haiku-4-5-20251001-v1:0"
-      CATALOG_AUTO_SYNC_ENABLED: "true"
-      CATALOG_SYNC_INTERVAL_SECONDS: "86400"
-      CATALOG_SYNC_TICK_INTERVAL_SECONDS: "300"
-      CATALOG_SYNC_MAX_CONCURRENT: "3"
-      CATALOG_WORKER_POLL_INTERVAL: "5"
-      GOOGLE_OAUTH_CLIENT_ID: "$GOOGLE_OAUTH_CLIENT_ID"
-      GOOGLE_OAUTH_CLIENT_SECRET: "$GOOGLE_OAUTH_CLIENT_SECRET"
-      AZURE_OPENAI_API_KEY: "$AZURE_OPENAI_API_KEY"
-      AZURE_API_BASE: "$AZURE_API_BASE"
-      AWS_BEDROCK_REGION: "$AWS_BEDROCK_REGION"
-      LOG_LEVEL: "INFO"
-
-  soffice-worker:
-    cwd: "$ROOT_DIR/packages/soffice-worker"
-    shell: "uv run uvicorn main:app --host 127.0.0.1 --port 8090 --reload 2>&1 | tee $_LOG_DIR/soffice-worker.log"
-    env:
-      PORT: "8090"
-      LOG_LEVEL: "INFO"
-
-  orchestrator:
-    cwd: "$ROOT_DIR/packages/orchestrator-agent"
-    shell: "uv run python${_DEBUG_MODE:+ -m debugpy --listen 0.0.0.0:5679} -m uvicorn main:app --host 0.0.0.0 --port 10001 --reload --reload-dir . --reload-dir ../agent-common/agent_common --log-config log_conf.yml --no-access-log 2>&1 | tee $_LOG_DIR/orchestrator.log"
-    env:
-      OIDC_ISSUER: "$_OIDC_ISSUER"
-      OIDC_CLIENT_ID: "orchestrator"
-      OIDC_CLIENT_SECRET: "$_OIDC_SECRET_ORCHESTRATOR"
-      ORCHESTRATOR_CLIENT_ID: "orchestrator"
-      AGENT_ID: "1"
-      AGENT_BASE_URL: "http://localhost:10001"
-      CONSOLE_BACKEND_URL: "http://localhost:${CONSOLE_BACKEND_PORT}"
-      CONSOLE_FRONTEND_URL: "http://localhost:5173"
-      POSTGRES_HOST: "localhost"
-      POSTGRES_PORT: "5402"
-      POSTGRES_DB: "docstore"
-      POSTGRES_USER: "postgres"
-      POSTGRES_PASSWORD: "password"
-      POSTGRES_SCHEMA: "public"
-      MCP_GATEWAY_URL: "$MCP_GATEWAY_URL"
-      MCP_GATEWAY_CLIENT_ID: "$MCP_GATEWAY_CLIENT_ID"
-      LANGSMITH_TRACING: "$LANGSMITH_TRACING"
-      LANGSMITH_API_KEY: "$LANGSMITH_API_KEY"
-      LANGSMITH_PROJECT: "$LANGSMITH_PROJECT"
-      LANGSMITH_ENDPOINT: "$LANGSMITH_ENDPOINT"
-      LOG_LEVEL: "INFO"
-      USE_SHORT_PROMPTS: "true"
-      # Enable the wasm-sandboxed ``eval`` REPL. When on, the orchestrator reaches
-      # all its tools through ``eval`` (opinionated single exposure model — see
-      # graph_factory); when off, tools stay natively bound. Set in the repo-root .env.
-      CODE_INTERPRETER_PTC: "${CODE_INTERPRETER_PTC:-0}"
-      AZURE_OPENAI_API_KEY: "$AZURE_OPENAI_API_KEY"
-      AZURE_API_BASE: "$AZURE_API_BASE"
-      AWS_BEDROCK_REGION: "$AWS_BEDROCK_REGION"
-      GCP_KEY: '$GCP_KEY'
-      GCP_LOCATION: "$GCP_LOCATION"
-      # Checkpointer reuses the POSTGRES_* connection above (docstore DB / public schema)
-      CHECKPOINT_S3_BUCKET_NAME: "$CHECKPOINT_S3_BUCKET_NAME"
-      DOCUMENT_STORE_S3_BUCKET: "$DOCUMENT_STORE_S3_BUCKET"
-      OBJECT_STORAGE_TYPE: "$OBJECT_STORAGE_TYPE"
-      LOCAL_STORAGE_BASE_URL: "$LOCAL_STORAGE_BASE_URL"
-      LOCAL_STORAGE_PATH: "$LOCAL_STORAGE_PATH"
-      CATALOG_VECTOR_BUCKET_NAME: "$CATALOG_VECTOR_BUCKET_NAME"
-      CATALOG_THUMBNAILS_S3_BUCKET: "$CATALOG_THUMBNAILS_S3_BUCKET"
-      SANDBOX_PROVIDER: "${SANDBOX_PROVIDER:-}"
-      SANDBOX_POOL_CAPACITY: "${SANDBOX_POOL_CAPACITY:-}"
-      SANDBOX_WARM_TTL: "${SANDBOX_WARM_TTL:-}"
-      GATANA_ORG_ID: "${GATANA_ORG_ID:-}"
-      GATANA_API_KEY: "${GATANA_API_KEY:-}"
-      GATANA_ORG_CAPACITY: "${GATANA_ORG_CAPACITY:-}"
-
-  runner:
-    cwd: "$ROOT_DIR/packages/agent-runner"
-    shell: "uv run python${_DEBUG_MODE:+ -m debugpy --listen 0.0.0.0:5682} -m uvicorn main:app --host 0.0.0.0 --port 5005 --reload --reload-dir . --reload-dir ../agent-common/agent_common --log-config log_conf.yml --no-access-log 2>&1 | tee $_LOG_DIR/runner.log"
-    env:
-      OIDC_ISSUER: "$_OIDC_ISSUER"
-      OIDC_CLIENT_ID: "agent-runner"
-      OIDC_CLIENT_SECRET: "$_OIDC_SECRET_AGENT_RUNNER"
-      AGENT_BASE_URL: "http://localhost:5005"
-      CONSOLE_BACKEND_URL: "http://localhost:${CONSOLE_BACKEND_PORT}"
-      POSTGRES_HOST: "localhost"
-      POSTGRES_PORT: "5402"
-      POSTGRES_DB: "docstore"
-      POSTGRES_USER: "postgres"
-      POSTGRES_PASSWORD: "password"
-      POSTGRES_SCHEMA: "public"
-      MCP_GATEWAY_URL: "$MCP_GATEWAY_URL"
-      MCP_GATEWAY_CLIENT_ID: "$MCP_GATEWAY_CLIENT_ID"
-      LANGSMITH_TRACING: "$LANGSMITH_TRACING"
-      LANGSMITH_API_KEY: "$LANGSMITH_API_KEY"
-      LANGSMITH_PROJECT: "$LANGSMITH_PROJECT"
-      LANGSMITH_ENDPOINT: "$LANGSMITH_ENDPOINT"
-      LOG_LEVEL: "INFO"
-      AZURE_OPENAI_API_KEY: "$AZURE_OPENAI_API_KEY"
-      AZURE_API_BASE: "$AZURE_API_BASE"
-      AWS_BEDROCK_REGION: "$AWS_BEDROCK_REGION"
-      GCP_KEY: '$GCP_KEY'
-      GCP_LOCATION: "$GCP_LOCATION"
-      # Checkpointer reuses the POSTGRES_* connection above (docstore DB / public schema)
-      CHECKPOINT_S3_BUCKET_NAME: "$CHECKPOINT_S3_BUCKET_NAME"
-      DOCUMENT_STORE_S3_BUCKET: "$DOCUMENT_STORE_S3_BUCKET"
-      SANDBOX_PROVIDER: "${SANDBOX_PROVIDER:-}"
-      SANDBOX_POOL_CAPACITY: "${SANDBOX_POOL_CAPACITY:-}"
-      SANDBOX_WARM_TTL: "${SANDBOX_WARM_TTL:-}"
-      GATANA_ORG_ID: "${GATANA_ORG_ID:-}"
-      GATANA_API_KEY: "${GATANA_API_KEY:-}"
-      GATANA_ORG_CAPACITY: "${GATANA_ORG_CAPACITY:-}"
-
-  voice-agent:
-    cwd: "$ROOT_DIR/packages/voice-agent"
-    shell: "uv run python${_DEBUG_MODE:+ -m debugpy --listen 0.0.0.0:5683} main.py  --reload 2>&1 | tee $_LOG_DIR/voice-agent.log"
-    env:
-      HOST: "localhost"
-      PORT: "8002"
-      OIDC_ISSUER: "$_OIDC_ISSUER"
-      OIDC_CLIENT_ID: "voice-agent"
-      VOICE_AGENT_BASE_URL: "http://localhost:8002"
-      CONSOLE_BACKEND_URL: "http://localhost:${CONSOLE_BACKEND_PORT}"
-      PUBLIC_URL: "${PUBLIC_URL:-}"
-      GCP_KEY: '$GCP_KEY'
-      GCP_PROJECT_ID: "$GCP_PROJECT_ID"
-      GCP_LOCATION: "$GCP_LOCATION"
-      CALL_TIMEOUT_SECONDS: "600"
-      TWILIO_ACCOUNT_SID: "$TWILIO_ACCOUNT_SID"
-      TWILIO_API_KEY: "$TWILIO_API_KEY"
-      TWILIO_API_SECRET: "$TWILIO_API_SECRET"
-      TWILIO_PHONE_NUMBER: "+358454917751"
-      TWILIO_REGION: "ie1"
-      TWILIO_EDGE: "dublin"
-      TWILIO_VERIFY_API_KEY: "$TWILIO_VERIFY_API_KEY"
-      TWILIO_VERIFY_API_SECRET: "$TWILIO_VERIFY_API_SECRET"
-      LANGSMITH_TRACING: "$LANGSMITH_TRACING"
-      LANGSMITH_API_KEY: "$LANGSMITH_API_KEY"
-      LANGSMITH_PROJECT: "$LANGSMITH_PROJECT"
-      LANGSMITH_ENDPOINT: "$LANGSMITH_ENDPOINT"
-      LOG_LEVEL: "INFO"
-
-  # `dev:link`, NOT `build:watch`. The console dev server compiles the SDK's
-  # source directly, so a `vite build --watch` here would rebuild a dist nobody
-  # reads — while rewriting it non-atomically with renumbered rollup chunks,
-  # which is what used to wedge the dev server mid-rebuild. dev:link keeps the
-  # .d.ts (editor/tsc) and dist/styles.css (shadow-DOM embed mounts) in sync and
-  # leaves dist/*.js alone. Consequence: dist JS goes stale during a session —
-  # re-run `npm run build` in packages/embed-sdk before a console prod build.
-  embed-sdk:
-    cwd: "$ROOT_DIR/packages/embed-sdk"
-    shell: "npm run dev:link 2>&1 | tee $_LOG_DIR/embed-sdk.log"
-    stop: "SIGKILL"
-
-  frontend:
-    cwd: "$ROOT_DIR/packages/console-frontend"
-    shell: "npx vite --host 0.0.0.0 --port 5173 2>&1 | tee $_LOG_DIR/frontend.log"
-
-  infra-logs:
-    cwd: "$LOCAL_DEV_DIR"
-    shell: "docker compose logs -f 2>&1 | tee $_LOG_DIR/infra.log"
-    stop: "SIGKILL"
-  
-  slack:
-    cwd: "$ROOT_DIR/packages/client-slack"
-    shell: "just start 2>&1 | tee $_LOG_DIR/slack.log"
-    stop: "SIGKILL"
-
-  google-chat:
-    cwd: "$ROOT_DIR/packages/client-google-chat"
-    shell: "npm run dev"
-    stop: "SIGKILL"
-YAML
-
-exec mprocs --config "$MPROCS_CFG"
+# Headless: start detached and wait until the stack is ready — or has failed, which does not get
+# better by waiting.
+log "Starting slot $_SLOT in the background..."
+"${_PC[@]}" up -D >/dev/null 2>>"$_STACK_DIR/process-compose.log" \
+  || err "process-compose did not start (log: $_STACK_DIR/process-compose.log)"
+_DEADLINE=$((SECONDS + ${NANNOS_SLOT_HEALTH_TIMEOUT:-900}))
+_LAST=""
+while :; do
+  _VERDICT="$(slot_pc_verdict "$_SLOT")"
+  case "$_VERDICT" in
+    ready) break ;;
+    failed:*)
+      err "Slot $_SLOT failed to start — ${_VERDICT#failed: } (logs: $_LOG_DIR; 'process-compose attach -u $_SOCK' shows the stack)" ;;
+  esac
+  if [[ $SECONDS -ge $_DEADLINE ]]; then
+    err "Slot $_SLOT not ready after ${NANNOS_SLOT_HEALTH_TIMEOUT:-900}s — ${_VERDICT#starting: } (logs: $_LOG_DIR; 'process-compose attach -u $_SOCK' shows the stack)"
+  fi
+  if [[ "$_VERDICT" != "$_LAST" ]]; then
+    log "Waiting for: ${_VERDICT#starting: }"
+    _LAST="$_VERDICT"
+  fi
+  sleep 3
+done
+ok "Slot $_SLOT is up"

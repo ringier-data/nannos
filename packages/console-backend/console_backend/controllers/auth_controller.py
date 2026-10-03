@@ -442,7 +442,7 @@ class AuthController:
 
         # Now clear the Starlette session cookie (we're done with the logout flow)
         response.delete_cookie(
-            key="session",
+            key=config.oauth_state_cookie_name,
             path="/api/v1/auth/",
         )
 

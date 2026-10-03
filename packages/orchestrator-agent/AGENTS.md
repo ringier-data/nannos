@@ -520,16 +520,21 @@ of complexity — budget ~20k tokens per scenario per model.
 ### Setting up the real tier
 
 ```bash
-./scripts/start-local.sh          # local LiteLLM gateway on :4000
+just up                           # your slot N's gateway on :4N400 (slot 0, `just start-local`: :4000)
 ```
 
-Then two lines in `packages/orchestrator-agent/.env` (gitignored — verify with
-`git check-ignore` before adding anything, this is a public repo):
+Then point the tests at that gateway in `tests/integration/.env.integration` (gitignored — verify
+with `git check-ignore` before adding anything, this is a public repo). That file wins over
+`packages/orchestrator-agent/.env` key by key, and `just env-sync` copies the main checkout's —
+which names slot 0's gateway — into a new worktree, so set your slot's port there:
 
 ```
-LLM_GATEWAY_URL=http://localhost:4000
+LLM_GATEWAY_URL=http://localhost:4N400
 LLM_GATEWAY_API_KEY=sk-nannos-local
 ```
+
+N is your slot's number, which `just up` prints; it can change after `just down`, so check it
+against `just slots` before a paid run.
 
 Provider credentials (Bedrock/Azure/Vertex) belong to the **gateway process**, not the
 test process. Never put them in a test env file. Which models exist comes from the
