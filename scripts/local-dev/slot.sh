@@ -10,15 +10,17 @@ set -euo pipefail
 #
 #   slot.sh up [--slot N] [--local-idp] [--debug]   claim a slot for this worktree, start it,
 #                                                   print its JSON summary when ready
-#   slot.sh restart [N]                             stop and start again: same claim, same
-#                                                   databases, pending migrations applied
+#   slot.sh restart [N] [--local-idp] [--debug]     stop and start again: same claim, same
+#                                                   databases, pending migrations applied;
+#                                                   flags given replace the slot's flags
 #   slot.sh down [N]                                stop a slot, drop its databases, release it
 #   slot.sh list                                    every running stack, slot 0 included
 #   slot.sh gc                                      release every slot whose instance is gone
 #   slot.sh db-reset [N]                            drop the databases and start again
 #
 # N defaults to this worktree's slot. One worktree holds at most one slot; `up` from a worktree
-# whose slot is running just prints it.
+# whose slot is running just prints it — or, given other flags than the slot runs with, restarts it
+# with those.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -83,6 +85,22 @@ _block_in_use() {  # N: is any port of the slot's block held by something?
   return 1
 }
 
+_set_args() {  # N flags... — the flags the slot starts with from now on
+  python3 -c '
+import json, sys
+path, args = sys.argv[1], sys.argv[2:]
+claim = json.load(open(path))
+claim["args"] = args
+json.dump(claim, open(path, "w"), indent=2)
+' "$SLOTS_DIR/$1/claim.json" "${@:2}"
+}
+
+# The same flags, whatever their order.
+_same_args() {  # N flags...
+  [[ "$(printf '%s\n' "$(_claim_field "$1" args)" | tr ' ' '\n' | grep . | sort | tr '\n' ' ')" \
+     == "$(printf '%s\n' "${@:2}" | grep . | sort | tr '\n' ' ')" ]]
+}
+
 # Start slot N's stack (claimed, not running) and wait until it is ready. The start lock tells
 # everyone else it is starting; the kernel drops it when this shell ends, however it ends.
 _start() {  # N
@@ -137,6 +155,16 @@ cmd_up() {
   existing="$(_slot_of_worktree "$ROOT_DIR")"
   if [[ -n "$existing" ]]; then
     slot_unlock 8
+    # Flags given that differ from the slot's: they would otherwise be ignored without a word
+    # (a slot started without --local-idp kept signing in at the remote IdP).
+    if [[ ${#args[@]} -gt 0 ]] && ! _same_args "$existing" "${args[@]}"; then
+      [[ "$(_state "$existing")" != starting ]] || err "Slot $existing is still starting for this worktree (log: $SLOTS_DIR/$existing/up.log)"
+      note "Slot $existing runs with '$(_claim_field "$existing" args)'; restarting it with '${args[*]}' on its databases"
+      _set_args "$existing" "${args[@]}"
+      _stop "$existing"
+      _start "$existing"
+      return
+    fi
     case "$(_state "$existing")" in
       running)
         note "This worktree already runs slot $existing"
@@ -180,9 +208,16 @@ print(json.dumps({"slot": int(slot), "worktree": worktree, "args": args,
 }
 
 cmd_restart() {
-  local n
-  n="$(_slot_arg "${1:-}")"
+  local n="" args=()
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --local-idp|--debug) args+=("$1"); shift ;;
+      *) [[ -z "$n" ]] || err "Unknown argument for restart: $1"; n="$1"; shift ;;
+    esac
+  done
+  n="$(_slot_arg "$n")"
   [[ "$(_state "$n")" != starting ]] || err "Slot $n is still starting (log: $SLOTS_DIR/$n/up.log)"
+  [[ ${#args[@]} -eq 0 ]] || _set_args "$n" "${args[@]}"
   _stop "$n"
   _start "$n"
 }

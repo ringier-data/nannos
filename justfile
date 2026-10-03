@@ -1205,7 +1205,8 @@ reset-local:
 up *FLAGS:
   ./scripts/local-dev/slot.sh up {{FLAGS}}
 
-# Stop and start a slot again on its databases, applying new migrations (default: this worktree's)
+# Stop and start a slot again on its databases, applying new migrations (default: this worktree's);
+# --local-idp / --debug given replace the slot's flags
 restart *ARGS:
   ./scripts/local-dev/slot.sh restart {{ARGS}}
 
