@@ -940,7 +940,10 @@ rm -rf "$_STACK_DIR/ready"
 for _log in $(sed -n 's|^ *log_location: ${NANNOS_LOG_DIR}/||p' "$LOCAL_DEV_DIR/process-compose.yaml"); do
   : > "$_LOG_DIR/$_log"
 done
-_PC=(process-compose -f "$LOCAL_DEV_DIR/process-compose.yaml" --disable-dotenv
+# The stack runs from a copy of its definition in the stack's directory, which is also what the
+# slot's verdict reads: a branch switch in the checkout must not change either under a running stack.
+cp "$LOCAL_DEV_DIR/process-compose.yaml" "$_STACK_DIR/process-compose.yaml"
+_PC=(process-compose -f "$_STACK_DIR/process-compose.yaml" --disable-dotenv
      -L "$_STACK_DIR/process-compose.log" -u "$_SOCK")
 rm -f "$_SOCK"
 

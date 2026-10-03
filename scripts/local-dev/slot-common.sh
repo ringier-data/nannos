@@ -99,12 +99,10 @@ slot_kill_leftovers() {  # N
 # Read slot N's process list and judge it: prints "ready", "starting: <names>" or
 # "failed: <names>". Failed: a setup step exited non-zero or was skipped (its dependency failed), or
 # a service exited. Ready: no failure, every setup step done and every service with a readiness
-# probe ready. Setup steps are the processes the stack's own process-compose.yaml runs once
-# (`availability: *once`, or restarted only on failure); everything else is a service.
+# probe ready. Setup steps are the processes the stack's process-compose.yaml runs once
+# (`availability: *once`, or restarted only on failure); everything else is a service. The yaml
+# read is the copy the stack was started from (start-local saves it in the stack's directory).
 slot_pc_verdict() {  # N
-  local yaml
-  yaml="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["worktree"])' "$(slot_dir "$1")/stack.json" 2>/dev/null \
-    )/scripts/local-dev/process-compose.yaml"
   slot_pc "$1" process list -o json | python3 -c '
 import json, re, sys
 try:
@@ -114,11 +112,11 @@ except ValueError:
 one_shots = set()
 try:
     text = open(sys.argv[1]).read().split("\nprocesses:\n", 1)[1]
-    for name, body in re.findall(r"^  ([a-z0-9-]+):\n((?:(?:    .*)?\n)*)", text, re.M):
-        if re.search(r"availability: \*once|restart: on_failure", body):
-            one_shots.add(name)
 except (OSError, IndexError):
-    pass
+    print("failed: (cannot read " + sys.argv[1] + ")"); sys.exit()
+for name, body in re.findall(r"^  ([a-z0-9-]+):\n((?:(?:    .*)?\n)*)", text, re.M):
+    if re.search(r"availability: \*once|restart: on_failure", body):
+        one_shots.add(name)
 failed, waiting = [], []
 for p in procs:
     status, name = p["status"], p["name"]
@@ -137,7 +135,7 @@ elif waiting:
     print("starting: " + " ".join(sorted(waiting)))
 else:
     print("ready")
-' "$yaml"
+' "$(slot_dir "$1")/process-compose.yaml"
 }
 
 # A kernel lock (flock) on a file, held through file descriptor FD by the calling shell: the

@@ -9,10 +9,11 @@ set -euo pipefail
 # of its process-compose instance; claims are taken under one lock.
 #
 #   slot.sh up [--slot N] [--local-idp] [--debug]   claim a slot for this worktree, start it,
-#                                                   print its JSON summary when ready
-#   slot.sh restart [N] [--local-idp] [--debug]     stop and start again: same claim, same
+#                                                   print its JSON summary when ready;
+#                                                   --remote-idp / --no-debug remove a flag
+#   slot.sh restart [N] [flags]                     stop and start again: same claim, same
 #                                                   databases, pending migrations applied;
-#                                                   flags given replace the slot's flags
+#                                                   flags given change the slot's (as for up)
 #   slot.sh down [N]                                stop a slot, drop its databases, release it
 #   slot.sh list                                    every running stack, slot 0 included
 #   slot.sh gc                                      release every slot whose instance is gone
@@ -32,7 +33,11 @@ CLAIM_LOCK="$SLOTS_DIR/.claim.flock"
 err() { printf '✗ %s\n' "$*" >&2; exit 1; }
 note() { printf '▸ %s\n' "$*" >&2; }
 
-command -v process-compose >/dev/null 2>&1 || err "process-compose is missing: brew install f1bonacc1/tap/process-compose"
+# Starting a stack needs process-compose; stopping and releasing work without it (no instance
+# can run then), so stop-local / reset-local never stop half-way on a machine that lacks it.
+_need_pc() {
+  command -v process-compose >/dev/null 2>&1 || err "process-compose is missing: brew install f1bonacc1/tap/process-compose"
+}
 
 _claim_field() {  # N field
   python3 -c 'import json, sys; v = json.load(open(sys.argv[1])).get(sys.argv[2], ""); print(" ".join(v) if isinstance(v, list) else v)' \
@@ -40,7 +45,8 @@ _claim_field() {  # N field
 }
 
 # starting: an `up` or `restart` holds the slot's start lock; running / failed: its instance
-# answers, and is ready or has a failed process; dead: claimed, but no instance answers.
+# answers, and is ready or has a failed process; stopped: `stop-local` stopped it on purpose
+# (kept, and left alone by `slots-gc`); dead: claimed, but no instance answers.
 _state() {  # N
   if slot_locked "$SLOTS_DIR/$1/start.flock"; then
     echo starting
@@ -50,6 +56,8 @@ _state() {  # N
       starting*) echo starting ;;
       *) echo failed ;;
     esac
+  elif [[ -f "$SLOTS_DIR/$1/stopped" ]]; then
+    echo stopped
   else
     echo dead
   fi
@@ -95,10 +103,17 @@ json.dump(claim, open(path, "w"), indent=2)
 ' "$SLOTS_DIR/$1/claim.json" "${@:2}"
 }
 
-# The same flags, whatever their order.
-_same_args() {  # N flags...
-  [[ "$(printf '%s\n' "$(_claim_field "$1" args)" | tr ' ' '\n' | grep . | sort | tr '\n' ' ')" \
-     == "$(printf '%s\n' "${@:2}" | grep . | sort | tr '\n' ' ')" ]]
+# The slot's flags changed by the ones given: --local-idp / --debug add, --remote-idp / --no-debug
+# remove, anything not named stays. Prints one per line.
+_merged_args() {  # N flags...
+  python3 -c '
+import sys
+current, given = sys.argv[1].split(), sys.argv[2:]
+off = {"--remote-idp": "--local-idp", "--no-debug": "--debug"}
+args = [a for a in current if a not in {off[g] for g in given if g in off}]
+args += [g for g in given if g not in off and g not in args]
+print("\n".join(args))
+' "$(_claim_field "$1" args)" "${@:2}"
 }
 
 # Take slot N's start lock, held through FD 7 until _start is done. It tells everyone else the
@@ -120,6 +135,7 @@ _start() {  # N
     slot_unlock 7
     err "Port $port of slot $n's block is held by another process ('lsof -nP -iTCP:$port -sTCP:LISTEN' names it)"
   fi
+  rm -f "$dir/stopped"
   note "Starting slot $n for $worktree (log: $dir/up.log)"
   # The lock stays with this shell (7>&-): the stack's process-compose instance, started by
   # start-local.sh, would otherwise inherit it and keep the slot "starting" for as long as it runs.
@@ -163,50 +179,57 @@ _release() {  # N
 }
 
 cmd_up() {
-  local want="" args=() n="" existing candidate
+  local want="" flags=() n="" existing candidate state new_args=() a
   while [[ $# -gt 0 ]]; do
     case $1 in
       --slot) want="${2:-}"; shift 2 ;;
-      --local-idp|--debug) args+=("$1"); shift ;;
+      --local-idp|--debug|--remote-idp|--no-debug) flags+=("$1"); shift ;;
       *) err "Unknown flag for up: $1" ;;
     esac
   done
   [[ -z "$want" || "$want" =~ ^[1-8]$ ]] || err "--slot takes 1-8"
+  _need_pc
   mkdir -p "$SLOTS_DIR"
   "$SCRIPT_DIR/env-sync.sh" --quiet
 
   # Finding this worktree's slot and claiming a new one happen under one lock, so two `up`s
-  # from one worktree cannot both claim, and `gc` never sees a claim half-written.
+  # from one worktree cannot both claim, and `gc` never sees a claim half-written. A slot that
+  # is (re)started takes its start lock before the claim lock is let go: `gc` cannot slip in.
   slot_lock "$CLAIM_LOCK" 8
   existing="$(_slot_of_worktree "$ROOT_DIR")"
   if [[ -n "$existing" ]]; then
-    slot_unlock 8
     [[ -z "$want" || "$want" == "$existing" ]] \
-      || err "This worktree already holds slot $existing; 'just down' releases it before 'just up --slot $want'"
-    # Flags given that differ from the slot's: they would otherwise be ignored without a word
-    # (a slot started without --local-idp kept signing in at the remote IdP).
-    if [[ ${#args[@]} -gt 0 ]] && ! _same_args "$existing" "${args[@]}"; then
-      [[ "$(_state "$existing")" != starting ]] || err "Slot $existing is still starting for this worktree (log: $SLOTS_DIR/$existing/up.log)"
-      note "Slot $existing runs with '$(_claim_field "$existing" args)'; restarting it with '${args[*]}' on its databases"
-      _begin "$existing"
-      _set_args "$existing" "${args[@]}"
-      _stop "$existing"
-      _start "$existing"
-      return
+      || { slot_unlock 8; err "This worktree already holds slot $existing; 'just down' releases it before 'just up --slot $want'"; }
+    state="$(_state "$existing")"
+    [[ "$state" != starting ]] || { slot_unlock 8; err "Slot $existing is still starting for this worktree (log: $SLOTS_DIR/$existing/up.log)"; }
+    # Flags that change the slot's: they would otherwise be ignored without a word (a slot
+    # started without --local-idp kept signing in at the remote IdP).
+    if [[ ${#flags[@]} -gt 0 ]]; then
+      while IFS= read -r a; do [[ -n "$a" ]] && new_args+=("$a"); done < <(_merged_args "$existing" "${flags[@]}")
+      if [[ "${new_args[*]+${new_args[*]}}" != "$(_claim_field "$existing" args)" ]]; then
+        _begin "$existing"
+        slot_unlock 8
+        note "Slot $existing runs with '$(_claim_field "$existing" args)'; restarting it with '${new_args[*]+${new_args[*]}}' on its databases"
+        _set_args "$existing" ${new_args[@]+"${new_args[@]}"}
+        _stop "$existing"
+        _start "$existing"
+        return
+      fi
     fi
-    case "$(_state "$existing")" in
+    case "$state" in
       running)
+        slot_unlock 8
         note "This worktree already runs slot $existing"
         cat "$SLOTS_DIR/$existing/stack.json"
         echo
         return 0 ;;
-      starting)
-        err "Slot $existing is still starting for this worktree (log: $SLOTS_DIR/$existing/up.log)" ;;
       failed)
+        slot_unlock 8
         err "Slot $existing of this worktree runs, but $(slot_pc_verdict "$existing" | sed 's/^failed: //') failed (logs: $SLOTS_DIR/$existing/logs). Fix it and 'just restart'." ;;
-      dead)
-        note "Slot $existing of this worktree is not running; starting it again on its databases"
+      *)
         _begin "$existing"
+        slot_unlock 8
+        note "Slot $existing of this worktree is not running; starting it again on its databases"
         _stop "$existing"
         _start "$existing"
         return ;;
@@ -227,28 +250,38 @@ cmd_up() {
     slot_unlock 8
     err "No free slot${want:+ ($want is taken or its ports are in use)}. See 'just slots'; 'just slots-gc' releases dead ones."
   fi
+  for a in ${flags[@]+"${flags[@]}"}; do
+    case "$a" in --local-idp|--debug) new_args+=("$a") ;; esac
+  done
   python3 -c '
 import json, sys, time
 slot, worktree, *args = sys.argv[1:]
 print(json.dumps({"slot": int(slot), "worktree": worktree, "args": args,
                   "claimed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}, indent=2))
-' "$n" "$ROOT_DIR" ${args[@]+"${args[@]}"} > "$SLOTS_DIR/$n/claim.json"
-  slot_unlock 8
+' "$n" "$ROOT_DIR" ${new_args[@]+"${new_args[@]}"} > "$SLOTS_DIR/$n/claim.json"
   _begin "$n"
+  slot_unlock 8
   _start "$n"
 }
 
 cmd_restart() {
-  local n="" args=()
+  local n="" flags=() new_args=() a
   while [[ $# -gt 0 ]]; do
     case $1 in
-      --local-idp|--debug) args+=("$1"); shift ;;
+      --local-idp|--debug|--remote-idp|--no-debug) flags+=("$1"); shift ;;
       *) [[ -z "$n" ]] || err "Unknown argument for restart: $1"; n="$1"; shift ;;
     esac
   done
+  _need_pc
   n="$(_slot_arg "$n")"
+  # Start lock taken under the claim lock, as in `up`: `gc` decides under the claim lock.
+  slot_lock "$CLAIM_LOCK" 8
   _begin "$n"
-  [[ ${#args[@]} -eq 0 ]] || _set_args "$n" "${args[@]}"
+  slot_unlock 8
+  if [[ ${#flags[@]} -gt 0 ]]; then
+    while IFS= read -r a; do [[ -n "$a" ]] && new_args+=("$a"); done < <(_merged_args "$n" "${flags[@]}")
+    _set_args "$n" ${new_args[@]+"${new_args[@]}"}
+  fi
   _stop "$n"
   _start "$n"
 }
@@ -256,14 +289,19 @@ cmd_restart() {
 cmd_down() {
   local n
   n="$(_slot_arg "${1:-}")"
+  slot_lock "$CLAIM_LOCK" 8
   _begin "$n"
+  slot_unlock 8
   _release "$n"
 }
 
 cmd_db_reset() {
   local n
+  _need_pc
   n="$(_slot_arg "${1:-}")"
+  slot_lock "$CLAIM_LOCK" 8
   _begin "$n"
+  slot_unlock 8
   _stop "$n"
   slot_drop_databases "$n" || { slot_unlock 7; err "Could not drop slot $n's databases"; }
   rm -rf "$SLOTS_DIR/$n/uploads"
@@ -335,22 +373,31 @@ cmd_sock() {
 # For stop-local / reset-local, which take the shared PostgreSQL and Keycloak away: stop every
 # slot's stack first (claims and databases kept: 'just up' starts it again), or release them all.
 cmd_stop_all() {
-  local n
+  local n busy=""
   for n in 1 2 3 4 5 6 7 8; do
     [[ -f "$SLOTS_DIR/$n/claim.json" ]] || continue
-    slot_lock "$SLOTS_DIR/$n/start.flock" 7 0 2>/dev/null || { note "Slot $n is starting; left alone"; continue; }
+    slot_lock "$SLOTS_DIR/$n/start.flock" 7 0 2>/dev/null || { busy="$busy $n"; continue; }
     _stop "$n"
+    touch "$SLOTS_DIR/$n/stopped"
     slot_unlock 7
-    note "Slot $n stopped (its databases are kept; 'just up' from its worktree starts it again)"
+    note "Slot $n stopped (claim and databases kept; 'just up' from its worktree starts it again)"
   done
+  # A slot mid-start would lose the infrastructure under it: stop here, before compose down.
+  [[ -z "$busy" ]] || err "Slot(s)$busy are starting or stopping; try again once they are done"
 }
 cmd_down_all() {
-  local n
+  local n busy=""
   for n in 1 2 3 4 5 6 7 8; do
     [[ -d "$SLOTS_DIR/$n" ]] || continue
-    slot_lock "$SLOTS_DIR/$n/start.flock" 7 0 2>/dev/null || { note "Slot $n is starting; left alone"; continue; }
-    _release "$n" || true
+    slot_lock "$SLOTS_DIR/$n/start.flock" 7 0 2>/dev/null || { busy="$busy $n"; continue; }
+    # reset-local removes the database volumes next, so a database that cannot be dropped now
+    # (PostgreSQL already stopped, e.g. after stop-local) goes with them: release the slot anyway.
+    if ! _release "$n" 2>/dev/null; then
+      rm -rf "${SLOTS_DIR:?}/$n"
+      note "Slot $n released (its databases go with the volumes)"
+    fi
   done
+  [[ -z "$busy" ]] || err "Slot(s)$busy are starting or stopping; try again once they are done"
 }
 
 case "${1:-}" in

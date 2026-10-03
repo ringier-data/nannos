@@ -103,16 +103,33 @@ if [[ "$1" == console ]]; then
 
   # A slot's models come from its gateway config (models registered in another stack's
   # database are not here), but which one serves the `chat` tier lives in model_defaults —
-  # empty in a new database, and agents refuse to run without it. The config's first model
-  # becomes the `chat` default (order litellm-local-models.yaml accordingly); every other tier
-  # falls back to `chat`. Only while `chat` is unset: a default chosen in the console stays.
+  # empty in a new database, and agents refuse to run without it. The `chat` default becomes
+  # the local LLM's `local` model when there is one (the only model a setup without cloud
+  # credentials can reach), else the config's first chat model — not an embedding model, not a
+  # `*` route (order litellm-local-models.yaml accordingly). Every other tier falls back to
+  # `chat`. Only while `chat` is unset: a default chosen in the console stays.
   if [[ "$SLOT" != 0 && -z "$(psql_in "$DB" "SELECT 1 FROM model_defaults WHERE role = 'chat'")" ]]; then
-    alias="$(sed -n 's/^[[:space:]]*-[[:space:]]*model_name:[[:space:]]*//p' "${NANNOS_GW_CONFIG:-/dev/null}" \
-      | tr -d "\"'" | awk 'NR == 1 {print $1}')"
+    alias="$(python3 -c '
+import re, sys
+try:
+    text = open(sys.argv[1]).read()
+except OSError:
+    sys.exit()
+entries = re.split(r"^\s*-\s*model_name:\s*", text, flags=re.M)[1:]
+chat = []
+for entry in entries:
+    lines = entry.split("\n")
+    name = lines[0].strip().strip("\"\x27")
+    body = "\n".join(l for l in lines[1:] if l.startswith("    ") or not l.strip())
+    if "*" in name or re.search(r"^\s*mode:\s*[\"\x27]?embedding", body, re.M):
+        continue
+    chat.append(name)
+print("local" if "local" in chat else (chat[0] if chat else ""))
+' "${NANNOS_GW_CONFIG:-/dev/null}")"
     if [[ -n "$alias" ]]; then
       psql_in "$DB" "INSERT INTO model_defaults (role, model_alias) VALUES ('chat', '$alias') ON CONFLICT (role) DO NOTHING"
       psql_in "$DB" "INSERT INTO model_alias_tiers (alias, role) VALUES ('$alias', 'chat') ON CONFLICT (alias, role) DO NOTHING"
-      echo "✓ Default chat model: $alias (the gateway config's first; change it in the console under Models → Defaults)"
+      echo "✓ Default chat model: $alias (from the gateway config; change it in the console under Models → Defaults)"
     else
       echo "⚠ No models in the gateway config: set the chat default in the console (Models → Defaults)"
     fi

@@ -165,14 +165,15 @@ startup order (namespaces `1-infra`, `2-deps`, `3-backend`, `4-agents`, `5-front
 
 - **Data:** a slot's databases start empty (all migrations applied) and live until `just down`.
 - **Migrations:** `just restart` applies a new migration (it stops and starts the slot on its
-  databases; `just restart --local-idp` / `--debug` changes the slot's flags, as does `just up` with
-  other flags than the slot runs with). After editing an already-applied one, the slot refuses to start; `just db-reset`
+  databases). Flags change on `restart` or `up`: `--local-idp` / `--debug` add one, `--remote-idp` /
+  `--no-debug` remove one, and the slot restarts on its databases when they changed. After editing an already-applied one, the slot refuses to start; `just db-reset`
   rebuilds the databases.
 - **A crashed service** stays exited: `just slots` shows the slot as `failed`, and `just up` names the
   process. Fix it and `just restart` (or restart just that process, above).
 - **When you are done:** `just down` (stops it, drops its databases, frees the ports). `just slots`
   lists every running stack, slot 0 included, with its state, branch and worktree; `just slots-gc`
-  releases slots whose stack is gone.
+  releases slots whose stack is gone (not the ones `stop-local` stopped: those show as `stopped`
+  and `just up` starts them again).
 - **One slot per worktree:** agents working in the same worktree share its slot.
 - **Slot 0 is the user's** `just start-local` (console `:5173`, process-compose TUI, interactive). Only
   slot 0 runs the Slack and Google Chat clients; for channel work, ask the user rather than starting
