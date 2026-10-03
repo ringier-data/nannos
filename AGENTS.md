@@ -172,8 +172,8 @@ startup order (namespaces `1-infra`, `2-deps`, `3-backend`, `4-agents`, `5-front
   process. Fix it and `just restart` (or restart just that process, above).
 - **When you are done:** `just down` (stops it, drops its databases, frees the ports). `just slots`
   lists every running stack, slot 0 included, with its state, branch and worktree; `just slots-gc`
-  releases slots whose stack is gone (not the ones `stop-local` stopped: those show as `stopped`
-  and `just up` starts them again).
+  releases slots whose worktree is gone; a slot that is merely not running (`stopped`, e.g. after a
+  reboot) keeps its databases until `just up` restarts it or `just down` releases it.
 - **One slot per worktree:** agents working in the same worktree share its slot.
 - **Slot 0 is the user's** `just start-local` (console `:5173`, process-compose TUI, interactive). Only
   slot 0 runs the Slack and Google Chat clients; for channel work, ask the user rather than starting

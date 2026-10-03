@@ -16,8 +16,7 @@ set -euo pipefail
 #                                                   flags given change the slot's (as for up)
 #   slot.sh down [N]                                stop a slot, drop its databases, release it
 #   slot.sh list                                    every running stack, slot 0 included
-#   slot.sh gc                                      release every slot whose instance is gone
-#                                                   (not the ones stop-local stopped)
+#   slot.sh gc                                      release every slot whose worktree is gone
 #   slot.sh stop-all | down-all                     for stop-local / reset-local
 #   slot.sh db-reset [N]                            drop the databases and start again
 #
@@ -47,8 +46,8 @@ _claim_field() {  # N field
 }
 
 # starting: an `up` or `restart` holds the slot's start lock; running / failed: its instance
-# answers, and is ready or has a failed process; stopped: `stop-local` stopped it on purpose
-# (kept, and left alone by `slots-gc`); dead: claimed, but no instance answers.
+# answers, and is ready or has a failed process; stopped: claimed, but no instance answers (stopped,
+# crashed, or the machine rebooted) — kept with its databases until `just down` or its worktree goes.
 _state() {  # N
   if slot_locked "$SLOTS_DIR/$1/start.flock"; then
     echo starting
@@ -58,10 +57,8 @@ _state() {  # N
       starting*) echo starting ;;
       *) echo failed ;;
     esac
-  elif [[ -f "$SLOTS_DIR/$1/stopped" ]]; then
-    echo stopped
   else
-    echo dead
+    echo stopped
   fi
 }
 
@@ -142,9 +139,6 @@ _start() {  # N
   # start-local.sh, would otherwise inherit it and keep the slot "starting" for as long as it runs.
   # shellcheck disable=SC2086 # args are our own flags, no spaces
   if "$worktree/scripts/start-local.sh" --slot "$n" --headless $args > "$dir/up.log" 2>&1 7>&-; then
-    # Only now: a start that fails early (an expired SSO session, Docker down) leaves no instance,
-    # and a slot stopped on purpose must not then read as dead to gc.
-    rm -f "$dir/stopped"
     slot_unlock 7
     cat "$dir/stack.json"
     echo
@@ -252,7 +246,7 @@ cmd_up() {
   done
   if [[ -z "$n" ]]; then
     slot_unlock 8
-    err "No free slot${want:+ ($want is taken or its ports are in use)}. See 'just slots'; 'just slots-gc' releases dead ones."
+    err "No free slot${want:+ ($want is taken or its ports are in use)}. See 'just slots': 'just down N' releases one, 'just slots-gc' those whose worktree is gone."
   fi
   for a in ${flags[@]+"${flags[@]}"}; do
     case "$a" in --local-idp|--debug) new_args+=("$a") ;; esac
@@ -353,18 +347,18 @@ cmd_list() {
 }
 
 cmd_gc() {
-  local n
-  # Without process-compose every running slot would read as dead — and be released.
-  _need_pc
-  # Under the claim lock throughout: a slot found dead is released before anyone can claim it.
+  local n worktree
+  # A slot is released when its worktree is gone — the one unambiguous sign it is abandoned. A slot
+  # that merely is not running (stopped, crashed, the machine rebooted) keeps its databases: `just
+  # up` from its worktree starts it again, `just down N` releases it. Under the claim lock, so a
+  # slot released here cannot be claimed half-way; a slot whose start lock is held is busy.
   slot_lock "$CLAIM_LOCK" 8
   for n in 1 2 3 4 5 6 7 8; do
     [[ -d "$SLOTS_DIR/$n" ]] || continue
-    if [[ ! -f "$SLOTS_DIR/$n/claim.json" ]] || [[ "$(_state "$n")" == dead ]]; then
-      # A restart in progress holds the start lock (and its slot reads as dead while it stops).
-      slot_lock "$SLOTS_DIR/$n/start.flock" 7 0 2>/dev/null || continue
-      _release "$n" || true
-    fi
+    worktree="$(_claim_field "$n" worktree)"
+    [[ -z "$worktree" || ! -d "$worktree" ]] || continue
+    slot_lock "$SLOTS_DIR/$n/start.flock" 7 0 2>/dev/null || continue
+    _release "$n" || true
   done
   slot_unlock 8
 }
@@ -384,30 +378,29 @@ cmd_stop_all() {
   for n in 1 2 3 4 5 6 7 8; do
     [[ -f "$SLOTS_DIR/$n/claim.json" ]] || continue
     slot_lock "$SLOTS_DIR/$n/start.flock" 7 0 2>/dev/null || { busy="$busy $n"; continue; }
-    # Only a slot that runs is stopped on purpose; a dead one stays dead, for gc to release.
     if slot_pc_running "$n"; then
       _stop "$n"
-      touch "$SLOTS_DIR/$n/stopped"
+      note "Slot $n stopped (claim and databases kept; 'just up' from its worktree starts it again)"
     fi
     slot_unlock 7
-    [[ ! -f "$SLOTS_DIR/$n/stopped" ]] || note "Slot $n stopped (claim and databases kept; 'just up' from its worktree starts it again)"
   done
   # A slot mid-start would lose the infrastructure under it: stop here, before compose down.
   [[ -z "$busy" ]] || err "Slot(s)$busy are starting or stopping; try again once they are done"
 }
 cmd_down_all() {
-  local n busy=""
+  local n
+  # Nothing is released while a slot is starting: reset-local stops before compose down.
   for n in 1 2 3 4 5 6 7 8; do
     [[ -d "$SLOTS_DIR/$n" ]] || continue
-    slot_lock "$SLOTS_DIR/$n/start.flock" 7 0 2>/dev/null || { busy="$busy $n"; continue; }
-    # reset-local removes the database volumes next, so a database that cannot be dropped now
-    # (PostgreSQL already stopped, e.g. after stop-local) goes with them: release the slot anyway.
-    if ! _release "$n" 2>/dev/null; then
-      rm -rf "${SLOTS_DIR:?}/$n"
-      note "Slot $n released (its databases go with the volumes)"
-    fi
+    ! slot_locked "$SLOTS_DIR/$n/start.flock" || err "Slot $n is starting or stopping; try again once it is done"
   done
-  [[ -z "$busy" ]] || err "Slot(s)$busy are starting or stopping; try again once they are done"
+  # The databases go with the volumes reset-local removes next: stop each stack, drop the claim.
+  for n in 1 2 3 4 5 6 7 8; do
+    [[ -d "$SLOTS_DIR/$n" ]] || continue
+    _stop "$n"
+    rm -rf "${SLOTS_DIR:?}/$n"
+    note "Slot $n released"
+  done
 }
 
 case "${1:-}" in

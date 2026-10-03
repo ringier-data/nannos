@@ -53,9 +53,10 @@ backend would land on 5401.
 - **`just restart [N]`** stops and starts the slot again on its databases, applying any new
   migrations. **`just down [N]`** stops it, removes its gateway container, drops its databases and
   releases the claim. **`just db-reset [N]`** drops the databases and starts again.
-- **`just slots`** lists slot 0 and every claim with its state (starting, running, failed, stopped,
-  dead), branch and worktree; **`just slots-gc`** releases every slot whose stack is gone — not
-  one `stop-local` stopped on purpose.
+- **`just slots`** lists slot 0 and every claim with its state (starting, running, failed,
+  stopped), branch and worktree; **`just slots-gc`** releases every slot whose worktree is gone.
+  A slot that merely is not running — stopped, crashed, or the machine rebooted — keeps its
+  databases: whether nothing answers is no proof a slot is abandoned, a removed worktree is.
 
 ## Why
 

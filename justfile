@@ -1219,7 +1219,7 @@ down *ARGS:
 slots:
   ./scripts/local-dev/slot.sh list
 
-# Release every slot whose stack is gone (stops its gateway, drops its databases)
+# Release every slot whose worktree is gone (stops its stack, drops its databases)
 slots-gc:
   ./scripts/local-dev/slot.sh gc
 
