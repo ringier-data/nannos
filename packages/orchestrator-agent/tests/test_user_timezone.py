@@ -1,6 +1,5 @@
 """The user's saved settings reach UserConfig and the time tool (nannos#343)."""
 
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Annotated, TypedDict
 from unittest.mock import AsyncMock, Mock, patch
@@ -14,6 +13,7 @@ from langgraph.prebuilt import ToolNode
 from app.core.executor import OrchestratorDeepAgentExecutor
 from app.core.registry import RegistryService, User, UserSettings
 from app.core.time_tools import create_time_tool
+from app.models.config import GraphRuntimeContext
 
 # UserSettings fields that are bookkeeping, or that map onto a differently named User field.
 _NOT_COPIED_BY_NAME = {"user_id", "created_at", "updated_at", "mcp_tools"}
@@ -34,7 +34,11 @@ def test_to_user_copies_every_setting():
         thinking_level="high",
         tool_bypass_rules={"tool_a": {"mode": "all"}},
     )
-    unset = [name for name in UserSettings.model_fields if getattr(settings, name) is None]
+    unset = [
+        name
+        for name, field in UserSettings.model_fields.items()
+        if not field.is_required() and getattr(settings, name) == field.get_default(call_default_factory=True)
+    ]
     assert not unset, f"give these a non-default value in the test: {unset}"
 
     user = RegistryService()._to_user("sub-123", [], settings)
@@ -73,22 +77,20 @@ async def test_user_config_uses_saved_timezone():
     assert user_config.timezone == "America/New_York"
 
 
-@dataclass
-class _Context:
-    timezone: str
-
-
 class _State(TypedDict):
     messages: Annotated[list, add_messages]
 
 
 def _run_time_tool(args: dict, timezone: str) -> str:
-    graph = StateGraph(_State, context_schema=_Context)
+    graph = StateGraph(_State, context_schema=GraphRuntimeContext)
     graph.add_node("tools", ToolNode([create_time_tool()]))
     graph.add_edge(START, "tools")
     graph.add_edge("tools", END)
     call = AIMessage(content="", tool_calls=[{"id": "c1", "name": "get_current_time", "args": args}])
-    result = graph.compile().invoke({"messages": [call]}, context=_Context(timezone=timezone))
+    result = graph.compile().invoke(
+        {"messages": [call]},
+        context=GraphRuntimeContext(user_id="u", user_sub="s", name="n", email="e", timezone=timezone),
+    )
     return result["messages"][-1].content
 
 

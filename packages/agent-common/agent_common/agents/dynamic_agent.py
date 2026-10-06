@@ -1915,6 +1915,8 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                 tool_bypass_rules=self._tool_bypass_rules,
                 tool_risk_cache=self._tool_risk_cache,
                 _pending_bypass_rules=self._pending_bypass_rules,
+                # Read by get_current_time when the model omits the timezone.
+                timezone=self.user_timezone,
             )
             # Catalog mode: expose the catalog through the runtime context so the
             # PTC middleware (expose_context_registry=True) can route it into
