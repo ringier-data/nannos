@@ -580,7 +580,7 @@ class AgentSettings:
         "<time_and_date>\n"
         "For any time-related query, use the get_current_time tool. Do not rely on training data.\n"
         "Use structured parameters: base ('now', 'today', etc.), delta_value (integer), delta_unit ('days', 'weeks', etc.).\n"
-        "The tool uses the user's configured timezone automatically.\n"
+        "The tool uses the user's configured timezone unless you pass another one.\n"
         "<examples>\n"
         "  - tomorrow = get_current_time(base='today', delta_value=1, delta_unit='days')\n"
         "  - next week = get_current_time(base='start_of_week', delta_value=1, delta_unit='weeks')\n"

@@ -149,7 +149,7 @@ class User(BaseModel):
     )  # Maps agent_url -> {sub_agent_id, name, description}
     tool_names: list[str] = Field(default_factory=list)  # MCP tool names enabled for orchestrator
     language: str = Field(default_factory=lambda: os.getenv("DEFAULT_LANGUAGE", "en"))  # User's preferred language
-    timezone: str | None = None  # User's preferred IANA timezone (None = deployment default)
+    timezone: str = Field(default_factory=lambda: os.getenv("DEFAULT_TIMEZONE", "UTC"))  # User's IANA timezone
     custom_prompt: str | None = None  # User's custom prompt addendum
     local_subagents: list[LocalSubAgentConfig] = Field(default_factory=list)  # Local sub-agents
     catalog_ids: list[str] = Field(default_factory=list)  # Accessible catalog IDs for catalog_search
