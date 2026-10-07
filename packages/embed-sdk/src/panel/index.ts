@@ -3,6 +3,7 @@
 
 // The assembled panel + style isolation.
 export { AssistantPanel, type AssistantPanelProps } from './assistant-panel';
+export { AssistantDock, type AssistantDockProps } from './assistant-dock';
 export { PanelLayoutProvider, usePanelLayout, type PanelLayout } from './layout';
 export { ShadowPortal, type ShadowPortalProps } from './shadow-portal';
 export { themeSheet, type NannosTheme } from '../styles/theme-sheet';
@@ -56,7 +57,6 @@ export {
   type InterruptCardProps,
 } from './components/interrupt-card';
 export { Receipt, ReceiptLine, type ReceiptProps, type ReceiptOutcome } from './components/receipt';
-export { ApplyModeSwitch, type ApplyModeSwitchProps } from './components/apply-mode-switch';
 export { WorkingBlock, type WorkingBlockProps } from './components/working-block';
 export { ContextChip, type ContextChipProps } from './components/context-chip';
 export {
@@ -70,14 +70,6 @@ export {
   resolveDevMode,
   type DevModeValue,
 } from './dev-mode';
-export {
-  ApplyModeProvider,
-  useApplyMode,
-  useApplyModeControls,
-  readStoredApplyMode,
-  type ApplyMode,
-  type ApplyModeValue,
-} from './apply-mode';
 export {
   MessageFeedback,
   ConversationFeedbackProvider,

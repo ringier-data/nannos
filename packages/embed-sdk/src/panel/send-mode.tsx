@@ -8,8 +8,7 @@
  *
  * With no turn running both modes are a plain send, so the composer only shows
  * the control while the agent is busy. The choice is a per-viewer convenience:
- * it lives in `localStorage` and never leaves the browser (same shape as
- * `apply-mode.tsx`).
+ * it lives in `localStorage` and never leaves the browser.
  */
 import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from 'react';
 

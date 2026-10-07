@@ -6,8 +6,9 @@ Embed the Nannos assistant into any React app. You get three things:
    docked beside the page or dropped into any container you own.
 2. **In-form actions** — the agent fills/updates the form the user is looking
    at (`apply`), points at fields (`highlight`), moves them (`navigate`), or
-   reads what they see (`read_current_page`), through *your* form layer, gated
-   by human approval. `apply` and `read_current_page` are ROUND TRIPS: the turn
+   reads what they see (`read_current_page`), through *your* form layer. Form
+   fills (`apply`) run without an approval card and mark the changed fields;
+   saving (`submit`) asks for approval. `apply` and `read_current_page` are ROUND TRIPS: the turn
    pauses until the browser reports what actually happened (which fields
    landed vs. were rejected; the sanitized page snapshot), so the agent never
    assumes success.
@@ -66,8 +67,10 @@ import { NannosProvider } from '@nannos/embed-sdk/react';
     backendUrl: 'https://console.your-nannos.example', // omit for same-origin console usage
     getToken: () => auth.getAccessToken(),             // or `auth={pkce({...})}` — see Auth
   }}
-  navigate={(to) => router.push(to)}   // client-action `navigate`
-  highlight={myHighlight}              // client-action `highlight` (host DOM knowledge)
+  {...createClientActionHandlers({     // client-actions `navigate` + `highlight` (see below)
+    navigate: (to) => router.push(to),
+    resolveFieldLabel: (type, field) => resolveHighlightLabel(types, type, field),
+  })}
   onApplyResult={(t, {rejected}) => rejected.length && toast.warn(...)}
   onError={(e) => Sentry.addBreadcrumb({ category: 'nannos', message: `${e.type}: ${e.message}` })}
   strings={myStringOverrides}          // i18n — see below
@@ -106,12 +109,26 @@ const {
 - Outside a provider `useAssistant()` returns a stable no-op value — pages
   with "Ask AI" affordances render fine without the integration mounted.
 
+`createClientActionHandlers({ navigate?, resolveFieldLabel?, highlightColor? })`
+is the generic `navigate`/`highlight` pair every React host needs; build it once
+(module scope or `useMemo`). `navigate` refuses off-origin targets (the agent
+reads customer-supplied text, so a target is untrusted) and routes the rest
+through your router. `highlight` scrolls a field into view and outlines it for
+two seconds, finding it by `[data-nannos-field="…"]`, then `[name="…"]`, then
+the label text your registry declares (`<label for>` target). It searches inside
+`[data-nannos-object="Type:id"]` when the host marks the form, else the topmost
+open dialog first, then the page.
+
 ### 2. The panel, in a container you own
 
 ```tsx
-import { AssistantPanel } from '@nannos/embed-sdk/panel';
+import { AssistantDock, AssistantPanel } from '@nannos/embed-sdk/panel';
 
-// Shadow-DOM isolated (default) — for embedding into a foreign design system:
+// Docked at the right edge, resizable, rendered only while open — give the page
+// `padding-right: var(--nannos-panel-width, 0px)` and it yields the width when pinned:
+<AssistantDock zIndex={1250} styles={[mySheet]} />
+
+// Or your own container. Shadow-DOM isolated (default) — for a foreign design system:
 <div style={{ position: 'fixed', top: 0, right: 0, height: '100vh', width: panelWidth }}>
   <AssistantPanel />
 </div>
@@ -183,8 +200,11 @@ export const useNannosForm = createNannosForm(types);
 useNannosForm({ form, type: 'Invoice', id: invoiceId });
 ```
 
-(`useNannosZodForm` remains the low-level hook; `useObjectStateAdapter` binds
-non-form state containers.) Validation is per field: a value the agent guessed
+(`useNannosZodForm` remains the low-level hook.) Forms that are not
+react-hook-form bind through an adapter: `useObjectStateAdapter(state, patch)` for
+one state object, `useStateFieldsAdapter({ name: [name, setName], … })` for one
+`useState` per field. Register only while the form is visible — mount the
+binding inside the dialog content, not in a parent that outlives the dialog. Validation is per field: a value the agent guessed
 wrong is skipped while the rest land — wire `onApplyResult` to surface it.
 
 ### 4. Publish the current page (live context)

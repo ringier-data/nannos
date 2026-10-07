@@ -82,14 +82,8 @@ export const en: NannosStrings = {
   'hitl.clientAction.highlight': 'Points at something on this page.',
   'hitl.clientAction.navigate': 'Opens another page in this app.',
   'hitl.clientAction.readCurrentPage': 'Reads what is on this page.',
-
-  'applyMode.heading': 'Modes',
-  'applyMode.manual': 'Manual',
-  'applyMode.allowEdits': 'Allow edits',
-  'applyMode.manualHint': 'Nannos asks for approval before it fills in a form',
-  'applyMode.allowEditsHint':
-    'Nannos will fill in forms without asking.',
-  'applyMode.label': 'Change how Nannos fills in forms',
+  'hitl.clientAction.submit': 'Saves a form on this page.',
+  'hitl.clientAction.invoke': 'Presses “{action}” on this page, which takes effect right away.',
 
   'auth.title': 'Authorization needed',
   'auth.titleService': 'Authorization needed for {service}',
@@ -111,6 +105,7 @@ export const en: NannosStrings = {
   'receipt.authorizedAny': 'Authorization complete',
   'receipt.skippedAny': 'Skipped the authorization',
   'receipt.undecided': '{subject} was never decided',
+  'receipt.answeredInChat': 'Answered {subject} in chat',
   'receipt.retried': 'asked Nannos to retry',
   'receipt.risk': '{level} risk',
 

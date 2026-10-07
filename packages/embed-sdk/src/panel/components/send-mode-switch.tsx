@@ -4,9 +4,16 @@
  * appears ONLY while a turn runs — with nothing running the two modes are the
  * same plain send, and a choice with no consequence is noise.
  *
- * Same hand-rolled menu as `<ApplyModeSwitch>`, for the same reason: Radix
- * popovers dismiss themselves inside a Shadow DOM (see that file). Positioned
- * against the composer's action row, hit-tested with `composedPath()`.
+ * Hand-rolled rather than Radix `Popover`, for the same reason the conversation
+ * history overlay is: the panel lives in a Shadow DOM, and there the Radix
+ * popover does not open at all. Radix's dismissable layer listens on
+ * `document`, where every event from inside a shadow root is RETARGETED to the
+ * shadow host: its outside-click test compares against an element it can never
+ * match, so the layer dismisses itself as it opens — nothing renders and
+ * nothing is logged. The hit test here is `composedPath()`, the one
+ * shadow-aware answer to "did this event come from inside my subtree", and
+ * there is no portal to escape through: the menu is positioned against the
+ * composer's action row (`relative`), which also bounds its width to the panel.
  */
 import { useEffect, useRef, useState } from 'react';
 import { CheckIcon, MessageSquareReplyIcon, OctagonXIcon, type LucideIcon } from 'lucide-react';

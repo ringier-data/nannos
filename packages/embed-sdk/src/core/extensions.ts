@@ -21,6 +21,11 @@ export const CLIENT_ACTION_EXT = 'urn:nannos:a2a:client-action:1.0';
  *  so this extension ADDS a part rather than replacing the state — a client that
  *  does not negotiate it still gets the text part and behaves as before. */
 export const IN_TASK_AUTH_EXT = 'urn:nannos:a2a:in-task-auth:1.0';
+/** How the server read a TYPED answer to a pending approval: a working status
+ *  whose DataPart is `{decisions: [{id, type, intent}]}`. A click carries its own
+ *  decision; words are classified server-side, and this reports the outcome so
+ *  the card can settle to what really happened. Display-only. */
+export const HITL_DECISION_EXT = 'urn:nannos:a2a:hitl-decision:1.0';
 
 /**
  * Message-metadata `kind` discriminators of the activity-log extension. No kind
@@ -40,6 +45,7 @@ export const SUPPORTED_EXTENSIONS = [
   CONVERSATION_ORIGIN_EXT,
   CLIENT_ACTION_EXT,
   IN_TASK_AUTH_EXT,
+  HITL_DECISION_EXT,
 ] as const;
 
 /** Value for the `X-A2A-Extensions` negotiation header. */

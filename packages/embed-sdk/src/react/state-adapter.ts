@@ -28,3 +28,42 @@ export function useObjectStateAdapter<T extends Record<string, unknown>>(
     []
   );
 }
+
+/** One form field held in its own `useState`: the value and its setter. */
+export type StateField<V = any> = readonly [value: V, set: (next: V) => void];
+
+/**
+ * Bind a form whose fields each live in their own `useState` to the `FormLike`
+ * seam — the common shape of hand-rolled forms:
+ *
+ * ```ts
+ * const form = useStateFieldsAdapter({ name: [name, setName], description: [description, setDescription] });
+ * useNannosForm({ form, type: 'Catalog', id });
+ * ```
+ *
+ * Stable identity like `useObjectStateAdapter` (reads go through a ref). A write
+ * to a field the map doesn't carry is ignored, and `getValues()` returns only
+ * the mapped fields. `hasField` tells the registration which fields are mapped,
+ * so a schema field left out of the map (not editable for this user, locked by
+ * a host) is not advertised to the agent and a write to it is reported rejected.
+ * Build the map conditionally to follow permissions — it re-registers on change.
+ */
+export function useStateFieldsAdapter(fields: Record<string, StateField>): FormLike {
+  const fieldsRef = useRef(fields);
+  fieldsRef.current = fields;
+
+  return useMemo(
+    () => ({
+      getValues: (name?: string) => {
+        const current = fieldsRef.current;
+        if (name !== undefined) return current[name]?.[0];
+        return Object.fromEntries(Object.entries(current).map(([key, [value]]) => [key, value]));
+      },
+      setValue: (name: string, value: unknown) => {
+        fieldsRef.current[name]?.[1](value);
+      },
+      hasField: (name: string) => Object.prototype.hasOwnProperty.call(fieldsRef.current, name),
+    }),
+    []
+  );
+}

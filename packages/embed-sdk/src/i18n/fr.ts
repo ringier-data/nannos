@@ -85,14 +85,8 @@ export const fr: NannosStrings = {
   'hitl.clientAction.highlight': 'Montre un élément de cette page.',
   'hitl.clientAction.navigate': 'Ouvre une autre page de cette application.',
   'hitl.clientAction.readCurrentPage': 'Lit ce qui se trouve sur cette page.',
-
-  'applyMode.heading': 'Modes',
-  'applyMode.manual': 'Manuel',
-  'applyMode.allowEdits': 'Autoriser les modifications',
-  'applyMode.manualHint': 'L’assistant demande votre accord avant de remplir un formulaire',
-  'applyMode.allowEditsHint':
-    'L’assistant remplit les formulaires sans demander. Vous vérifiez et enregistrez vous-même',
-  'applyMode.label': 'Changer la façon dont l’assistant remplit les formulaires',
+  'hitl.clientAction.submit': 'Enregistre un formulaire de cette page.',
+  'hitl.clientAction.invoke': 'Clique sur « {action} » sur cette page, ce qui prend effet immédiatement.',
 
   'auth.title': 'Autorisation requise',
   'auth.titleService': 'Autorisation requise pour {service}',
@@ -114,6 +108,7 @@ export const fr: NannosStrings = {
   'receipt.authorizedAny': 'Autorisation accordée',
   'receipt.skippedAny': 'Autorisation ignorée',
   'receipt.undecided': '{subject} n’a jamais été tranché',
+  'receipt.answeredInChat': '{subject} : réponse donnée dans le chat',
   'receipt.retried': 'nouvelle tentative demandée à l’assistant',
   'receipt.risk': 'risque {level}',
 

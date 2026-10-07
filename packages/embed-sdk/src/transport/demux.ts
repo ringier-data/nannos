@@ -23,6 +23,7 @@ import {
   ACTIVITY_LOG_KINDS,
   CLIENT_ACTION_EXT,
   FEEDBACK_REQUEST_EXT,
+  HITL_DECISION_EXT,
   HITL_EXT,
   INTERMEDIATE_OUTPUT_EXT,
   WORK_PLAN_EXT,
@@ -32,6 +33,7 @@ import { labelAgentEvent } from './wire-log';
 import { fileArrival, textArrival } from './ai-types';
 import type { ProviderMetadata } from 'ai';
 import type {
+  HitlTypedDecision,
   NannosMessageMetadata,
   NannosUIMessageChunk,
   ReviewConfig,
@@ -65,6 +67,7 @@ type DurablePart =
   | { type: 'data-agent-thought'; id: string; data: { agent: string; text: string; complete: boolean; startedAt: number; wire?: string; wireId?: string } }
   | { type: 'data-activity'; id: string; data: { text: string; source?: string; ts: number; wire?: string; wireId?: string } }
   | { type: 'data-auth-required'; id: string; data: { authUrl?: string; tool?: string; service?: string; message?: string; wire?: string; wireId?: string } }
+  | { type: 'data-hitl-decision'; id: string; data: { decisions: HitlTypedDecision[]; wire?: string; wireId?: string } }
   | { type: 'file'; url: string; mediaType: string; providerMetadata?: ProviderMetadata };
 
 /** Per-turn mutable state owned by the TurnSession; demux() mutates it. */
@@ -320,13 +323,14 @@ function emitAuthoritativeText(
 }
 
 /** HITL interrupt payload parsed from the input-required status message. */
-interface ParsedInterrupt {
+export interface ParsedInterrupt {
   reason: string;
   actionRequests: Array<{ name: string; args: Record<string, unknown>; description?: string }>;
   reviewConfigs: ReviewConfig[];
 }
 
-function parseInterrupt(data: AgentResponseData): ParsedInterrupt {
+/** Exported for the history mapper, which rebuilds the same parts on reload. */
+export function parseInterrupt(data: AgentResponseData): ParsedInterrupt {
   const parsed: ParsedInterrupt = { reason: '', actionRequests: [], reviewConfigs: [] };
   for (const part of data.status?.message?.parts ?? []) {
     const kind = getPartKind(part);
@@ -558,6 +562,22 @@ export function demux(state: DemuxState, data: AgentResponseData, wireId?: strin
         });
         out.push({ type: 'tool-approval-request', approvalId: partId, toolCallId: partId });
         return { chunks: out, done: 'input-required' };
+      }
+      return { chunks: out };
+    }
+
+    // #8b How the server read a reply the user TYPED at the previous turn's
+    // approval card. Durable, so a replay and the history keep it; the thread
+    // settles that card's receipt from it instead of guessing.
+    if (exts.includes(HITL_DECISION_EXT)) {
+      const dataPart = findDataPart(data.status?.message?.parts);
+      const decisions = (dataPart as { data?: { decisions?: unknown } })?.data?.decisions;
+      if (Array.isArray(decisions) && decisions.length > 0) {
+        const typed = decisions as HitlTypedDecision[];
+        const id = `${state.idPrefix}hitl-decision-${typed.map((d) => d.id ?? '').join(',')}`;
+        const part = { type: 'data-hitl-decision' as const, id, data: { decisions: typed, wire, wireId } };
+        logDurable(state, part);
+        out.push(part);
       }
       return { chunks: out };
     }

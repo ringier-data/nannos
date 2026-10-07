@@ -90,6 +90,28 @@ export interface RegisterInput<TState = unknown> {
    *  failed validation is skipped, not silently swallowed). Async handles are
    *  awaited before the result is read. */
   apply: (values: Partial<TState>) => void | ApplyResult | Promise<void | ApplyResult>;
+  /** Save the object through the host's own save action (the form's Save button
+   *  logic), for the agent's `submit` directive — which the user approves first.
+   *  Resolve `false` or `{ ok: false, detail }` when the save did not happen (e.g.
+   *  the form's validation refused it); anything else counts as saved. Absent → the
+   *  object is not `submittable` and the agent asks the user to save it. */
+  submit?: () => SubmitOutcome | Promise<SubmitOutcome>;
+  /** Named things the user could do here with a click that the assistant may do
+   *  too (`invoke`): enter edit mode, open a create dialog that has no route, start a
+   *  verification the user completes, run a dry-run check. An action does not persist
+   *  anything — saving is `submit`, which the user approves; that contract is why
+   *  `invoke` runs without approval — unless it is marked `requiresApproval` (a button
+   *  that saves on its own: "set as default", "run now"). Listed in the manifest. */
+  actions?: Record<string, ObjectAction>;
+  /** Write values back WITHOUT validation — undoing an assistant change restores what
+   *  the user had, which the schema need not accept (an empty required field). Absent →
+   *  undo goes through `apply`. */
+  restore?: (values: Partial<TState>) => void | Promise<void>;
+  /** Whether the form holds edits that are not saved — the user's own typing as well
+   *  as an earlier fill. The assistant's change marks only know its own fills, so
+   *  without this the agent refreshed over (or navigated away from) what the user typed.
+   *  Read each turn and before a navigate; absent = never dirty. */
+  isDirty?: () => boolean;
   /** Optional human-readable label for the per-turn manifest. */
   label?: string;
   /** Optional compact field list included in the manifest (progressive
@@ -106,6 +128,24 @@ export interface RegisterInput<TState = unknown> {
   includeValues?: boolean;
 }
 
+/** One action an object offers (see `RegisterInput.actions`). */
+export interface ObjectAction {
+  /** What the button says, e.g. "Edit configuration". */
+  label: string;
+  /** When to use it, for the agent. */
+  description?: string;
+  /** Arguments the action takes, if any. */
+  params?: FieldSpec[];
+  /** The action SAVES something (a one-click "set as default", "run now"): the agent's
+   *  invoke then gets the same approval card as a `submit`, and only the user's click
+   *  on Approve runs it — typed words never do. Absent → runs without a card. */
+  requiresApproval?: boolean;
+  /** Do it. Resolve `false` or `{ ok: false, detail }` when it could not run (tell
+   *  the agent why — e.g. "the check tool is not known to be read-only"); a `detail`
+   *  on success is handed to the agent too (e.g. what a check found). */
+  run: (args: Record<string, unknown>) => SubmitOutcome | Promise<SubmitOutcome>;
+}
+
 export interface ObjectHandle {
   readonly key: string; // `${type}:${id}`
   dispose: () => void;
@@ -120,11 +160,27 @@ export interface ApplyResult {
 }
 
 /** Compact per-turn manifest entry pushed to the agent (NOT full schema/state). */
+/** What a host `submit` reports: `false`/`{ok:false}` = not saved; else saved. */
+export type SubmitOutcome = void | boolean | { ok: boolean; detail?: string };
+
 export interface ManifestEntry {
   type: string;
   id: string;
   scope: Scope;
   label?: string;
+  /** The host registered a `submit`: the agent may propose saving it. */
+  submittable?: boolean;
+  /** The form holds unsaved edits (see `RegisterInput.isDirty`). */
+  unsaved?: boolean;
+  /** What the agent may `invoke` here (see `RegisterInput.actions`). */
+  actions?: Array<{
+    name: string;
+    label: string;
+    description?: string;
+    params?: FieldSpec[];
+    /** See `ObjectAction.requiresApproval`. */
+    requiresApproval?: true;
+  }>;
   fields?: string[];
   /** Typed field descriptors (see FieldSpec) — surfaced to the agent when present. */
   fieldSpecs?: FieldSpec[];
@@ -152,6 +208,12 @@ export interface NannosConfig {
   customHeaders?: Record<string, string>;
   /** Handshake timeout; defaults to 15s (console parity). */
   initTimeoutMs?: number;
+  /** Same-origin cookie session only: ask console-backend to bind THIS socket as the
+   *  console's own embedded assistant — the sub-agent whose embed binding lists the
+   *  console's OAuth client. The server decides (an unbound console connects unscoped);
+   *  the page still cannot name a sub-agent. Ignored with `getToken`/`auth`, whose
+   *  token's client already decides. Set per chat scope via `NannosChatScope embedScope`. */
+  embedScope?: boolean;
   // Embedded Nannos (ADR-0004/0006): WHICH scoped domain sub-agent runs is not
   // declared here. console-backend binds it to the token's OAuth client (`azp`)
   // at connect and stamps every turn server-side, so a page cannot pick a

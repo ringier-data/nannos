@@ -1,10 +1,19 @@
 import { describe, expect, it } from 'vitest';
-import { ACTIVITY_LOG_EXT, HITL_EXT, INTERMEDIATE_OUTPUT_EXT } from '../core/extensions';
-import { textArrivalTs } from './ai-types';
 import {
-  appendRestoredInterrupt,
-  findPendingInterrupt,
+  ACTIVITY_LOG_EXT,
+  CLIENT_ACTION_EXT,
+  HITL_DECISION_EXT,
+  HITL_EXT,
+  INTERMEDIATE_OUTPUT_EXT,
+} from '../core/extensions';
+import { textArrivalTs } from './ai-types';
+import type { Decision } from './approval-codec';
+import {
+  endsWithOpenPrompt,
+  isAnsweredInChat,
   rowsToUIMessages,
+  typedDecisionOf,
+  typedDecisionOutcome,
   type RestMessageRow,
 } from './history-mapper';
 
@@ -238,23 +247,222 @@ describe('rowsToUIMessages', () => {
   });
 });
 
-describe('findPendingInterrupt + appendRestoredInterrupt', () => {
-  it('detects an unresolved trailing interrupt and appends live-identical approval parts', () => {
-    const rows = [userRow(0, 'book it'), finalRow(1, 'Let me confirm.'), hitlRow(2, 'call-9')];
-    const interrupt = findPendingInterrupt(rows)!;
-    expect(interrupt.actionRequests).toHaveLength(1);
+/** The empty user row a HITL resume is persisted as: decisions on `dataParts`. */
+const resumeRow = (i: number, decisions: Decision[]): RestMessageRow => ({
+  id: `r${i}`,
+  role: 'user',
+  content: '',
+  created_at: t(i),
+  raw_payload: JSON.stringify({ message: '', dataParts: [{ decisions }] }),
+});
 
-    const messages = appendRestoredInterrupt(rowsToUIMessages(rows), interrupt);
+const clientActionRow = (i: number, requestId: string): RestMessageRow => ({
+  id: `ca${i}`,
+  role: 'agent',
+  kind: 'status-update',
+  state: 'input-required',
+  created_at: t(i),
+  raw_payload: JSON.stringify({
+    status: {
+      message: {
+        extensions: [CLIENT_ACTION_EXT],
+        parts: [{ kind: 'data', data: { request: { id: requestId, directive: { kind: 'navigate', to: '/x' } } } }],
+      },
+    },
+  }),
+});
+
+type ToolPart = {
+  type: 'dynamic-tool';
+  toolName: string;
+  toolCallId: string;
+  state: string;
+  input: Record<string, unknown>;
+  output?: unknown;
+  approval?: { id: string; approved?: boolean; reason?: string };
+};
+
+const toolParts = (message: { parts: Array<{ type: string }> }) =>
+  message.parts.filter((p) => p.type === 'dynamic-tool') as unknown as ToolPart[];
+
+describe('approval prompts in history', () => {
+  it('a still-open prompt on the newest message restores as the pending interrupt', () => {
+    const rows = [userRow(0, 'book it'), finalRow(1, 'Let me confirm.'), hitlRow(2, 'call-9')];
+    const messages = rowsToUIMessages(rows);
     const last = messages[messages.length - 1];
     expect(last.role).toBe('assistant');
-    const tool = last.parts.find((p) => p.type === 'dynamic-tool') as {
-      state: string;
-      toolCallId: string;
-      approval: { id: string };
-    };
-    expect(tool).toMatchObject({ state: 'approval-requested', toolCallId: 'call-9' });
-    expect(tool.approval.id).toBe('call-9');
+    const [tool] = toolParts(last);
+    expect(tool).toMatchObject({
+      state: 'approval-requested',
+      toolCallId: 'call-9',
+      toolName: 'book_flight',
+      approval: { id: 'call-9' },
+    });
+    expect(last.metadata?.hitl?.reason).toBe('Please review');
     expect(last.metadata?.hitl?.reviewConfigs).toHaveLength(1);
+  });
+
+  it('an approved prompt restores as its receipt, and the turn stays one message', () => {
+    const rows = [
+      userRow(0, 'update the agent'),
+      hitlRow(1, 'call-9'),
+      resumeRow(2, [{ id: 'call-9', type: 'approve' }]),
+      activityRow(3, 'Saving…'),
+      finalRow(4, 'Done.'),
+    ];
+    const messages = rowsToUIMessages(rows);
+    expect(messages.map((m) => m.role)).toEqual(['user', 'assistant']);
+    expect(messages[1].parts.map((p) => p.type)).toEqual(['dynamic-tool', 'data-activity', 'text']);
+    expect(toolParts(messages[1])[0]).toMatchObject({
+      state: 'output-available',
+      output: { approved: true },
+      approval: { id: 'call-9', approved: true },
+    });
+  });
+
+  it('a rejected prompt restores as denied, keeping the user\'s reason', () => {
+    const rows = [
+      userRow(0, 'update the agent'),
+      hitlRow(1, 'call-9'),
+      resumeRow(2, [{ id: 'call-9', type: 'reject', message: 'wrong agent' }]),
+      finalRow(3, 'OK, I left it alone.'),
+    ];
+    const [tool] = toolParts(rowsToUIMessages(rows)[1]);
+    expect(tool.state).toBe('output-denied');
+    expect(tool.approval).toMatchObject({ id: 'call-9', approved: false });
+    expect(JSON.parse(tool.approval!.reason!)).toMatchObject({ type: 'reject', message: 'wrong agent' });
+    expect(isAnsweredInChat(tool)).toBe(false);
+  });
+
+  it('a client_action round trip restores completed, with what the browser did', () => {
+    const result = { ok: true, page: '/x' };
+    const rows = [
+      userRow(0, 'take me there'),
+      clientActionRow(1, 'call-7'),
+      resumeRow(2, [{ id: 'call-7', type: 'approve', client_action_result: result }]),
+      finalRow(3, 'You are there.'),
+    ];
+    const [tool] = toolParts(rowsToUIMessages(rows)[1]);
+    expect(tool).toMatchObject({
+      toolName: 'client_action',
+      toolCallId: 'call-7#client-action',
+      state: 'output-available',
+      input: { directive: { kind: 'navigate', to: '/x' }, _clientActionRequest: true },
+      output: { approved: true, result },
+    });
+  });
+
+  it('a risk gate then its round trip on ONE call id settle as two parts', () => {
+    const rows = [
+      userRow(0, 'take me there'),
+      hitlRow(1, 'call-7'),
+      resumeRow(2, [{ id: 'call-7', type: 'approve' }]),
+      clientActionRow(3, 'call-7'),
+      resumeRow(4, [{ id: 'call-7', type: 'approve', client_action_result: { ok: true } }]),
+      finalRow(5, 'You are there.'),
+    ];
+    const tools = toolParts(rowsToUIMessages(rows)[1]);
+    expect(tools.map((p) => [p.toolCallId, p.state])).toEqual([
+      ['call-7', 'output-available'],
+      ['call-7#client-action', 'output-available'],
+    ]);
+  });
+
+  it('an unanswered client_action request on the newest message stays open for the auto-settle', () => {
+    const messages = rowsToUIMessages([userRow(0, 'take me there'), clientActionRow(1, 'call-7')]);
+    const [tool] = toolParts(messages[messages.length - 1]);
+    expect(tool).toMatchObject({
+      state: 'approval-requested',
+      toolCallId: 'call-7#client-action',
+      approval: { id: 'call-7#client-action' },
+      input: { _clientActionRequest: true },
+    });
+  });
+
+  it('a thread paused at an open card or client action needs no reconnect', () => {
+    // Reconnecting replayed the pending prompt as a second assistant message:
+    // after a reload the card was drawn twice, both live.
+    expect(endsWithOpenPrompt(rowsToUIMessages([userRow(0, 'book it'), hitlRow(1, 'call-9')]))).toBe(true);
+    expect(endsWithOpenPrompt(rowsToUIMessages([userRow(0, 'go'), clientActionRow(1, 'call-7')]))).toBe(true);
+    const answered = rowsToUIMessages([
+      userRow(0, 'book it'),
+      hitlRow(1, 'call-9'),
+      resumeRow(2, [{ id: 'call-9', type: 'approve' }]),
+      finalRow(3, 'Booked.'),
+    ]);
+    expect(endsWithOpenPrompt(answered)).toBe(false);
+    expect(endsWithOpenPrompt(rowsToUIMessages([userRow(0, 'hello')]))).toBe(false);
+  });
+
+  it('an older prompt the user answered by typing settles as answered-in-chat', () => {
+    const rows = [
+      userRow(0, 'update the agent'),
+      hitlRow(1, 'call-9'),
+      userRow(2, 'actually, never mind'),
+      finalRow(3, 'Fine.'),
+    ];
+    const messages = rowsToUIMessages(rows);
+    expect(messages.map((m) => m.role)).toEqual(['user', 'assistant', 'user', 'assistant']);
+    const [tool] = toolParts(messages[1]);
+    expect(tool.state).toBe('output-denied');
+    expect(isAnsweredInChat(tool)).toBe(true);
+    // Nothing anywhere is still awaiting a decision.
+    expect(messages.flatMap(toolParts).some((p) => p.state === 'approval-requested')).toBe(false);
+  });
+
+  it('a typed answer takes the outcome the server read from it', () => {
+    const decisionRow = (i: number, type: string, intent: string): RestMessageRow => ({
+      id: `d${i}`,
+      role: 'agent',
+      kind: 'status-update',
+      state: 'working',
+      created_at: t(i),
+      raw_payload: JSON.stringify({
+        status: {
+          message: {
+            extensions: [HITL_DECISION_EXT],
+            parts: [{ kind: 'data', data: { decisions: [{ id: 'call-9', type, intent }] } }],
+          },
+        },
+      }),
+    });
+    const restore = (type: string, intent: string) => {
+      const messages = rowsToUIMessages([
+        userRow(0, 'update the agent'),
+        hitlRow(1, 'call-9'),
+        userRow(2, 'yes, go ahead'),
+        decisionRow(3, type, intent),
+        finalRow(4, 'Done.'),
+      ]);
+      // The reading renders nothing of its own: the reply turn is just its answer.
+      expect(messages[3].parts.map((p) => p.type)).toEqual(['text']);
+      return toolParts(messages[1])[0];
+    };
+
+    const approved = restore('approve', 'approve');
+    expect(approved).toMatchObject({ state: 'output-available', output: { approved: true } });
+    expect(isAnsweredInChat(approved)).toBe(false);
+    expect(typedDecisionOutcome(typedDecisionOf(approved)!)).toBe('approved');
+
+    const refused = restore('reject', 'reject');
+    expect(refused.state).toBe('output-denied');
+    expect(typedDecisionOutcome(typedDecisionOf(refused)!)).toBe('rejected');
+
+    expect(typedDecisionOutcome(typedDecisionOf(restore('reject', 'change'))!)).toBe('changes');
+    expect(typedDecisionOutcome(typedDecisionOf(restore('reject', 'question'))!)).toBe('answeredInChat');
+  });
+
+  it('a prompt the turn moved past (a LATER status) is not pending', () => {
+    const rows = [userRow(0, 'book it'), hitlRow(1, 'call-9'), finalRow(2, 'Booked!')];
+    const [tool] = toolParts(rowsToUIMessages(rows)[1]);
+    expect(isAnsweredInChat(tool)).toBe(true);
+  });
+
+  it('an open prompt at the end of an OLDER page is not pending', () => {
+    const [, assistant] = rowsToUIMessages([userRow(0, 'book it'), hitlRow(1, 'call-9')], {
+      olderPage: true,
+    });
+    expect(isAnsweredInChat(toolParts(assistant)[0])).toBe(true);
   });
 
   it('the risk-gate status text never renders — the card speaks for it', () => {
@@ -268,19 +476,18 @@ describe('findPendingInterrupt + appendRestoredInterrupt', () => {
     const pending = rowsToUIMessages(open);
     expect(pending.flatMap((m) => m.parts).some((p) => p.type === 'text' && p.text.includes('risk score'))).toBe(false);
 
-    // Answered → the row leaves no trace at all.
-    const answered = rowsToUIMessages([...open, finalRow(2, 'Campaign created.')]);
+    // Answered → its receipt, never the gate's text.
+    const answered = rowsToUIMessages([
+      ...open,
+      resumeRow(2, [{ id: 'call-9', type: 'approve' }]),
+      finalRow(3, 'Campaign created.'),
+    ]);
     const texts = answered.flatMap((m) => m.parts).filter((p) => p.type === 'text') as Array<{ text: string }>;
     expect(texts.map((p) => p.text)).toEqual(['create the campaign', 'Campaign created.']);
   });
 
-  it('an interrupt resolved by a LATER status is not restored', () => {
-    const rows = [userRow(0, 'book it'), hitlRow(1, 'call-9'), finalRow(2, 'Booked!')];
-    expect(findPendingInterrupt(rows)).toBeNull();
-  });
-
-  it('no interrupt in plain history', () => {
-    expect(findPendingInterrupt([userRow(0, 'q'), finalRow(1, 'a')])).toBeNull();
+  it('no approval parts in plain history', () => {
+    expect(rowsToUIMessages([userRow(0, 'q'), finalRow(1, 'a')]).flatMap(toolParts)).toEqual([]);
   });
 });
 

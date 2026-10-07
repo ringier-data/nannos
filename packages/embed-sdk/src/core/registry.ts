@@ -22,6 +22,11 @@ export class ObjectRegistry {
     };
   }
 
+  /** The `type:id` of every object holding unsaved edits (`RegisterInput.isDirty`). */
+  dirty(): string[] {
+    return [...this.objects.entries()].filter(([, o]) => isDirty(o)).map(([key]) => key);
+  }
+
   get(type: string, id: string): RegisterInput | undefined {
     return this.objects.get(`${type}:${id}`);
   }
@@ -36,12 +41,25 @@ export class ObjectRegistry {
   /** Compact index pushed with each turn — progressive disclosure: no schema, no state. */
   manifest(): ManifestEntry[] {
     return [...this.objects.values()].map((o) => {
-      const { type, id, scope, label, fields, fieldSpecs, includeValues, getState } = o;
+      const { type, id, scope, label, fields, fieldSpecs, includeValues, getState, submit, actions } = o;
       const entry: ManifestEntry = {
         type,
         id,
         scope,
         ...(label ? { label } : {}),
+        ...(submit ? { submittable: true } : {}),
+        ...(isDirty(o) ? { unsaved: true } : {}),
+        ...(actions && Object.keys(actions).length
+          ? {
+              actions: Object.entries(actions).map(([name, a]) => ({
+                name,
+                label: a.label,
+                ...(a.description ? { description: a.description } : {}),
+                ...(a.params?.length ? { params: a.params } : {}),
+                ...(a.requiresApproval ? { requiresApproval: true as const } : {}),
+              })),
+            }
+          : {}),
         ...(fields?.length ? { fields } : {}),
         ...(fieldSpecs?.length ? { fieldSpecs } : {}),
       };
@@ -79,5 +97,14 @@ export class ObjectRegistry {
 
   private emit() {
     for (const fn of this.listeners) fn();
+  }
+}
+
+/** A host's dirty check may read state mid-render and throw: treat that as clean. */
+function isDirty(o: RegisterInput): boolean {
+  try {
+    return o.isDirty?.() === true;
+  } catch {
+    return false;
   }
 }

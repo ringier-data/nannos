@@ -123,11 +123,19 @@ describe('zodFormRegistration', () => {
     const adapter = makeAdapter();
     const setSpy = vi.spyOn(adapter, 'set');
     const reg = zodFormRegistration({ type: 'Campaign', id: 'new', scope: 'create', schema, adapter });
-    // `name` must be a string; a number fails safeParse → not written. Unknown key ignored.
+    // `name` must be a string; a number fails safeParse → not written. An unknown key is
+    // not written either — and it is REPORTED: a secret value the host keeps out of the
+    // schema must not read as "applied" to the agent (it claimed exactly that).
     const result = reg.apply({ name: 123 as unknown as string, bogus: 'x' } as never);
     expect(setSpy).not.toHaveBeenCalled();
-    // The rejection is surfaced, not silent.
-    expect(result).toEqual({ applied: [], rejected: [{ field: 'name', reason: 'failed schema validation' }] });
+    // The rejections are surfaced, not silent.
+    expect(result).toEqual({
+      applied: [],
+      rejected: [
+        { field: 'name', reason: 'failed schema validation' },
+        { field: 'bogus', reason: 'no such field in this form' },
+      ],
+    });
   });
 
   it('reports applied and rejected fields side by side', () => {
@@ -136,5 +144,30 @@ describe('zodFormRegistration', () => {
     const result = reg.apply({ name: 'OK', budget: 12 as unknown as string, startDate: 42 as unknown as string });
     expect(result?.applied.sort()).toEqual(['budget', 'name']);
     expect(result?.rejected).toEqual([{ field: 'startDate', reason: 'failed schema validation' }]);
+  });
+
+  it('advertises only the fields the adapter serves and rejects writes to the rest', () => {
+    const adapter = { ...makeAdapter(), has: (f: string) => f !== 'budget' };
+    const setSpy = vi.spyOn(adapter, 'set');
+    const reg = zodFormRegistration({ type: 'Campaign', id: '1', scope: 'update', schema, adapter });
+    expect(reg.fields).toEqual(['name', 'startDate']);
+    expect(reg.fieldSpecs?.map((s) => s.name)).toEqual(['name', 'startDate']);
+    expect(Object.keys(reg.getState() as object)).toEqual(['name', 'startDate']);
+    const result = reg.apply({ name: 'OK', budget: '5' });
+    expect(result).toEqual({ applied: ['name'], rejected: [{ field: 'budget', reason: 'not editable in this form' }] });
+    expect(setSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('asks a bridge, not the adapter, whether a bridged field is available', () => {
+    const adapter = { ...makeAdapter(), has: () => false };
+    const reg = zodFormRegistration({
+      type: 'Campaign',
+      id: '1',
+      scope: 'update',
+      schema,
+      adapter,
+      overrides: { startDate: { read: () => null, write: () => {}, available: () => true } },
+    });
+    expect(reg.fields).toEqual(['startDate']);
   });
 });

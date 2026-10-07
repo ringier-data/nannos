@@ -108,14 +108,9 @@ export interface NannosStrings {
   'hitl.clientAction.highlight': string;
   'hitl.clientAction.navigate': string;
   'hitl.clientAction.readCurrentPage': string;
-
-  // Apply mode — how much the assistant may do to a form on its own
-  'applyMode.heading': string;
-  'applyMode.manual': string;
-  'applyMode.allowEdits': string;
-  'applyMode.manualHint': string;
-  'applyMode.allowEditsHint': string;
-  'applyMode.label': string;
+  'hitl.clientAction.submit': string;
+  /** {action}: the button's label. */
+  'hitl.clientAction.invoke': string;
 
   // Secondary-authorization prompt (a tool needs the user's consent)
   'auth.title': string;
@@ -148,6 +143,9 @@ export interface NannosStrings {
   'receipt.skippedAny': string;
   /** The run ended with the request still open — nobody ever answered it. */
   'receipt.undecided': string;
+  /** Restored from history: the user typed a reply instead of deciding, so
+   *  the prompt's turn moved on with no decision on record. */
+  'receipt.answeredInChat': string;
   /** Tail of an authorization receipt: authorizing is the middle of the story. */
   'receipt.retried': string;
   /** Carried only when the risk was High or Critical. */
@@ -281,6 +279,7 @@ export const nannosStringKeys = [
   'receipt.authorizedAny',
   'receipt.skippedAny',
   'receipt.undecided',
+  'receipt.answeredInChat',
   'receipt.retried',
   'receipt.risk',
   'working.title',

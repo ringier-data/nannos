@@ -16,7 +16,7 @@ export {
   type SendContext,
   type SendClassification,
 } from './send-payload';
-export { encodeApproval, decodeApproval, type Decision, type ApprovalResponse } from './approval-codec';
+export { encodeApproval, decodeApproval, wireCallId, type Decision, type ApprovalResponse } from './approval-codec';
 export { sliceFromCodePoint, codePointLength } from './offsets';
 export { ConnectionStore, type ConnectionSnapshot } from './connection-store';
 export { WireLog, labelAgentEvent, type WireLogEntry, type ReplayEntry } from './wire-log';
@@ -32,8 +32,12 @@ export {
 } from './conversations-store';
 export {
   rowsToUIMessages,
-  findPendingInterrupt,
-  appendRestoredInterrupt,
+  endsWithOpenPrompt,
+  isAnsweredInChat,
+  answeredInChatPart,
+  typedDecisionOf,
+  typedDecisionOutcome,
+  typedDecisionsById,
   type RestMessageRow,
-  type RestoredInterrupt,
+  type RowsToUIMessagesOptions,
 } from './history-mapper';

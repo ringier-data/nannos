@@ -113,6 +113,11 @@ export interface NannosChatScopeProps {
   customHeaders?: Record<string, string>;
   /** Console sub-agent playground: scopes conversations + tags every send. */
   playground?: PlaygroundMode;
+  /** The console's own embedded assistant (cookie session): an own socket that asks
+   *  console-backend to bind it like an embedded host (`NannosConfig.embedScope`).
+   *  Its conversations are the bound agent's — editable here, listed apart from the
+   *  console's main chat, resumed under their own key. */
+  embedScope?: boolean;
   /** With nothing to resume: console adopts the most recent conversation,
    *  embedded surfaces start fresh. Default: true for the console's own
    *  cookie session, false for an embedded host (`core.isEmbedded()`). Every
@@ -124,7 +129,7 @@ export interface NannosChatScopeProps {
 }
 
 export function NannosChatScope(props: NannosChatScopeProps): ReactNode {
-  const { children, customHeaders, playground, adapter: adapterProp } = props;
+  const { children, customHeaders, playground, embedScope, adapter: adapterProp } = props;
   const assistant = useAssistant();
   const existing = useContext(ChatEngineContext);
   const core = assistant.core;
@@ -133,7 +138,7 @@ export function NannosChatScope(props: NannosChatScopeProps): ReactNode {
   // inside it) reuses the surrounding engine — two engines on one socket would
   // split the conversation list and double the handshake. A playground/custom-
   // headers scope always creates its own (own socket by design).
-  if (existing && !customHeaders && !playground) {
+  if (existing && !customHeaders && !playground && !embedScope) {
     return children;
   }
   if (!core) {
@@ -146,7 +151,7 @@ export function NannosChatScope(props: NannosChatScopeProps): ReactNode {
       core={core}
       adapter={adapterProp ?? assistant.adapter}
       pageContext={assistant.pageContext}
-      key={playground?.subAgentConfigHash ?? 'default'}
+      key={playground?.subAgentConfigHash ?? (embedScope ? 'embed-scope' : 'default')}
     >
       {children}
     </ChatScopeInner>
@@ -157,6 +162,7 @@ function ChatScopeInner({
   children,
   customHeaders,
   playground,
+  embedScope,
   autoSelectConversation,
   core,
   adapter,
@@ -180,9 +186,13 @@ function ChatScopeInner({
   const persistWire = useDevModeControls().available || resolveDevMode();
 
   const engine = useMemo<ChatEngine>(() => {
-    const ownSocket = !!customHeaders || !!playground;
+    const ownSocket = !!customHeaders || !!playground || !!embedScope;
     const client = ownSocket
-      ? new TransportClient({ ...core.config, customHeaders: { ...core.config.customHeaders, ...customHeaders } })
+      ? new TransportClient({
+          ...core.config,
+          customHeaders: { ...core.config.customHeaders, ...customHeaders },
+          ...(embedScope && { embedScope: true }),
+        })
       : core.transport;
 
     const resolved = resolveHostAdapter(adapter ?? {}, core.config);
@@ -205,10 +215,16 @@ function ChatScopeInner({
       sessionId,
     );
 
-    const embedded = !playground && core.isEmbedded();
+    const embedded = !playground && (!!embedScope || core.isEmbedded());
     const conversations = new ConversationsStore({
       fetch: fetcher,
       embedded,
+      ...(embedScope && {
+        getEmbeddedSubAgentId: () => connection.getSnapshot().embeddedAgent?.subAgentId,
+        // State-driven, not `whenReady()`: a first handshake attempt can fail before
+        // this scope's own socket is up, and the retry that succeeds settles nobody.
+        whenScoped: () => whenInitialized(connection, core.config.initTimeoutMs ?? 15_000),
+      }),
       subAgentConfigHash: playground?.subAgentConfigHash,
       getAgentUrl: () => resolved.defaults.agentUrl,
       autoSelectConversation: autoSelectConversation ?? !embedded,
@@ -310,6 +326,9 @@ function ChatScopeInner({
     const offTitles = engine.client.onConversationUpdated((update) => {
       engine.conversations.applyServerTitle(update.conversationId, update);
     });
+    // An own socket's navigate/highlight directives reach the host hooks only this way.
+    const offActions = ownSocket ? engine.core.routeClientActions(engine.client) : () => {};
+    // An embed scope's list is filtered by the agent the handshake binds — list after it.
     void engine.connection.initialize();
     void engine.conversations.loadList();
     // Seed persisted user settings once (model/thinking preferences).
@@ -323,6 +342,7 @@ function ChatScopeInner({
     });
     return () => {
       offTitles();
+      offActions();
       engine.transport.destroy();
       engine.connection.destroy();
       if (ownSocket) engine.client.disconnect();
@@ -330,6 +350,22 @@ function ChatScopeInner({
   }, [engine]);
 
   return <ChatEngineContext.Provider value={engine}>{children}</ChatEngineContext.Provider>;
+}
+
+/** Resolves once the connection is initialized, or after `timeoutMs` (fail open). */
+function whenInitialized(connection: ConnectionStore, timeoutMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    if (connection.getSnapshot().initialized) return resolve();
+    const timer = setTimeout(done, timeoutMs);
+    const off = connection.subscribe(() => {
+      if (connection.getSnapshot().initialized) done();
+    });
+    function done() {
+      clearTimeout(timer);
+      off();
+      resolve();
+    }
+  });
 }
 
 export { backendFetch };

@@ -4,13 +4,14 @@
  * seeding, keyset pagination, steering (send-while-streaming), the HITL
  * interrupt surface, and the seeded-prompt drain.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { directiveFromToolArgs, generateUUID } from '../../core';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { directiveFromToolArgs, generateUUID, settleRegistrations } from '../../core';
 import { useChat } from '@ai-sdk/react';
 import {
-  appendRestoredInterrupt,
+  answeredInChatPart,
   encodeApproval,
-  findPendingInterrupt,
+  wireCallId,
+  endsWithOpenPrompt,
   rowsToUIMessages,
   type NannosUIMessage,
   type ReviewConfig,
@@ -19,14 +20,32 @@ import {
 } from '../../transport';
 import { useAssistant } from '../../react';
 import { useChatEngine } from '../engine';
-import { CLIENT_ACTION_TOOL, clientActionKind } from '../tool-title';
-import { useApplyMode } from '../apply-mode';
+import { CLIENT_ACTION_TOOL } from '../tool-title';
 import { useConversations } from './use-conversations';
 
 const MESSAGE_PAGE_SIZE = 100;
 
-/** Shared empty set — a fresh one per render would re-run every dependent memo. */
-const EMPTY_IDS: ReadonlySet<string> = new Set();
+const NAVIGATED_KEY_PREFIX = 'nannos:navigated:';
+
+/**
+ * A navigate runs at most once per request, across remounts. Navigating can
+ * unmount the very panel that ran it (a host route that swaps out the layout)
+ * before the result is sent; the remount restores the unanswered request and
+ * would navigate again — forever. So the request is recorded before it runs,
+ * and a replay only reports the page the first run landed on. Other kinds
+ * replay as before: re-running them after a reload is the recovery.
+ */
+export function replayableDirective(approvalId: string, directive: unknown): unknown {
+  if ((directive as { kind?: unknown } | null)?.kind !== 'navigate') return directive;
+  const key = `${NAVIGATED_KEY_PREFIX}${approvalId}`;
+  try {
+    if (sessionStorage.getItem(key)) return { kind: 'read_current_page' };
+    sessionStorage.setItem(key, '1');
+  } catch {
+    /* no storage: the in-memory guard still covers re-renders */
+  }
+  return directive;
+}
 
 export interface PendingApproval {
   toolCallId: string;
@@ -84,7 +103,6 @@ export interface UseNannosChatValue {
 export function useNannosChat(conversationIdOverride?: string): UseNannosChatValue {
   const engine = useChatEngine();
   const assistant = useAssistant();
-  const applyMode = useApplyMode();
   const { activeConversationId } = useConversations();
 
   // A surface with no active conversation starts one: the id is minted during
@@ -135,11 +153,13 @@ export function useNannosChat(conversationIdOverride?: string): UseNannosChatVal
       });
       seeded = true;
       if (rows.items.length > 0 && chat.messages.length === 0) {
-        let mapped = rowsToUIMessages(rows.items);
-        const interrupt = findPendingInterrupt(rows.items);
-        if (interrupt) mapped = appendRestoredInterrupt(mapped, interrupt);
-        chat.messages = mapped;
+        // A prompt still open at the end comes back `approval-requested` — the
+        // pending interrupt, card and client-action auto-settle included.
+        chat.messages = rowsToUIMessages(rows.items);
       }
+      // Paused at a card that is already on screen: nothing to resume, and the
+      // snapshot's replay of that prompt would render it a second time.
+      if (endsWithOpenPrompt(chat.messages)) return;
       // Rejoin the stream room; an in-flight turn resumes via the snapshot.
       void chat.resumeStream();
     })();
@@ -182,6 +202,28 @@ export function useNannosChat(conversationIdOverride?: string): UseNannosChatVal
         status === 'streaming' ||
         status === 'submitted';
       const startTurn = () => {
+        // A reply TYPED while an approval card waits IS its answer — the server
+        // reads the words, and reports the reading (`data-hitl-decision`). Settle
+        // the card now so its buttons go inactive at once; it reads "answered in
+        // chat" until that reading lands. A panel-composed receipt is not one.
+        if (opts?.displayKind !== 'receipt') {
+          setMessages((prev) => {
+            const last = [...prev].reverse().find((m) => m.role === 'assistant');
+            const awaiting = (p: (typeof prev)[number]['parts'][number]) =>
+              p.type === 'dynamic-tool' &&
+              p.state === 'approval-requested' &&
+              !(p.input as { _clientActionRequest?: boolean } | undefined)?._clientActionRequest;
+            if (!last?.parts.some(awaiting)) return prev;
+            return prev.map((m) =>
+              m !== last
+                ? m
+                : {
+                    ...m,
+                    parts: m.parts.map((p) => (p.type === 'dynamic-tool' && awaiting(p) ? answeredInChatPart(p) : p)),
+                  },
+            );
+          });
+        }
         engine.conversations.noteTitle(conversationId, opts?.displayText ?? text);
         void sendMessage({
           text,
@@ -252,37 +294,6 @@ export function useNannosChat(conversationIdOverride?: string): UseNannosChatVal
       }));
   }, [lastAssistant]);
 
-  // --- apply mode: 'allow-edits' answers a form fill for the user -------------
-  // Only a `client_action` of kind `apply` — the write into a registered form.
-  // An unknown kind keeps its card: the agent scores those to interrupt as a
-  // fail-safe, and honouring that is the point of the fail-safe.
-  //
-  // `failedAutoApply` is the escape hatch. These entries are hidden from the
-  // card while the panel answers them, so a throw on the way out would hide a
-  // pending approval forever and park the turn. On failure the id comes back
-  // and the human sees the card, exactly as in manual mode.
-  const [failedAutoApply, setFailedAutoApply] = useState<ReadonlySet<string>>(EMPTY_IDS);
-  const autoApplyIds = useMemo<ReadonlySet<string>>(() => {
-    if (applyMode !== 'allow-edits' || isReadOnly) return EMPTY_IDS;
-    const ids = new Set<string>();
-    for (const p of interruptPending) {
-      if (p.toolName !== CLIENT_ACTION_TOOL) continue;
-      if (clientActionKind(p.input) !== 'apply') continue;
-      if (failedAutoApply.has(p.approvalId)) continue;
-      ids.add(p.approvalId);
-    }
-    return ids;
-  }, [applyMode, failedAutoApply, interruptPending, isReadOnly]);
-
-  // What a HUMAN is asked about. The panel's own answers never render a card.
-  const visiblePending = useMemo<PendingApproval[]>(
-    () =>
-      autoApplyIds.size === 0
-        ? interruptPending
-        : interruptPending.filter((p) => !autoApplyIds.has(p.approvalId)),
-    [autoApplyIds, interruptPending],
-  );
-
   // --- approval response ------------------------------------------------------
   // ONE pause for an approved `client_action`: the directive is already fully
   // described by the card's own args, so run it HERE, the moment the user
@@ -302,7 +313,8 @@ export function useNannosChat(conversationIdOverride?: string): UseNannosChatVal
         const directive = directiveFromToolArgs(pending.input);
         if (directive) {
           try {
-            const result = await engine.core.runClientAction(directive);
+            // Approved with a click, by construction: this is the card's Approve.
+            const result = await engine.core.runClientAction(directive, { approved: true });
             await addToolApprovalResponse({
               id: approvalId,
               ...encodeApproval({
@@ -320,21 +332,6 @@ export function useNannosChat(conversationIdOverride?: string): UseNannosChatVal
     },
     [addToolApprovalResponse, engine, interruptPending],
   );
-
-  // Fire the answers the mode implies. One attempt per approval id (the ref),
-  // so a re-render while the response is in flight cannot double-apply. The
-  // effect runs right after the render that hid the card, so nothing flashes.
-  const autoAppliedRef = useRef(new Set<string>());
-  useEffect(() => {
-    for (const approvalId of autoApplyIds) {
-      if (autoAppliedRef.current.has(approvalId)) continue;
-      autoAppliedRef.current.add(approvalId);
-      void respond(approvalId, true).catch(() => {
-        // Could not answer for the user — give the approval back to them.
-        setFailedAutoApply((prev) => new Set(prev).add(approvalId));
-      });
-    }
-  }, [autoApplyIds, respond]);
 
   // --- client-action auto-settle (the awaited round trip) ----------------------
   // The paused `client_action` tool sent a directive and awaits its RESULT:
@@ -357,7 +354,30 @@ export function useNannosChat(conversationIdOverride?: string): UseNannosChatVal
       if (settledActionsRef.current.has(approvalId)) continue;
       settledActionsRef.current.add(approvalId);
       void (async () => {
-        const result = await engine.core.runClientAction(input.directive);
+        // Right after a reload the restored request can run before the page has
+        // registered its target (a form that mounts once its data is in): wait for
+        // the registrations to settle rather than answer `unknown-target`.
+        const target = (input.directive as { target?: { type?: unknown; id?: unknown } }).target;
+        if (
+          target &&
+          typeof target.type === 'string' &&
+          typeof target.id === 'string' &&
+          !engine.core.registry.get(target.type, target.id)
+        ) {
+          await settleRegistrations(engine.core.registry);
+        }
+        // After a plain approve the tool asks for the result itself: the approval is the
+        // card for the same call, answered in this message.
+        const callId = wireCallId(approvalId);
+        const approved = lastAssistant.parts.some(
+          (p) =>
+            p.type === 'dynamic-tool' &&
+            p.toolCallId === callId &&
+            (p as { approval?: { approved?: boolean } }).approval?.approved === true,
+        );
+        const result = await engine.core.runClientAction(replayableDirective(approvalId, input.directive), {
+          approved,
+        });
         await addToolApprovalResponse({
           id: approvalId,
           ...encodeApproval({
@@ -399,7 +419,7 @@ export function useNannosChat(conversationIdOverride?: string): UseNannosChatVal
         hasMore: !!rows.nextCursor,
       });
       if (rows.items.length > 0) {
-        const older = rowsToUIMessages(rows.items);
+        const older = rowsToUIMessages(rows.items, { olderPage: true });
         setMessages((prev) => {
           const known = new Set(
             prev.flatMap((m) => [m.id, m.metadata?.persistedMessageId].filter(Boolean) as string[]),
@@ -420,7 +440,7 @@ export function useNannosChat(conversationIdOverride?: string): UseNannosChatVal
     send,
     stop,
     interrupt: {
-      pending: visiblePending,
+      pending: interruptPending,
       reason: lastAssistant?.metadata?.hitl?.reason,
       reviewConfigs: lastAssistant?.metadata?.hitl?.reviewConfigs ?? [],
       respond,

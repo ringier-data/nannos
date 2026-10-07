@@ -24,6 +24,19 @@ export interface ReviewConfig {
 }
 
 /**
+ * How the server read words the user TYPED while an approval was pending
+ * (`hitl-decision` extension). `type` is what happened to the call — only
+ * `approve` ran it; `intent` is how the words read, which can differ: a typed
+ * "yes" to a save that needs a click reads `approve` but did not run.
+ */
+export interface HitlTypedDecision {
+  /** The ask's `_call_id` — the HITL part's `toolCallId`. */
+  id?: string;
+  type: 'approve' | 'reject' | 'edit';
+  intent: 'approve' | 'reject' | 'change' | 'question' | 'none';
+}
+
+/**
  * Typed data parts carried inside a `NannosUIMessage`. Parts with a stable id
  * are RECONCILED in place by the AI SDK (re-emitting the same id updates the
  * part); `transient` parts are delivered to `onData` and never persisted into
@@ -59,6 +72,9 @@ export type NannosDataParts = {
     wire?: string;
     wireId?: string;
   };
+  /** How a typed reply answered the PREVIOUS turn's approval card. Renders
+   *  nothing itself: the thread settles that card's receipt from it. Persisted. */
+  'hitl-decision': { decisions: HitlTypedDecision[]; wire?: string; wireId?: string };
   /** Task status for the task panel. Transient. */
   task: { taskId?: string; state: string; progress?: number; title?: string };
   /** Proactive feedback prompt. Transient. */

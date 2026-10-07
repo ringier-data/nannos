@@ -17,7 +17,14 @@
  * decision never disappears behind a chevron unannounced.
  */
 import type { ReactNode } from 'react';
-import { CheckIcon, ClockIcon, RotateCcwIcon, ShieldCheckIcon, XIcon } from 'lucide-react';
+import {
+  CheckIcon,
+  ClockIcon,
+  MessageSquareIcon,
+  RotateCcwIcon,
+  ShieldCheckIcon,
+  XIcon,
+} from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { format, useStrings } from '../../react';
 import type { NannosStrings } from '../../i18n/keys';
@@ -30,7 +37,8 @@ export type ReceiptOutcome =
   | 'batch'
   | 'authorized'
   | 'skipped'
-  | 'undecided';
+  | 'undecided'
+  | 'answeredInChat';
 
 const OUTCOME_ICON: Record<ReceiptOutcome, typeof CheckIcon> = {
   approved: CheckIcon,
@@ -40,6 +48,7 @@ const OUTCOME_ICON: Record<ReceiptOutcome, typeof CheckIcon> = {
   authorized: ShieldCheckIcon,
   skipped: XIcon,
   undecided: ClockIcon,
+  answeredInChat: MessageSquareIcon,
 };
 
 const OUTCOME_KEY: Record<ReceiptOutcome, keyof NannosStrings> = {
@@ -50,6 +59,7 @@ const OUTCOME_KEY: Record<ReceiptOutcome, keyof NannosStrings> = {
   authorized: 'receipt.authorized',
   skipped: 'receipt.skipped',
   undecided: 'receipt.undecided',
+  answeredInChat: 'receipt.answeredInChat',
 };
 
 /**

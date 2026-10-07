@@ -85,14 +85,8 @@ export const it: NannosStrings = {
   'hitl.clientAction.highlight': 'Indica un elemento di questa pagina.',
   'hitl.clientAction.navigate': 'Apre un’altra pagina di questa app.',
   'hitl.clientAction.readCurrentPage': 'Legge ciò che si trova in questa pagina.',
-
-  'applyMode.heading': 'Modalità',
-  'applyMode.manual': 'Manuale',
-  'applyMode.allowEdits': 'Consenti modifiche',
-  'applyMode.manualHint': 'L’assistente chiede il tuo consenso prima di compilare un modulo',
-  'applyMode.allowEditsHint':
-    'L’assistente compila i moduli senza chiedere. Il controllo e il salvataggio restano a te',
-  'applyMode.label': 'Cambia il modo in cui l’assistente compila i moduli',
+  'hitl.clientAction.submit': 'Salva un modulo di questa pagina.',
+  'hitl.clientAction.invoke': 'Preme «{action}» in questa pagina, con effetto immediato.',
 
   'auth.title': 'Autorizzazione necessaria',
   'auth.titleService': 'Autorizzazione necessaria per {service}',
@@ -114,6 +108,7 @@ export const it: NannosStrings = {
   'receipt.authorizedAny': 'Autorizzazione completata',
   'receipt.skippedAny': 'Autorizzazione saltata',
   'receipt.undecided': 'Su {subject} non è mai stata presa una decisione',
+  'receipt.answeredInChat': '{subject}: risposta data in chat',
   'receipt.retried': 'chiesto all’assistente di riprovare',
   'receipt.risk': 'rischio {level}',
 

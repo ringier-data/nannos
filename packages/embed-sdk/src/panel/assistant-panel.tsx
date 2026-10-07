@@ -17,7 +17,6 @@ import { Button } from '../components/ui/button';
 import { cn } from '../lib/utils';
 import { useAssistant, useStrings, type NannosHostAdapter } from '../react';
 import { NannosChatScope, type PlaygroundMode } from './engine';
-import { ApplyModeProvider, type ApplyMode } from './apply-mode';
 import { SendModeProvider } from './send-mode';
 import { downloadTextFile, formatTranscript, slugifyFilename } from './transcript';
 import { ShadowPortal } from './shadow-portal';
@@ -57,6 +56,8 @@ export interface AssistantPanelProps {
   customHeaders?: Record<string, string>;
   /** Console sub-agent playground mode. */
   playground?: PlaygroundMode;
+  /** The console's own embedded assistant — see `NannosChatScope embedScope`. */
+  embedScope?: boolean;
   /** Host adapter override (defaults to the provider's). */
   adapter?: NannosHostAdapter;
   /**
@@ -65,13 +66,6 @@ export interface AssistantPanelProps {
    * `localStorage['nannos:dev'] = '1'` enables it without a rebuild.
    */
   devMode?: boolean;
-  /**
-   * How much the assistant may do to a form on its own — see `apply-mode.tsx`.
-   * `'manual'` asks before every fill; `'allow-edits'` lets the panel answer
-   * for the user. Set → the host decides and the header shows no control;
-   * unset → the viewer chooses, remembered in this browser.
-   */
-  applyMode?: ApplyMode;
   /**
    * `'panel'` (default) is the narrow docked surface every SDK style was tuned
    * for. `'page'` is a full-width host page: the thread and composer share a
@@ -376,9 +370,9 @@ export function AssistantPanel({
   className,
   customHeaders,
   playground,
+  embedScope,
   adapter,
   devMode,
-  applyMode,
   layout = 'panel',
 }: AssistantPanelProps) {
   const content = <PanelContent header={header} showConversationList={showConversationList} />;
@@ -386,19 +380,22 @@ export function AssistantPanel({
   return (
     <DevModeProvider enabled={resolveDevMode(devMode)}>
       <PanelLayoutProvider layout={layout}>
-        <ApplyModeProvider mode={applyMode}>
-          <SendModeProvider>
-            <NannosChatScope customHeaders={customHeaders} playground={playground} adapter={adapter}>
-              {shadow ? (
-                <ShadowPortal hostClassName={hostClassName} styles={styles} className={className}>
-                  {content}
-                </ShadowPortal>
-              ) : (
-                <div className={cn('nannos-chat flex h-full w-full flex-col', className)}>{content}</div>
-              )}
-            </NannosChatScope>
-          </SendModeProvider>
-        </ApplyModeProvider>
+        <SendModeProvider>
+          <NannosChatScope
+            customHeaders={customHeaders}
+            playground={playground}
+            embedScope={embedScope}
+            adapter={adapter}
+          >
+            {shadow ? (
+              <ShadowPortal hostClassName={hostClassName} styles={styles} className={className}>
+                {content}
+              </ShadowPortal>
+            ) : (
+              <div className={cn('nannos-chat flex h-full w-full flex-col', className)}>{content}</div>
+            )}
+          </NannosChatScope>
+        </SendModeProvider>
       </PanelLayoutProvider>
     </DevModeProvider>
   );

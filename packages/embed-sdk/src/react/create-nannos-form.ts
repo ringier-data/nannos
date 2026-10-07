@@ -1,5 +1,8 @@
+import { useEffect, useRef } from 'react';
 import { useNannosZodForm, type FormLike } from './use-nannos-form';
-import type { ZodObjectLike } from '../core';
+import type { ObjectAction, SubmitOutcome, ZodObjectLike } from '../core';
+import { useAssistant } from './provider';
+import { actionsSignature, stableActions } from './stable-actions';
 import {
   deriveManifestLabel,
   deriveObjectId,
@@ -20,6 +23,12 @@ export interface UseNannosFormOptions {
   /** Parent id, for `nested` types (e.g. the campaign a theme belongs to). */
   parentId?: RouteId;
   includeValues?: boolean;
+  /** The form's own save action — see `UseNannosZodFormOptions.submit`. */
+  submit?: () => SubmitOutcome | Promise<SubmitOutcome>;
+  /** What the agent may `invoke` on this form — see `UseNannosZodFormOptions.actions`. */
+  actions?: Record<string, ObjectAction>;
+  /** Whether the form holds unsaved edits — see `UseNannosZodFormOptions.isDirty`. */
+  isDirty?: () => boolean;
 }
 
 /** Registration degrades to a no-op object rather than throwing mid-render. */
@@ -43,6 +52,9 @@ export function createNannosForm(registry: ObjectTypeRegistry) {
     id,
     parentId,
     includeValues = true,
+    submit,
+    actions,
+    isDirty,
   }: UseNannosFormOptions): void {
     const definition = registry[type];
 
@@ -64,6 +76,63 @@ export function createNannosForm(registry: ObjectTypeRegistry) {
       overrides: definition?.overrides,
       includeValues,
       label: definition ? deriveManifestLabel(definition, id, parentId) : type,
+      submit,
+      actions,
+      isDirty,
     });
+  };
+}
+
+/**
+ * The view-mode counterpart of `createNannosForm`: registers a page's ACTIONS for an
+ * object shown read-only (a detail page before Edit, a list with a "New" button), so
+ * the agent can do what a click does — enter edit mode, open a dialog — and then fill
+ * the form that opens. Same type/id derivation as the form, so a view registration and
+ * the form that replaces it carry the same `type:id`; mount it only while the form is
+ * NOT mounted (one object per key).
+ */
+export function createNannosActions(registry: ObjectTypeRegistry) {
+  return function useNannosActions({
+    type,
+    id,
+    parentId,
+    actions,
+  }: {
+    type: string;
+    id: RouteId;
+    parentId?: RouteId;
+    actions: Record<string, ObjectAction>;
+  }): void {
+    const definition = registry[type];
+    const core = useAssistant().core;
+    const actionsRef = useRef<Record<string, ObjectAction> | undefined>(actions);
+    actionsRef.current = actions;
+    const sig = actionsSignature(actions);
+    const objectId = definition ? deriveObjectId(definition, id, parentId) : 'new';
+    const label = definition ? deriveManifestLabel(definition, id, parentId) : type;
+    useEffect(() => {
+      if (!core) return;
+      const handle = core.register({
+        type,
+        id: objectId,
+        scope: 'view',
+        label,
+        getState: () => ({}),
+        // Read-only here: the fields are filled after the action that opens the form —
+        // or never, when the host registered the object with no actions at all.
+        apply: (values) => ({
+          applied: [],
+          rejected: Object.keys(values as Record<string, unknown>).map((field) => ({
+            field,
+            reason: Object.keys(actionsRef.current ?? {}).length
+              ? 'read-only here — invoke the action that opens the form first'
+              : 'read-only here — the user cannot change this object on this page',
+          })),
+        }),
+        actions: stableActions(actionsRef),
+      });
+      return () => handle.dispose();
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [core, type, objectId, label, sig]);
   };
 }

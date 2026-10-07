@@ -84,14 +84,8 @@ export const de: NannosStrings = {
   'hitl.clientAction.highlight': 'Zeigt auf etwas auf dieser Seite.',
   'hitl.clientAction.navigate': 'Öffnet eine andere Seite in dieser App.',
   'hitl.clientAction.readCurrentPage': 'Liest, was auf dieser Seite steht.',
-
-  'applyMode.heading': 'Modi',
-  'applyMode.manual': 'Manuell',
-  'applyMode.allowEdits': 'Änderungen erlauben',
-  'applyMode.manualHint': 'Nannos fragt nach, bevor es ein Formular ausfüllt',
-  'applyMode.allowEditsHint':
-    'Nannos füllt Formulare ohne Rückfrage aus. Sie prüfen und speichern weiterhin selbst',
-  'applyMode.label': 'Ändern, wie Nannos Formulare ausfüllt',
+  'hitl.clientAction.submit': 'Speichert ein Formular auf dieser Seite.',
+  'hitl.clientAction.invoke': 'Klickt „{action}“ auf dieser Seite – das wirkt sofort.',
 
   'auth.title': 'Freigabe erforderlich',
   'auth.titleService': 'Freigabe erforderlich für {service}',
@@ -113,6 +107,7 @@ export const de: NannosStrings = {
   'receipt.authorizedAny': 'Freigabe erteilt',
   'receipt.skippedAny': 'Freigabe übersprungen',
   'receipt.undecided': 'Über {subject} wurde nie entschieden',
+  'receipt.answeredInChat': '{subject} im Chat beantwortet',
   'receipt.retried': 'Nannos um einen neuen Versuch gebeten',
   'receipt.risk': 'Risiko {level}',
 

@@ -55,8 +55,19 @@ import { cn } from '../../lib/utils';
 import { writeClipboard } from '../../lib/clipboard';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../../components/ui/tooltip';
 import { format, useStrings } from '../../react';
-import { fetchWireHistory, fileName, textArrivalTs, textWire, textWireId } from '../../transport';
-import type { NannosUIMessage, WireLogEntry } from '../../transport';
+import {
+  decodeApproval,
+  fetchWireHistory,
+  fileName,
+  isAnsweredInChat,
+  textArrivalTs,
+  textWire,
+  textWireId,
+  typedDecisionOf,
+  typedDecisionOutcome,
+  typedDecisionsById,
+} from '../../transport';
+import type { HitlTypedDecision, NannosUIMessage, WireLogEntry } from '../../transport';
 import { YamlView } from './yaml-view';
 import { useChatEngineOptional } from '../engine';
 import { useDevMode } from '../dev-mode';
@@ -517,7 +528,8 @@ function AssistantPart({
 }) {
   const devMode = useDevMode();
   const strings = useStrings();
-  const rendered = renderAssistantPart(part, send, devMode, strings);
+  const typed = useContext(TypedDecisionsContext);
+  const rendered = renderAssistantPart(part, send, devMode, strings, typed);
   if (rendered === null || !devMode) return rendered;
   return (
     <DevWirePart
@@ -565,11 +577,74 @@ function isClientActionRoundTrip(part: MessagePart): boolean {
   return Boolean((part.input as { _clientActionRequest?: boolean } | undefined)?._clientActionRequest);
 }
 
+/**
+ * How the server read replies the user TYPED at approval cards, by card id. The
+ * reading arrives with the NEXT turn, while the card it settles sits in the
+ * previous one — so it is looked up thread-wide rather than threaded through.
+ */
+const TypedDecisionsContext = createContext<ReadonlyMap<string, HitlTypedDecision>>(new Map());
+
+/**
+ * The receipt a SETTLED approval part leaves: the decision, never the tool's
+ * output. A card answered by typing takes the server's reading of the words
+ * when there is one, else "answered in chat" — never a rejection nobody made.
+ */
+function settledOutcome(
+  part: Extract<MessagePart, { type: 'dynamic-tool' }>,
+  typed: ReadonlyMap<string, HitlTypedDecision>,
+): ReceiptOutcome | null {
+  // A settled round trip leaves no receipt: "Approved client_action" describes
+  // work the SDK answered on its own, not a decision the user made.
+  if (isClientActionRoundTrip(part)) return null;
+  const decision = typedDecisionOf(part) ?? typed.get(part.toolCallId);
+  if (decision) return typedDecisionOutcome(decision);
+  if (isAnsweredInChat(part)) return 'answeredInChat';
+  if (part.state === 'output-available') return 'approved';
+  if (part.state === 'output-denied') return 'rejected';
+  return null;
+}
+
+/**
+ * The words the user gave with a Reject (the card's message box). They reach
+ * the agent; the receipt dropped them, so after the fact — and after a reload —
+ * the thread no longer said why the call was refused.
+ */
+function rejectionReason(part: Extract<MessagePart, { type: 'dynamic-tool' }>): string | undefined {
+  const approval = part.approval;
+  if (!approval || approval.approved !== false || !approval.reason) return undefined;
+  return decodeApproval(part.toolCallId, { approved: false, reason: approval.reason }).message || undefined;
+}
+
+const DEV_OUTCOME: Partial<Record<ReceiptOutcome, { state: 'output-available' | 'output-denied'; label: string }>> = {
+  approved: { state: 'output-available', label: 'Approved' },
+  rejected: { state: 'output-denied', label: 'Rejected' },
+  changes: { state: 'output-denied', label: 'Changes requested' },
+  answeredInChat: { state: 'output-denied', label: 'Answered in chat' },
+};
+
+/**
+ * The dev header's badge: what happened, not the raw part state. A typed approval
+ * settles the part as `output-denied` (shown "Denied" under an "Approved" receipt), and
+ * a browser action that failed still reads `output-available` ("Completed").
+ */
+function devStatus(
+  part: Extract<MessagePart, { type: 'dynamic-tool' }>,
+  outcome: ReceiptOutcome | null,
+): { state: Extract<MessagePart, { type: 'dynamic-tool' }>['state']; label?: string } {
+  const result = (part.output as { result?: { ok?: unknown } } | undefined)?.result;
+  if (part.state === 'output-available' && result && result.ok === false) {
+    return { state: 'output-error', label: 'Failed' };
+  }
+  const mapped = outcome ? DEV_OUTCOME[outcome] : undefined;
+  return mapped ?? { state: part.state };
+}
+
 function renderAssistantPart(
   part: MessagePart,
   send: UseNannosChatValue['send'],
   devMode: boolean,
   strings: ReturnType<typeof useStrings>,
+  typed: ReadonlyMap<string, HitlTypedDecision>,
 ): ReactNode | null {
   if (part.type === 'text') {
     if (!part.text) return null;
@@ -670,6 +745,7 @@ function renderAssistantPart(
     // the raw part left a dev-mode session unable to decide anything.
     const isRoundTrip = isClientActionRoundTrip(part);
     let endUser: ReactNode = null;
+    let outcome: ReceiptOutcome | null = null;
     if (part.state === 'approval-requested') {
       // Client-action round trips pause here too, but the SDK answers those
       // itself — a card would ask the user about work already under way.
@@ -678,21 +754,17 @@ function renderAssistantPart(
       // The turn pauses at the card and resumes with more steps: without a line
       // in between, a reader cannot tell why the work broke off or that they
       // decided anything.
-      // ...and a settled round trip leaves no receipt either: "Approved
-      // client_action" describes work the SDK answered on its own, not a decision
-      // the user made.
-      const outcome: ReceiptOutcome | null = isRoundTrip
-        ? null
-        : part.state === 'output-available'
-          ? 'approved'
-          : part.state === 'output-denied'
-            ? 'rejected'
-            : null;
+      outcome = settledOutcome(part, typed);
       endUser = outcome ? (
-        <Receipt outcome={outcome} subject={toolPartTitle(part.toolName, part.input)} />
+        <Receipt
+          outcome={outcome}
+          subject={toolPartTitle(part.toolName, part.input)}
+          reason={outcome === 'rejected' || outcome === 'changes' ? rejectionReason(part) : undefined}
+        />
       ) : null;
     }
     if (!devMode) return endUser;
+    const dev = devStatus(part, outcome);
     return (
       <div className="flex flex-col gap-1">
         {endUser}
@@ -703,7 +775,8 @@ function renderAssistantPart(
           <Tool data-slot="nannos-tool">
             <ToolHeader
               type="dynamic-tool"
-              state={part.state}
+              state={dev.state}
+              statusLabel={dev.label}
               toolName={part.toolName}
               title={toolPartTitle(part.toolName, part.input)}
             />
@@ -821,17 +894,21 @@ function groupActivity(parts: MessagePart[], fold: boolean): Array<MessagePart |
  * decisions. Counts settled HITL parts only: a pending one renders its card
  * outside the group, and an activity line is not a decision.
  */
-function countDecisions(parts: ActivityPart[], strings: ReturnType<typeof useStrings>): string {
+function countDecisions(
+  parts: ActivityPart[],
+  strings: ReturnType<typeof useStrings>,
+  typed: ReadonlyMap<string, HitlTypedDecision>,
+): string {
   let approved = 0;
   let rejected = 0;
   for (const part of parts) {
     if (part.type !== 'dynamic-tool') continue;
-    // The panel settles client-action round trips itself (and `allow-edits`
-    // auto-applies to `output-available` too), so counting them read "2 approved"
-    // at a user who was never asked anything.
-    if (isClientActionRoundTrip(part)) continue;
-    if (part.state === 'output-available') approved += 1;
-    else if (part.state === 'output-denied') rejected += 1;
+    // The panel settles client-action round trips itself, so counting them read
+    // "2 approved" at a user who was never asked anything — and a typed answer
+    // that was a question, or a change request, decided neither way.
+    const outcome = settledOutcome(part, typed);
+    if (outcome === 'approved') approved += 1;
+    else if (outcome === 'rejected') rejected += 1;
   }
   return [
     approved > 0 ? format(strings['thread.activityApproved'], { count: approved }) : null,
@@ -862,7 +939,7 @@ function ActivityGroup({
   // Receipts fold with the rest of the steps — but a decision the user made must
   // never disappear behind a chevron unannounced, so the collapsed label counts
   // them. Nothing is appended when the group holds no decisions.
-  const decisions = countDecisions(parts, strings);
+  const decisions = countDecisions(parts, strings, useContext(TypedDecisionsContext));
   const label = decisions ? `${steps} · ${decisions}` : steps;
   return (
     <div data-slot="nannos-activity-group" className="flex flex-col gap-1">
@@ -1008,6 +1085,7 @@ export function mergeAssistantRuns(messages: NannosUIMessage[]): NannosUIMessage
 
 export function Thread({ chat, className, showContinue = true }: ThreadProps) {
   const strings = useStrings();
+  const typedDecisions = useMemo(() => typedDecisionsById(chat.messages), [chat.messages]);
   const layout = usePanelLayout();
   const lastMessage = chat.messages[chat.messages.length - 1];
   const lastHasStreamingText =
@@ -1059,15 +1137,17 @@ export function Thread({ chat, className, showContinue = true }: ThreadProps) {
                 interest in approvals; a context puts it exactly where it is
                 consumed. */}
             <PendingInterruptContext.Provider value={chat.interrupt}>
-              {mergeAssistantRuns(chat.messages).map((message, index, merged) => (
-                <ThreadMessage
-                  key={message.id}
-                  message={message}
-                  conversationId={chat.conversationId}
-                  showActions={!(chat.isBusy && index === merged.length - 1)}
-                  send={chat.send}
-                />
-              ))}
+              <TypedDecisionsContext.Provider value={typedDecisions}>
+                {mergeAssistantRuns(chat.messages).map((message, index, merged) => (
+                  <ThreadMessage
+                    key={message.id}
+                    message={message}
+                    conversationId={chat.conversationId}
+                    showActions={!(chat.isBusy && index === merged.length - 1)}
+                    send={chat.send}
+                  />
+                ))}
+              </TypedDecisionsContext.Provider>
             </PendingInterruptContext.Provider>
           </ConversationFeedbackProvider>
         )}
