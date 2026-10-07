@@ -2,7 +2,7 @@
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from agent_common.a2a.structured_response import STOPPED_REPLY, unanswered_turn_reply
+from agent_common.a2a.structured_response import REFUSED_REPLY, STOPPED_REPLY, unanswered_turn_reply
 
 
 def _turn(last: ToolMessage) -> list:
@@ -10,9 +10,21 @@ def _turn(last: ToolMessage) -> list:
     return [AIMessage(content="", tool_calls=[call]), last]
 
 
-def test_a_force_stop_reads_as_plain_words():
-    blocked = ToolMessage(content="BLOCKED: 'client_action[invoke]' — called 7 times", tool_call_id="c", name="client_action")
-    assert unanswered_turn_reply(_turn(blocked), "SubAgentResponseSchema") == STOPPED_REPLY
+def test_a_force_stop_reads_as_plain_words_and_keeps_the_step():
+    # The step stays: a delegated sub-agent's reply reaches the orchestrator.
+    blocked = ToolMessage(
+        content="BLOCKED: 'client_action[invoke]' — called 7 times", tool_call_id="c", name="client_action"
+    )
+    reply = unanswered_turn_reply(_turn(blocked), "SubAgentResponseSchema")
+    assert reply.startswith(STOPPED_REPLY)
+    assert "client_action[invoke]" in reply
+
+
+def test_a_refused_call_reads_as_not_done():
+    from agent_common.middleware.conditional_hitl import _REFUSED_AGAIN
+
+    refused = ToolMessage(content=_REFUSED_AGAIN, tool_call_id="c", name="client_action")
+    assert unanswered_turn_reply(_turn(refused), "SubAgentResponseSchema") == REFUSED_REPLY
 
 
 def test_another_unanswered_result_is_reported_as_it_is():

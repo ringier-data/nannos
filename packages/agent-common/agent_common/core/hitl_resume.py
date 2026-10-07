@@ -195,8 +195,11 @@ NO_WORKAROUND_CLAUSE = (
     "tools you already have."
 )
 
+#: A call whose authorization the user skipped (read by the answer-after-refusal middleware).
+SKIPPED_AUTH_LEAD = "The user skipped the authorization this call needs"
+
 _SKIPPED_AUTH_MESSAGE = (
-    "The user skipped the authorization this call needs, so it was NOT executed. "
+    f"{SKIPPED_AUTH_LEAD}, so it was NOT executed. "
     + NOT_MISSING_CLAUSE
     + " Do not retry it and do not send the authorization link again. Say plainly "
     "what you cannot do without it. "

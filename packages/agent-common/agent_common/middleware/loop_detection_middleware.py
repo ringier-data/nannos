@@ -43,6 +43,8 @@ from langgraph.runtime import Runtime
 from langgraph.typing import ContextT
 from typing_extensions import NotRequired
 
+from agent_common.core.turn_stops import BLOCKED_LEAD
+
 logger = logging.getLogger(__name__)
 
 #: Terminal response tools. These are how a turn *delivers its answer*, not tools the
@@ -371,14 +373,14 @@ class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
         """
         if info["loop_type"] == "same_args":
             return (
-                f"BLOCKED: '{info['tool_name']}' — {info['description']}. "
+                f"{BLOCKED_LEAD}{info['tool_name']}' — {info['description']}. "
                 f"Calling this tool again with the same arguments will produce the same result. "
                 f"Do NOT retry with the same arguments. "
                 f"Either try a substantially different approach or respond to the user with what you have so far."
             )
         else:  # same_tool
             return (
-                f"BLOCKED: '{info['tool_name']}' — {info['description']}. "
+                f"{BLOCKED_LEAD}{info['tool_name']}' — {info['description']}. "
                 f"You have called this tool many times. "
                 f"Stop and respond to the user with the information you have gathered so far, "
                 f"or try a completely different tool/approach."
@@ -464,7 +466,7 @@ class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
             for message in previous
             if isinstance(message, ToolMessage)
             and isinstance(message.content, str)
-            and message.content.startswith("BLOCKED: '")
+            and message.content.startswith(BLOCKED_LEAD)
         }
         carried: dict[str, list[str]] = {}
         for message in previous:

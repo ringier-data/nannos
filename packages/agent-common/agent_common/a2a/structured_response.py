@@ -81,21 +81,35 @@ STOPPED_REPLY = (
     "so it was not finished. Tell me how you would like to continue."
 )
 
+#: The reply when a turn ends on a refused call the model never answered.
+REFUSED_REPLY = "Understood: that was not done. Tell me what you would like instead."
+
 
 def unanswered_turn_reply(turn_messages: list[Any], response_tool: str) -> str | None:
     """The reply for a turn that ended on a tool result the model never reacted to, or None.
 
     ``turn_messages`` are this turn's messages only. A turn that ends on a tool result
-    other than the response tool has no answer: a loop force-stop (reported in plain
-    words), or a result the model never saw (reported as it is). Either way the previous
-    turn's answer, still in the persisted ``structured_response`` channel, must not be
-    replayed as this turn's.
+    other than the response tool has no answer, and the previous turn's answer, still in
+    the persisted ``structured_response`` channel, must not be replayed as this one's:
+
+    - a loop force-stop reads as plain words, keeping which step repeated — a delegated
+      sub-agent's reply reaches the orchestrator, which needs that to try another way;
+    - a refused call reads as "that was not done" — its text is addressed to the model;
+    - anything else is reported as it is.
     """
+    from agent_common.core.hitl_resume import REFUSAL_LEADS, SKIPPED_AUTH_LEAD
+    from agent_common.core.turn_stops import BLOCKED_LEAD, REFUSED_AGAIN_LEAD
+
     last = turn_messages[-1] if turn_messages else None
     if not isinstance(last, ToolMessage) or last.name == response_tool:
         return None
     content = last.content if isinstance(last.content, str) else str(last.content)
-    return STOPPED_REPLY if content.startswith("BLOCKED: ") else content
+    if content.startswith(BLOCKED_LEAD):
+        step = content[len(BLOCKED_LEAD) :].split("'", 1)[0]
+        return f"{STOPPED_REPLY} (The step that kept repeating: {step}.)" if step else STOPPED_REPLY
+    if content.startswith((*REFUSAL_LEADS, REFUSED_AGAIN_LEAD, SKIPPED_AUTH_LEAD)):
+        return REFUSED_REPLY
+    return content
 
 
 def select_response_format(

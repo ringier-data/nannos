@@ -55,6 +55,7 @@ from agent_common.core.client_action_tool import (
 )
 from agent_common.core.hitl_resume import REFUSAL_LEADS, decisions_from_resume, decisions_from_resume_sync
 from agent_common.core.tool_risk_cache import ToolRiskCache, ToolRiskEntry
+from agent_common.core.turn_stops import REFUSED_AGAIN_LEAD
 from agent_common.middleware.ptc_guard import PTC_CODE_INTERPRETER_TOOL_NAME
 
 logger = logging.getLogger(__name__)
@@ -196,7 +197,7 @@ def _marked(objects: Any, args: dict[str, Any]) -> bool:
 
 
 _REFUSED_AGAIN = (
-    "NOT RUN: the user rejected this exact call a moment ago, so it was not put to them again. "
+    f"{REFUSED_AGAIN_LEAD} a moment ago, so it was not put to them again. "
     "Do not send it again. Tell the user plainly that it was not done, and ask what they want instead."
 )
 
