@@ -219,10 +219,12 @@ _NO_ANSWER_MESSAGE = (
 class ReplyIntent(BaseModel):
     """Structured verdict on a free-form reply to a pending approval."""
 
-    intent: Literal["approve", "reject", "question", "unclear"] = Field(
+    intent: Literal["approve", "reject", "change", "question", "unclear"] = Field(
         description=(
-            "approve = the user agrees to run the pending call now; "
+            "approve = the user agrees to run the pending call now, as it is; "
             "reject = the user refuses it; "
+            "change = the user wants the call DIFFERENT (other values, something added "
+            "or removed) before it runs; "
             "question = the user is ASKING about the pending call rather than "
             "answering (what is it, what does it do, is it safe); "
             "unclear = the reply says nothing about the pending call."
@@ -235,8 +237,12 @@ _CLASSIFIER_SYSTEM_PROMPT = (
     "Instead of clicking Approve or Reject, the user typed a message.\n"
     "Decide what that message means FOR THE PENDING CALL — nothing else.\n"
     "Rules:\n"
-    "- 'approve' only when the reply agrees to this call going ahead now "
+    "- 'approve' only when the reply agrees to this call going ahead now, AS IT IS "
     "(e.g. 'yes', 'go ahead', 'done, try again', 'I authorized it').\n"
+    "- 'change' when the reply asks for something different from what the call would "
+    "do: other values, a field added or removed, a different target (e.g. 'use the "
+    "premium tier', 'call it X instead', 'also add Y'). Asking for a change is NEVER "
+    "approval, even when it sounds like 'yes, but…'.\n"
     "- 'reject' when the reply REFUSES it or cancels it (e.g. 'no', 'stop', "
     "'forget it', 'those permissions are too wide').\n"
     "- 'question' when the reply ASKS about the pending call instead of answering "
@@ -311,12 +317,51 @@ def classify_reply_sync(reply: str, action_requests: list[Any], *, question: str
     return None if result.intent == "unclear" else result.intent
 
 
+#: How a refusal starts when the model reads it — a click (:func:`_framed_rejections`)
+#: or words classified as one (:func:`_from_intent`). The HITL middleware matches
+#: these to refuse an identical retry within the same user turn.
+CLICKED_REJECT_LEAD = "The user clicked Reject"
+TYPED_REFUSAL_LEAD = "The user REFUSED this call"
+REFUSAL_LEADS = (CLICKED_REJECT_LEAD, TYPED_REFUSAL_LEAD)
+
+
+def _framed_rejections(decisions: list[Any]) -> list[Any]:
+    """A clicked Reject, worded so the agent cannot read it as "not THIS call".
+
+    The bare default ("do not retry this tool call") let the agent make the very
+    change the user had just refused through the page's form instead — a refused
+    ``console_update_sub_agent`` came back as an ``apply`` plus a save card. A
+    reason typed into the card used to arrive as the whole message, without even
+    saying that nothing ran. Decisions without a rejection pass through untouched.
+    """
+    if not any(isinstance(d, dict) and d.get("type") == "reject" for d in decisions):
+        return decisions
+    framed: list[Any] = []
+    for decision in decisions:
+        if not isinstance(decision, dict) or decision.get("type") != "reject":
+            framed.append(decision)
+            continue
+        said = (decision.get("message") or "").strip()
+        reason = f" Their reason: {said}" if said else ""
+        framed.append(
+            {
+                **decision,
+                "message": (
+                    f"{CLICKED_REJECT_LEAD}, so this call was NOT executed.{reason} Respect that decision: do "
+                    "not retry it, and do not make the same change another way (through a form on the page, "
+                    "another tool or code). If what they want instead is unclear, ask. " + NOT_APPROVED_CLAUSE
+                ),
+            }
+        )
+    return framed
+
+
 def structural_decisions(resume: Any, action_requests: list[Any]) -> list[dict[str, Any]] | None:
     """Decisions readable without asking a model, or ``None`` if words are all we have."""
     if isinstance(resume, dict):
         decisions = resume.get("decisions")
         if isinstance(decisions, list):
-            return decisions
+            return _framed_rejections(decisions)
         verdict, message = authorization_verdict(resume)
         if verdict == "declined":
             reason = f" They said: {message}" if message.strip() else ""
@@ -342,6 +387,24 @@ def _no_answer(resume: Any, action_requests: list[Any]) -> list[dict[str, Any]]:
     return reject_decisions(action_requests, _NO_ANSWER_MESSAGE)
 
 
+def _needs_a_click(action_requests: list[Any]) -> bool:
+    """A pending call only an explicit Approve may run: a ``client_action`` save, or
+    an ``invoke`` of a page action the host marked ``requiresApproval``.
+
+    Either writes to the server the moment it runs, so typed words — however they
+    classify — are never consent for it. The card is right there. A plain ``invoke``
+    is not a save (by the host contract an unmarked action never persists).
+    """
+    for request in action_requests or []:
+        if not isinstance(request, dict) or request.get("name") != "client_action":
+            continue
+        args = request.get("args") or {}
+        # A save, or a page action the host marked requiresApproval (it saves too).
+        if args.get("kind") == "submit" or args.get("_requires_click") is True:
+            return True
+    return False
+
+
 def _from_intent(intent: str | None, reply: str, action_requests: list[Any]) -> list[dict[str, Any]]:
     """Turn a classified reply into decisions.
 
@@ -353,6 +416,31 @@ def _from_intent(intent: str | None, reply: str, action_requests: list[Any]) -> 
     question in the composer silently killed the task.
     """
     said = f" They said: {reply.strip()}" if isinstance(reply, str) and reply.strip() else ""
+    if intent == "approve" and _needs_a_click(action_requests):
+        logger.info("[HITL] A typed reply cannot approve a save; it was not run")
+        if not any(
+            isinstance(r, dict) and (r.get("args") or {}).get("kind") == "submit" for r in action_requests or []
+        ):
+            return reject_decisions(
+                action_requests,
+                f"The action was NOT run: it saves, so it needs the user to click Approve, and they "
+                f"typed a message instead.{said} Do NOT tell them it was done. That approval card is "
+                f"closed now: if they want it, send the same invoke again (alone) so a new card "
+                f"appears, and tell them it has not run yet and to click Approve on it. "
+                f"{NOT_APPROVED_CLAUSE}",
+            )
+        return reject_decisions(
+            action_requests,
+            # Their words agree to the save, so "respond to what they said" read as
+            # "confirm it": the agent told them it was saved. And the card they
+            # would click is settled by this very answer — only a new submit
+            # brings one back.
+            f"The form was NOT saved: saving needs the user to click Approve, and they "
+            f"typed a message instead.{said} Do NOT tell them it was saved. That approval "
+            f"card is closed now: if they want it saved, send the same submit again (alone) "
+            f"so a new card appears, and tell them the form is not saved yet and to click "
+            f"Approve on it. {NOT_APPROVED_CLAUSE}",
+        )
     if intent == "approve":
         logger.info("[HITL] Classified the user's reply as an approval")
         return _approve_decisions(action_requests)
@@ -360,8 +448,17 @@ def _from_intent(intent: str | None, reply: str, action_requests: list[Any]) -> 
         logger.info("[HITL] Classified the user's reply as a refusal")
         return reject_decisions(
             action_requests,
-            f"The user REFUSED this call, so it was NOT executed.{said} "
+            f"{TYPED_REFUSAL_LEAD}, so it was NOT executed.{said} "
             f"Do not retry it. Take their answer into account and continue from there. "
+            f"{NOT_APPROVED_CLAUSE}",
+        )
+    if intent == "change":
+        logger.info("[HITL] The user asked to change the pending call")
+        return reject_decisions(
+            action_requests,
+            f"The user asked to CHANGE this call instead of approving it, so it was NOT "
+            f"executed — this is not a refusal.{said} Apply their change (redo the steps "
+            "it affects, e.g. fill the form again), then ask for approval again. "
             f"{NOT_APPROVED_CLAUSE}",
         )
     if intent == "question":
@@ -384,13 +481,48 @@ def _from_intent(intent: str | None, reply: str, action_requests: list[Any]) -> 
     )
 
 
+#: Custom stream event reporting how typed words answered a pending approval.
+#: Forwarded to clients as the ``HITL_DECISION_EXTENSION`` status update.
+HITL_DECISION_EVENT = "hitl_decision"
+
+
+def _announce_typed_decisions(intent: str | None, decisions: list[dict[str, Any]]) -> None:
+    """Tell the client what its user's TYPED answer did to the pending call(s).
+
+    A click carries its own decision; words are read here, so without this the
+    client can only guess. Best-effort: outside a streaming run (no writer) there
+    is nobody to tell. ``intent`` is how the words read, ``type`` what the gate did
+    — they differ for a save, which words never approve.
+    """
+    try:
+        from langgraph.config import get_stream_writer
+
+        writer = get_stream_writer()
+    except Exception:  # noqa: BLE001 — no runnable context, no client to tell
+        writer = None
+    if writer is None:
+        return
+    reported = [
+        {**({"id": d["id"]} if "id" in d else {}), "type": d.get("type"), "intent": intent or "none"}
+        for d in decisions
+        if isinstance(d, dict)
+    ]
+    try:
+        writer((HITL_DECISION_EVENT, {"decisions": reported}))
+    except Exception:  # display-only; never fail the decision over it
+        logger.debug("[HITL] Could not announce the typed decision", exc_info=True)
+
+
 async def decisions_from_resume(resume: Any, action_requests: list[Any]) -> list[dict[str, Any]]:
     """A decision per pending call, whatever shape the resume value arrived in."""
     structural = structural_decisions(resume, action_requests)
     if structural is not None:
         return structural
     reply = resume if isinstance(resume, str) else str((resume or {}).get("authorization", {}).get("message", ""))
-    return _from_intent(await classify_reply(reply, action_requests), reply, action_requests)
+    intent = await classify_reply(reply, action_requests)
+    decisions = _from_intent(intent, reply, action_requests)
+    _announce_typed_decisions(intent, decisions)
+    return decisions
 
 
 def decisions_from_resume_sync(resume: Any, action_requests: list[Any]) -> list[dict[str, Any]]:
@@ -399,7 +531,10 @@ def decisions_from_resume_sync(resume: Any, action_requests: list[Any]) -> list[
     if structural is not None:
         return structural
     reply = resume if isinstance(resume, str) else str((resume or {}).get("authorization", {}).get("message", ""))
-    return _from_intent(classify_reply_sync(reply, action_requests), reply, action_requests)
+    intent = classify_reply_sync(reply, action_requests)
+    decisions = _from_intent(intent, reply, action_requests)
+    _announce_typed_decisions(intent, decisions)
+    return decisions
 
 
 def authorization_from_decisions(decisions: Any) -> dict[str, Any] | None:
@@ -479,7 +614,10 @@ def resume_will_return() -> bool:
         scratchpad = _scratchpad()
         if _next_interrupt_index(scratchpad) < len(scratchpad.resume or []):
             return True
-        return scratchpad.get_null_resume(False) is not None
+        # A non-consuming read keeps returning the null resume after an ``interrupt()``
+        # has taken it; by then that very object sits in the replay log.
+        null_resume = scratchpad.get_null_resume(False)
+        return null_resume is not None and not any(v is null_resume for v in scratchpad.resume or [])
     except Exception:  # noqa: BLE001 — best-effort probe over private internals
         logger.debug("[HITL] Resume probe unavailable", exc_info=True)
         return False

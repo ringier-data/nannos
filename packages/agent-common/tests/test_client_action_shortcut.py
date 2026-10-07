@@ -35,7 +35,7 @@ class TestClientActionShortcut:
         # The model must learn WHICH fields landed — that is the whole point of
         # the round trip this replaces.
         assert "name, budget" in msg.content
-        assert "Nothing is persisted" in msg.content
+        assert "Nothing is saved yet" in msg.content
 
     def test_rejected_fields_are_reported_not_hidden(self):
         decision = {
@@ -55,6 +55,31 @@ class TestClientActionShortcut:
         msg = _client_action_tool_message(decision, _call())
         assert msg.status == "error"
         assert "no longer on the user's screen" in msg.content
+
+    def test_an_invoked_action_answers_with_the_landed_page(self):
+        call = {
+            "type": "tool_call",
+            "name": CLIENT_ACTION_TOOL_NAME,
+            "id": "tooluse_inv",
+            "args": {"kind": "invoke", "target_type": "Watch", "target_id": "w1", "action": "edit"},
+        }
+        decision = {
+            "type": "approve",
+            "client_action_result": {"ok": True, "content": '{"objects": [{"type": "WatchForm"}]}'},
+        }
+        msg = _client_action_tool_message(decision, call)
+        assert msg.status == "success"
+        assert "nothing was saved" in msg.content
+        assert "WatchForm" in msg.content
+
+    def test_an_unsaved_changes_refusal_is_an_error(self):
+        decision = {
+            "type": "approve",
+            "client_action_result": {"ok": False, "reason": "unsaved-changes", "detail": "Watch w1: name"},
+        }
+        msg = _client_action_tool_message(decision, _call(kind="navigate"))
+        assert msg.status == "error"
+        assert "Ask the user whether to save" in msg.content
 
     def test_no_result_falls_back_to_the_round_trip(self):
         # An older SDK sends a bare approve. The tool must still run and ask for

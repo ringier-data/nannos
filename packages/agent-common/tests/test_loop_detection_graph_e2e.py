@@ -433,3 +433,200 @@ async def test_do_not_retry_guidance_reaches_the_model_on_the_next_turn():
     stopped_result = next(m for m in replayed if isinstance(m, ToolMessage) and m.tool_call_id == stopped_call)
     assert stopped_result.content.startswith("BLOCKED:")
     assert "Do NOT retry with the same arguments" in stopped_result.content
+
+
+class _BusyTurnModel(BaseChatModel):
+    """Each turn: a few calls to the same tool with different arguments, then an answer.
+
+    The shape of an embedded assistant's turn (read the page, fill a form, save): no loop
+    within any turn, but the same tool on every turn.
+    """
+
+    calls_per_turn: int = 3
+    same_args: bool = False
+    in_turn: int = 0
+    total: int = 0
+
+    @property
+    def _llm_type(self) -> str:
+        return "busy"
+
+    def bind_tools(self, tools: list, **kwargs: Any) -> "_BusyTurnModel":
+        return self
+
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: Optional[list[str]] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        if self.in_turn == self.calls_per_turn:
+            self.in_turn = 0
+            message: BaseMessage = AIMessage(content="done")
+        else:
+            self.in_turn += 1
+            self.total += 1
+            message = AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "search",
+                        "args": {"q": "the page" if self.same_args else f"step {self.total}"},
+                        "id": f"call-{self.total}",
+                    }
+                ],
+            )
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+
+@pytest.mark.asyncio
+async def test_a_tool_used_every_turn_is_never_blocked_across_turns():
+    """The window belongs to one turn: a busy but converging conversation never trips it.
+
+    Before, ``tool_call_history`` accumulated over the whole thread, so after a handful of
+    turns the window was full of one tool and every later turn was blocked on its first
+    call and force-stopped — permanently, since nothing ever emptied the window.
+    """
+    executions: list = []
+    model = _BusyTurnModel()
+    agent = create_agent(
+        model=model,
+        tools=[_make_search_tool(executions)],
+        middleware=[RepeatedToolCallMiddleware(max_repeats=3, max_tool_repeats=5, window_size=5)],
+        checkpointer=InMemorySaver(),
+    )
+    config = {"configurable": {"thread_id": "busy-1"}}
+
+    for turn in range(6):
+        result = await agent.ainvoke({"messages": [HumanMessage(content=f"turn {turn}")]}, config)
+        assert result["messages"][-1].content == "done", f"turn {turn} did not finish normally"
+
+    assert len(executions) == 18, "a call was blocked although no turn looped"
+    blocked = [m for m in result["messages"] if isinstance(m, ToolMessage) and m.status == "error"]
+    assert not blocked
+
+
+@pytest.mark.asyncio
+async def test_a_force_stop_does_not_brick_the_conversation():
+    """Carrying the blocked call over is for ONE retry, not for good.
+
+    The turn after a force-stop refuses the same call; a turn that answers without
+    retrying it ends the carry-over, so a later turn may use the tool again. Carrying the
+    whole history instead would re-block on the first call of every turn, record that
+    block, carry it again — and the thread could never use the tool again.
+    """
+    executions: list = []
+    model = _LoopingModel(seen_requests=[])
+    agent = _build_agent(model, executions)
+    config = {"configurable": {"thread_id": "loop-5"}}
+
+    await agent.ainvoke({"messages": [HumanMessage(content="search for it")]}, config)
+    model.stop_looping = True
+    await agent.ainvoke({"messages": [HumanMessage(content="never mind")]}, config)
+    executions_before = len(executions)
+
+    model.stop_looping = False
+    await agent.ainvoke({"messages": [HumanMessage(content="now search again")]}, config)
+    assert len(executions) > executions_before, "the tool stays blocked forever after one force-stop"
+
+
+@pytest.mark.asyncio
+async def test_one_identical_observe_call_per_turn_is_never_a_loop():
+    """Reading the page (or the clock) once per turn repeats the same arguments every turn.
+
+    Exempting a multiplexing tool from the same-tool cap judges it by its arguments, but
+    arguments alone cannot tell a loop from a habit across turns: ``read_current_page``
+    is byte-identical every time. Only the turn scope can — within one turn, six identical
+    reads ARE the polling loop the rule exists for.
+    """
+    executions: list = []
+    model = _BusyTurnModel(calls_per_turn=1, same_args=True)
+    agent = create_agent(
+        model=model,
+        tools=[_make_search_tool(executions)],
+        middleware=[RepeatedToolCallMiddleware(max_repeats=5, max_tool_repeats=10, window_size=10)],
+        checkpointer=InMemorySaver(),
+    )
+    config = {"configurable": {"thread_id": "observe-1"}}
+
+    for turn in range(7):
+        result = await agent.ainvoke({"messages": [HumanMessage(content=f"turn {turn}")]}, config)
+        assert result["messages"][-1].content == "done", f"turn {turn} did not finish normally"
+    assert len(executions) == 7
+
+
+class _ReadThenAnswerModel(BaseChatModel):
+    """Turn 1 answers at once; turn 2 polls one tool with identical arguments until blocked.
+
+    After the BLOCKED result it answers. This is the console assistant asked to "wait until
+    the page loads": ``read_current_page`` over and over, then the loop guard, then — the
+    part under test — the model must get its say.
+    """
+
+    calls: int = 0
+    answered_after_block: bool = False
+
+    @property
+    def _llm_type(self) -> str:
+        return "read-then-answer"
+
+    def bind_tools(self, tools: list, **kwargs: Any) -> "_ReadThenAnswerModel":
+        return self
+
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: Optional[list[str]] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        self.calls += 1
+        assert self.calls < 25, "the run never terminated"
+        last_human = max(i for i, m in enumerate(messages) if isinstance(m, HumanMessage))
+        turn_text = str(messages[last_human].content)
+        blocked = any(
+            isinstance(m, ToolMessage) and isinstance(m.content, str) and m.content.startswith("BLOCKED:")
+            for m in messages[last_human:]
+        )
+        if turn_text == "poll" and not blocked:
+            tool_call = {"name": "search", "args": {"query": "same"}, "id": f"read-{self.calls}"}
+        else:
+            if turn_text == "poll":
+                self.answered_after_block = True
+            tool_call = {
+                "name": "AnswerSchema",
+                "args": {"task_state": "completed", "message": f"answer to {turn_text}"},
+                "id": f"answer-{self.calls}",
+            }
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content="", tool_calls=[tool_call]))])
+
+
+@pytest.mark.asyncio
+async def test_a_blocked_call_on_a_later_turn_still_gets_the_model_to_answer():
+    """A block is feedback for the model, so the model must run again — even on turn 2+.
+
+    LangChain's model→tools edge ends the run when the AIMessage's calls all already have
+    results AND ``structured_response`` is in state. That key is a persisted channel: the
+    previous turn's answer leaves it set for good. So a block on any later turn (an error
+    result injected for every call) ended the run with no new answer, and the runner then
+    replayed the PREVIOUS turn's structured response as this turn's reply.
+    """
+    executions: list = []
+    model = _ReadThenAnswerModel()
+    agent = create_agent(
+        model=model,
+        tools=[_make_search_tool(executions)],
+        response_format=ToolStrategy(AnswerSchema),
+        middleware=[RepeatedToolCallMiddleware(max_repeats=2, window_size=10, force_stop_after=3)],
+        checkpointer=InMemorySaver(),
+    )
+    config = {"configurable": {"thread_id": "stale-structured-1"}}
+
+    first = await agent.ainvoke({"messages": [HumanMessage(content="hello")]}, config)
+    assert first["structured_response"].message == "answer to hello"
+
+    second = await agent.ainvoke({"messages": [HumanMessage(content="poll")]}, config)
+    assert_tool_pairing_valid(second["messages"])
+    assert model.answered_after_block, "the model never saw the BLOCKED result"
+    assert second["structured_response"].message == "answer to poll", "the previous turn's answer was replayed"

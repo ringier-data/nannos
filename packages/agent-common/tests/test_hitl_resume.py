@@ -12,6 +12,7 @@ import pytest
 from a2a.types import TaskState
 
 from agent_common.core.hitl_resume import (
+    HITL_DECISION_EVENT,
     KIND_AUTH,
     KIND_HITL,
     KIND_OTHER,
@@ -73,6 +74,25 @@ class TestStructuralDecisions:
     def test_real_decisions_pass_through_untouched(self):
         decisions = [{"type": "approve", "id": "github_get_me:4413"}]
         assert structural_decisions({"decisions": decisions}, ACTION_REQUESTS) is decisions
+
+    def test_a_clicked_reject_forbids_the_same_change_another_way(self):
+        """A refused server write came back as a form fill plus a save card."""
+        decisions = structural_decisions(
+            {"decisions": [{"type": "reject", "id": "a"}, {"type": "approve", "id": "b"}]}, TWO_ACTION_REQUESTS
+        )
+        assert [d["type"] for d in decisions] == ["reject", "approve"]
+        message = decisions[0]["message"]
+        assert "NOT executed" in message
+        assert "do not make the same change another way" in message
+        assert decisions[0]["id"] == "a" and "message" not in decisions[1]
+
+    def test_a_reason_given_with_reject_is_kept_and_framed(self):
+        decisions = structural_decisions(
+            {"decisions": [{"type": "reject", "message": "keep job 1, it is a fixture"}]}, ACTION_REQUESTS
+        )
+        message = decisions[0]["message"]
+        assert "Their reason: keep job 1, it is a fixture" in message
+        assert message.startswith("The user clicked Reject")
 
     def test_declined_authorization_rejects_every_pending_call(self):
         decisions = structural_decisions(
@@ -181,10 +201,104 @@ class TestDecisionsFromResume:
             with _classification("unclear"):
                 assert len(await decisions_from_resume(resume, TWO_ACTION_REQUESTS)) == 2
 
+    @pytest.mark.asyncio
+    async def test_a_requested_change_is_not_approval(self):
+        """'pick the premium chat tier' while a save waited: a change, not consent."""
+        with _classification("change"):
+            decisions = await decisions_from_resume("pick the premium chat tier", ACTION_REQUESTS)
+        assert [d["type"] for d in decisions] == ["reject"]
+        message = decisions[0]["message"]
+        assert "asked to CHANGE this call" in message
+        assert "pick the premium chat tier" in message
+
+    @pytest.mark.asyncio
+    async def test_typed_words_never_approve_a_save(self):
+        """A client_action save writes the form to the server: only the click counts."""
+        save = [{"name": "client_action", "args": {"kind": "submit", "target_type": "SubAgent", "target_id": "new"}}]
+        with _classification("approve"):
+            decisions = await decisions_from_resume("yes", save)
+        assert [d["type"] for d in decisions] == ["reject"]
+        message = decisions[0]["message"]
+        assert "saving needs the user to click Approve" in message
+        # "yes save it" must not read as "confirm the save": the agent claimed it was
+        # saved. The answered card is closed, so a click needs a fresh submit.
+        assert "Do NOT tell them it was saved" in message
+        assert "send the same submit again" in message
+        # A clicked approval (structural) still runs it.
+        assert (await decisions_from_resume({"decisions": [{"type": "approve"}]}, save))[0]["type"] == "approve"
+
+    @pytest.mark.asyncio
+    async def test_typed_words_never_run_an_action_that_requires_approval(self):
+        """A host-marked action saves too: like a save, only the click runs it."""
+        marked = [
+            {
+                "name": "client_action",
+                "args": {"kind": "invoke", "action": "set_tier_default", "_requires_click": True},
+            }
+        ]
+        with _classification("approve"):
+            decisions = await decisions_from_resume("yes do it", marked)
+        assert [d["type"] for d in decisions] == ["reject"]
+        assert "The action was NOT run" in decisions[0]["message"]
+        assert "send the same invoke again" in decisions[0]["message"]
+
     def test_sync_twin_classifies_too(self):
         with _classification("reject"):
             decisions = decisions_from_resume_sync("stop", ACTION_REQUESTS)
         assert [d["type"] for d in decisions] == ["reject"]
+
+
+class TestTypedDecisionAnnouncement:
+    """Words are read server-side, so the client is told what they did to its card."""
+
+    @staticmethod
+    def _writer():
+        events: list = []
+        return events, patch("langgraph.config.get_stream_writer", return_value=events.append)
+
+    @pytest.mark.asyncio
+    async def test_classified_words_announce_id_type_and_intent(self):
+        events, writer = self._writer()
+        with writer, _classification("change"):
+            await decisions_from_resume("use the premium tier", ACTION_REQUESTS)
+        assert events == [
+            (HITL_DECISION_EVENT, {"decisions": [{"id": "github_get_me:4413", "type": "reject", "intent": "change"}]})
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_typed_yes_to_a_save_reads_approve_but_did_not_run(self):
+        save = [{"name": "client_action", "args": {"_call_id": "c1", "kind": "submit"}}]
+        events, writer = self._writer()
+        with writer, _classification("approve"):
+            await decisions_from_resume("yes", save)
+        assert events[0][1]["decisions"] == [{"id": "c1", "type": "reject", "intent": "approve"}]
+
+    @pytest.mark.asyncio
+    async def test_an_unclear_reply_reads_as_none(self):
+        events, writer = self._writer()
+        with writer, _classification("unclear"):
+            await decisions_from_resume("what's the weather?", ACTION_REQUESTS)
+        assert events[0][1]["decisions"][0]["intent"] == "none"
+
+    @pytest.mark.asyncio
+    async def test_a_click_announces_nothing(self):
+        events, writer = self._writer()
+        with writer:
+            await decisions_from_resume({"decisions": [{"type": "approve", "id": "x"}]}, ACTION_REQUESTS)
+        assert events == []
+
+    def test_sync_twin_announces_too(self):
+        events, writer = self._writer()
+        with writer, _classification("reject"):
+            decisions_from_resume_sync("stop", ACTION_REQUESTS)
+        assert events[0][1]["decisions"][0]["intent"] == "reject"
+
+    @pytest.mark.asyncio
+    async def test_no_stream_writer_is_not_an_error(self):
+        # Outside a runnable context get_stream_writer raises: nobody to tell.
+        with _classification("approve"):
+            decisions = await decisions_from_resume("yes", ACTION_REQUESTS)
+        assert decisions[0]["type"] == "approve"
 
 
 class TestAuthorizationFromDecisions:
@@ -270,6 +384,12 @@ class TestResumeWillReturn:
     def test_a_freshly_queued_answer_counts(self):
         with _with_scratchpad(_Scratchpad(["approve it"], interrupts_taken=1, null_resume="go on")):
             assert resume_will_return() is True
+
+    def test_a_consumed_null_resume_does_not_count_again(self):
+        """LangGraph's non-consuming read still returns a null resume an interrupt has taken."""
+        answer = "go on"
+        with _with_scratchpad(_Scratchpad([answer], interrupts_taken=1, null_resume=answer)):
+            assert resume_will_return() is False
 
     def test_nothing_answered_yet(self):
         with _with_scratchpad(_Scratchpad([], interrupts_taken=0)):

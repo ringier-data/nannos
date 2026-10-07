@@ -19,6 +19,7 @@ import logging
 from typing import Any, Dict, List, Literal, Optional
 
 from langchain.agents.structured_output import ToolStrategy
+from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel, Field
 
@@ -217,15 +218,31 @@ class StructuredResponseMixin:
         Returns:
             Dict with 'messages' and A2A metadata
         """
+        agent_name = getattr(self, "name", "unknown")
+        all_messages = result.get("messages", [])
+        # Only THIS turn's messages can answer this turn: everything up to the last human
+        # message was answered before. ``structured_response`` is a persisted state channel,
+        # so a turn that ends without an answer still finds the previous turn's response
+        # there — and a thread's earlier response tool calls are still in the history.
+        turn_start = max((i for i, m in enumerate(all_messages) if isinstance(m, HumanMessage)), default=-1) + 1
+        messages = all_messages[turn_start:]
+        last = messages[-1] if messages else None
+        if isinstance(last, ToolMessage) and last.name != SubAgentResponseSchema.__name__:
+            # The run ended on a tool result the model never got to react to — a loop
+            # block, a force-stop. There is no answer for this turn; the result that is
+            # there explains why, and is the only honest thing to report. Replaying the
+            # previous turn's answer as if it were new is not.
+            logger.warning(f"Run of '{agent_name}' ended on an unanswered tool result; reporting it as the reply")
+            content = last.content if isinstance(last.content, str) else str(last.content)
+            return self._build_success_response(content, context_id=context_id, task_id=task_id)  # type: ignore[attr-defined]
+
         # Check for structured_response (AutoStrategy for OpenAI)
         structured_response = result.get("structured_response")
         if structured_response and isinstance(structured_response, SubAgentResponseSchema):
             return self._build_response_from_schema(structured_response, context_id, task_id)
 
         # Check messages for tool call with SubAgentResponseSchema (Bedrock)
-        agent_name = getattr(self, "name", "unknown")
         logger.info(f"Translating agent result for '{agent_name}'")
-        messages = result.get("messages", [])
         for msg in reversed(messages):
             # Check if this is a tool message with SubAgentResponseSchema result
             if hasattr(msg, "name") and msg.name == "SubAgentResponseSchema":

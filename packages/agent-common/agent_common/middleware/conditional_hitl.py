@@ -29,6 +29,7 @@ Usage (dynamic scoring):
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, TypedDict
@@ -40,15 +41,15 @@ from langchain.agents.middleware.human_in_the_loop import (
     ReviewConfig,
     ToolMessage,
 )
-from langchain.agents.middleware.types import AgentState, ContextT, ResponseT, StateT
-from langchain_core.messages import AIMessage, ToolCall
+from langchain.agents.middleware.types import AgentState, ContextT, ResponseT, StateT, hook_config
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolCall
 from langchain_core.tools import BaseTool
 from langchain_quickjs._prompt import to_camel_case
 from langgraph.runtime import Runtime
 from langgraph.types import interrupt
 
 from agent_common.core.client_action_tool import CLIENT_ACTION_TOOL_NAME, render_client_action_result
-from agent_common.core.hitl_resume import decisions_from_resume, decisions_from_resume_sync
+from agent_common.core.hitl_resume import REFUSAL_LEADS, decisions_from_resume, decisions_from_resume_sync
 from agent_common.core.tool_risk_cache import ToolRiskCache, ToolRiskEntry
 from agent_common.middleware.ptc_guard import PTC_CODE_INTERPRETER_TOOL_NAME
 
@@ -117,6 +118,86 @@ def _client_action_tool_message(decision: dict[str, Any], tool_call: ToolCall) -
         tool_call_id=tool_call["id"],
         status="success" if result.get("ok") else "error",
     )
+
+
+def _answered(last_ai_msg: AIMessage, tool_messages: list[ToolMessage]) -> dict[str, Any]:
+    """The state update for tool calls this middleware answered itself.
+
+    When every call of the turn has its ToolMessage here (an approved client_action
+    the browser already ran, a rejection, a corrective answer), nothing is left for
+    the tools node, and langchain's model→tools edge falls through to "a structured
+    response exists → end" — and on any turn after the first, the checkpoint still
+    holds the PREVIOUS turn's structured response. The run then ended without the
+    model ever reading the answers, and the stream replayed the stale reply. Jumping
+    back to the model explicitly is what the edge would do absent that stale state.
+    """
+    update: dict[str, Any] = {"messages": [last_ai_msg, *tool_messages]}
+    answered = {m.tool_call_id for m in tool_messages}
+    if tool_messages and all(call["id"] in answered for call in last_ai_msg.tool_calls):
+        update["jump_to"] = "model"
+    return update
+
+
+#: What a ``client_action`` save scores (tool_risk_scorer): an action that saves is shown alike.
+_SAVE_SCORE = 0.9
+
+
+def _invoke_requires_approval(args: dict[str, Any], context: Any) -> bool:
+    """Whether a ``client_action`` invoke targets an action the host marked ``requiresApproval``.
+
+    An action never saves by default, so ``invoke`` runs without a card. A host marks the
+    ones that do save (a "set as default" button, "run now") and they get the save's card.
+    Read from the per-turn object list the page sent — the orchestrator's runtime context
+    or, for an embedded sub-agent, the run's config metadata.
+    """
+    if args.get("kind") != "invoke":
+        return False
+    from agent_common.middleware.client_objects_middleware import _client_objects_from_config
+
+    objects = getattr(context, "client_objects", None) or _client_objects_from_config() or []
+    for obj in objects if isinstance(objects, list) else []:
+        if not isinstance(obj, dict) or obj.get("type") != args.get("target_type"):
+            continue
+        if str(obj.get("id")) != str(args.get("target_id")):
+            continue
+        for action in obj.get("actions") or []:
+            if isinstance(action, dict) and action.get("name") == args.get("action"):
+                return action.get("requiresApproval") is True
+    return False
+
+
+_REFUSED_AGAIN = (
+    "NOT RUN: the user rejected this exact call a moment ago, so it was not put to them again. "
+    "Do not send it again. Tell the user plainly that it was not done, and ask what they want instead."
+)
+
+
+def _call_signature(tool_call: ToolCall) -> str:
+    """Name plus arguments, without the ``_``-prefixed bookkeeping ones (``_call_id``)."""
+    args = {k: v for k, v in (tool_call.get("args") or {}).items() if not k.startswith("_")}
+    return f"{tool_call['name']}:{json.dumps(args, sort_keys=True, default=str)}"
+
+
+def _refused_this_turn(messages: list[BaseMessage]) -> set[str]:
+    """The calls the user refused since their last message, by :func:`_call_signature`.
+
+    Told plainly not to retry, the agent re-sent the identical save the user had just
+    clicked Reject on, so a second card asked the same question again at once. Within
+    one user turn an identical call is that retry; a new message from the user (who
+    may well ask for it after all) starts over.
+    """
+    start = next((i for i in range(len(messages) - 1, -1, -1) if isinstance(messages[i], HumanMessage)), -1)
+    turn = messages[start + 1 :]
+    calls = {call["id"]: call for m in turn if isinstance(m, AIMessage) for call in m.tool_calls}
+    return {
+        _call_signature(calls[m.tool_call_id])
+        for m in turn
+        if isinstance(m, ToolMessage)
+        and m.status == "error"
+        and m.tool_call_id in calls
+        and isinstance(m.content, str)
+        and m.content.startswith(REFUSAL_LEADS)
+    }
 
 
 def _ptc_exposed_tool_names(state: Any) -> set[str] | None:
@@ -322,6 +403,7 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
 
         return bool(condition(tool_call.get("args", {})))
 
+    @hook_config(can_jump_to=["model"])
     def after_model(self, state: AgentState[Any], runtime: Runtime[ContextT]) -> dict[str, Any] | None:
         """Sync handler: only processes static interrupt_on guards.
 
@@ -405,8 +487,9 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         # Update the AI message to only include approved tool calls
         last_ai_msg.tool_calls = revised_tool_calls
 
-        return {"messages": [last_ai_msg, *artificial_tool_messages]}
+        return _answered(last_ai_msg, artificial_tool_messages)
 
+    @hook_config(can_jump_to=["model"])
     async def aafter_model(self, state: AgentState[Any], runtime: Runtime[ContextT]) -> dict[str, Any] | None:
         """Async handler: combines static guards + dynamic risk scoring.
 
@@ -441,6 +524,16 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         # set is exhaustive) any name that resolves to nothing. See
         # _unresolvable_tool_message.
         corrective_messages: dict[int, ToolMessage] = {}
+        refused = _refused_this_turn(messages)
+        # The step's first ``client_action`` invoke, if any — see 1c below.
+        step_invoke = next(
+            (
+                tc
+                for tc in last_ai_msg.tool_calls
+                if tc["name"] == CLIENT_ACTION_TOOL_NAME and (tc.get("args") or {}).get("kind") == "invoke"
+            ),
+            None,
+        )
 
         for idx, tool_call in enumerate(last_ai_msg.tool_calls):
             tool_name: str = tool_call["name"]
@@ -482,6 +575,59 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
                 corrective_messages[idx] = corrective
                 continue
 
+            # 1b'. The user refused this very call earlier in the turn: answer the
+            #      retry instead of putting the same question to them again.
+            if refused and _call_signature(tool_call) in refused:
+                logger.info("Tool call '%s' repeats a call the user refused this turn; not asking again", tool_name)
+                corrective_messages[idx] = ToolMessage(
+                    content=_REFUSED_AGAIN, name=tool_name, tool_call_id=tool_call["id"], status="error"
+                )
+                continue
+
+            # 1c. A ``client_action`` save runs in the browser the moment the user
+            #     approves it — before any sibling call of the same step. Sent next
+            #     to the ``apply`` that fills the form, it saved the form as it was
+            #     and the fill landed afterwards, unsaved, while the agent was told
+            #     both worked. A save must see the results of everything before it,
+            #     so it only runs alone; answered here, it never raises a card.
+            #     An ``invoke`` changes what is on screen (``edit`` mounts the form the
+            #     ``apply`` then fills), so every OTHER ``client_action`` of its step
+            #     could reach the browser before the screen it was written for exists.
+            #     The invoke runs; the others are answered and resent next step.
+            if (
+                step_invoke is not None
+                and tool_name == CLIENT_ACTION_TOOL_NAME
+                and tool_call is not step_invoke
+            ):
+                kind = args.get("kind")
+                action = (step_invoke.get("args") or {}).get("action")
+                corrective_messages[idx] = ToolMessage(
+                    content=(
+                        f"NOT RUN: {kind} was sent together with invoke '{action}'; the invoke changes "
+                        f"what is on screen — send it alone, read its result, then {kind} in the next step"
+                    ),
+                    name=tool_name,
+                    tool_call_id=tool_call["id"],
+                    status="error",
+                )
+                continue
+            if (
+                tool_name == CLIENT_ACTION_TOOL_NAME
+                and args.get("kind") == "submit"
+                and len(last_ai_msg.tool_calls) > 1
+            ):
+                corrective_messages[idx] = ToolMessage(
+                    content=(
+                        "NOT RUN: kind='submit' must be called on its own, after the results of "
+                        "your other calls are back — the form was not saved. Check those results, "
+                        "then call client_action with kind='submit' again, alone."
+                    ),
+                    name=tool_name,
+                    tool_call_id=tool_call["id"],
+                    status="error",
+                )
+                continue
+
             # 2. Static guards take priority
             if self._should_interrupt(tool_call):
                 config = self.interrupt_on[tool_name]
@@ -503,6 +649,7 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
 
             # Check bypass rules from runtime context
             context: Any = getattr(runtime, "context", None)
+            requires_click = tool_name == CLIENT_ACTION_TOOL_NAME and _invoke_requires_approval(args, context)
             bypass_rules: dict[str, BypassRule] | None = (
                 getattr(context, "tool_bypass_rules", None) if context else None
             )
@@ -534,6 +681,10 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
 
             # Compare against threshold
             threshold: float = self._get_threshold(context)
+            # A page action the host marked requiresApproval saves something: it is asked
+            # like a save, whatever ``invoke``'s base score.
+            if requires_click:
+                score = max(score, threshold, _SAVE_SCORE)
             if score < threshold:
                 continue
 
@@ -553,6 +704,8 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
             enriched_args: dict[str, Any] = {
                 **args,
                 "_call_id": tool_call["id"],
+                # Only the Approve click runs it: typed words never do (see hitl_resume).
+                **({"_requires_click": True} if requires_click else {}),
                 "_risk_metadata": {
                     "source": "risk_score",
                     "score": score,
@@ -600,7 +753,7 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         if not action_requests:
             if not corrective_messages:
                 return None
-            return {"messages": [last_ai_msg, *corrective_messages.values()]}
+            return _answered(last_ai_msg, list(corrective_messages.values()))
 
         # Attach a plain-language summary to each action request so the client
         # can show non-technical users what the tool would do. Display-only
@@ -683,7 +836,7 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         # Update the AI message
         last_ai_msg.tool_calls = revised_tool_calls
 
-        return {"messages": [last_ai_msg, *artificial_tool_messages]}
+        return _answered(last_ai_msg, artificial_tool_messages)
 
     async def _attach_summaries(self, action_requests: list[ActionRequest], runtime: Runtime[ContextT]) -> None:
         """Stamp a plain-language ``_summary`` into each action request's args.

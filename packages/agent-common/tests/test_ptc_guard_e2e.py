@@ -729,3 +729,34 @@ def test_history_write_back_merges_every_command_shape_and_never_drops():
     # Nothing appended (the program made no judged call): pass-through, whatever the shape.
     same = Command(update="bare root value")
     assert attach(same, SimpleNamespace(history_appends={}, history_caps={})) is same
+
+
+@pytest.mark.parametrize("empty", ["", [{"type": "text", "text": ""}]], ids=["string", "text-block"])
+async def test_a_call_with_an_empty_result_settles_the_program(empty):
+    """A 204 route (scheduler_share_job) returns no content; eval reported a deadlock
+    although the call ran, and the agent repeated the write until it was blocked."""
+    ran: list[int] = []
+
+    async def _share(path: str) -> Any:
+        ran.append(1)
+        return empty
+
+    inner = StructuredTool.from_function(coroutine=_share, name="share_it", description="d", args_schema=_Args)
+    wrapped = wrap_tool_for_ptc(inner, risk_scorer=_scorer(0.1), default_risk_threshold=0.8)
+    model = _ScriptedModel()
+    model.responses = deque(
+        [
+            AIMessage(
+                content="",
+                id="ai-1",
+                tool_calls=[{"id": "c1", "name": "eval", "args": {"code": "await tools.shareIt({path: 'x'})"}}],
+            ),
+            AIMessage(content="done", id="ai-2"),
+        ]
+    )
+    agent = create_agent(model=model, tools=[], middleware=[CodeInterpreterMiddleware(ptc=[wrapped])])
+    result = await agent.ainvoke({"messages": [HumanMessage("go")]})
+    out = _last_eval_message(result)
+    assert ran == [1]
+    assert "Deadlock" not in out
+    assert "returned no content" in out

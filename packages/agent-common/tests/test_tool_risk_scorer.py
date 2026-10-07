@@ -48,18 +48,35 @@ def test_deterministic_fallback_still_scores_destructive_high():
 
 
 @pytest.mark.asyncio
-async def test_client_action_apply_gates_but_benign_kinds_do_not():
+async def test_client_action_submit_gates_but_form_fills_do_not():
     """client_action is the ONLY HITL for on-screen actions (no SDK card). It's
-    scored deterministically by kind — never via LLM/cache — so `apply` always
-    interrupts while `highlight`/`navigate` never do. Scored even with cache=None."""
+    scored deterministically by kind — never via LLM/cache — so `submit` (saves the
+    form) always interrupts, while `apply` (writes into the unsaved form, marked as
+    changed) and `highlight`/`navigate` never do. Scored even with cache=None."""
     THRESHOLD = 0.80
-    for kind in ("apply", "refresh", "invalidate"):
+    for kind in ("submit", "refresh", "invalidate"):
         score, entry = await score_tool_risk("client_action", {"kind": kind}, cache=None)
         assert score >= THRESHOLD, (kind, score)
         assert entry is not None and entry.allowed_actions == ["approve", "reject"]
-    for kind in ("highlight", "navigate"):
+    for kind in ("apply", "highlight", "invoke", "navigate", "read_current_page"):
         score, _ = await score_tool_risk("client_action", {"kind": kind}, cache=None)
         assert score < THRESHOLD, (kind, score)
+
+
+@pytest.mark.asyncio
+async def test_client_action_invoke_and_discarding_navigate_never_raise_a_card():
+    """An action never persists by the host contract; a discarding navigate only runs
+    after the user said "discard" in words — a card would ask the same thing twice."""
+    score, _ = await score_tool_risk(
+        "client_action",
+        {"kind": "invoke", "target_type": "Watch", "target_id": "w1", "action": "edit"},
+        cache=None,
+    )
+    assert score == 0.1
+    score, _ = await score_tool_risk(
+        "client_action", {"kind": "navigate", "to": "/x", "discard_changes": True}, cache=None
+    )
+    assert score == 0.1
 
 
 @pytest.mark.asyncio

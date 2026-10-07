@@ -433,15 +433,27 @@ async def _score_tool_via_llm(
 _HARD_DESTRUCTIVE_KEYWORDS: tuple[str, ...] = ("delete", "remove", "drop", "destroy")
 _DESTRUCTIVE_FLOOR_SCORE = 0.9
 
-# Deterministic risk per client_action `kind` (Embedded Nannos). Mutating kinds
-# gate for approval; benign ones never do. Unknown/new kinds default to gating
-# (fail safe). ``refresh``/``invalidate`` are listed ahead of that kind landing.
+# Deterministic risk per client_action `kind` (Embedded Nannos). Only a kind that
+# PERSISTS something gates for approval: ``submit`` saves the form through the host's
+# own save action. ``apply`` only writes into the on-screen form — validated per field,
+# marked as changed, saved by nobody — so it runs without a card, like typing would.
+# Unknown/new kinds default to gating (fail safe). ``refresh``/``invalidate`` are
+# listed ahead of that kind landing.
 _CLIENT_ACTION_KIND_SCORES: dict[str | None, float] = {
-    "apply": 0.9,
+    "apply": 0.1,
+    "submit": 0.9,
     "refresh": 0.9,
     "invalidate": 0.9,
     "highlight": 0.1,
+    # Also with ``discard_changes``: it drops only the unsaved values the ASSISTANT
+    # typed (never a saved record), and the tool contract lets the model set it only
+    # after the browser refused the navigate AND the user said "discard" in words. A
+    # card on top would ask the same question twice; the user's data is unaffected.
     "navigate": 0.1,
+    # By the host contract an action never persists — it opens a dialog, enters edit
+    # mode or starts a check the user completes — so it gates like ``apply``.
+    # Saving stays ``submit``.
+    "invoke": 0.1,
     # Read-only by construction: the SDK answers from host-registered readers
     # through the same sanitizer as the page snapshot (deny list + caps).
     "read_current_page": 0.1,

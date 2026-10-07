@@ -654,3 +654,58 @@ class TestUnresolvableToolCall:
         await mw.aafter_model({"messages": [ai]}, self._runtime({}))
 
         assert seen == [("FinalResponseSchema", final_response)]
+
+
+class TestActionsThatRequireApproval:
+    """A page action the host marked ``requiresApproval`` saves something: its invoke
+    gets the save's card (click only), while an unmarked invoke still runs freely."""
+
+    OBJECTS = [
+        {
+            "type": "GatewayModel",
+            "id": "claude-haiku-4-5",
+            "scope": "update",
+            "actions": [
+                {"name": "set_tier_default", "label": "Default low tier", "requiresApproval": True},
+                {"name": "test", "label": "Test"},
+            ],
+        }
+    ]
+
+    async def _run(self, monkeypatch, action: str):
+        captured: dict = {}
+
+        def fake_interrupt(request):
+            captured["request"] = request
+            return {"decisions": [{"type": "approve"} for _ in request["action_requests"]]}
+
+        monkeypatch.setattr("agent_common.middleware.conditional_hitl.interrupt", fake_interrupt)
+
+        async def scorer(name, args, *, tool=None, cache=None, server_slug=None):
+            return 0.1, None  # invoke's deterministic base score
+
+        mw = ConditionalHumanInTheLoopMiddleware(interrupt_on={}, risk_scorer=scorer, default_risk_threshold=0.8)
+        args = {"kind": "invoke", "target_type": "GatewayModel", "target_id": "claude-haiku-4-5", "action": action}
+        ai = AIMessage(
+            content="",
+            tool_calls=[{"name": "client_action", "args": args, "id": "tc-1", "type": "tool_call"}],
+        )
+        runtime = types.SimpleNamespace(
+            context=types.SimpleNamespace(
+                tool_bypass_rules={}, tool_risk_cache=None, _pending_bypass_rules=[], client_objects=self.OBJECTS
+            )
+        )
+        await mw.aafter_model({"messages": [ai]}, runtime)
+        return captured.get("request")
+
+    async def test_a_marked_action_is_asked_and_needs_a_click(self, monkeypatch):
+        from agent_common.core.hitl_resume import _needs_a_click
+
+        request = await self._run(monkeypatch, "set_tier_default")
+        assert request is not None, "the marked action must raise a card"
+        [action_request] = request["action_requests"]
+        assert action_request["args"]["_requires_click"] is True
+        assert _needs_a_click(request["action_requests"])
+
+    async def test_an_unmarked_action_runs_without_a_card(self, monkeypatch):
+        assert await self._run(monkeypatch, "test") is None

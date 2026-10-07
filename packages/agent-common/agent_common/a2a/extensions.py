@@ -128,6 +128,31 @@ Optional members on an ``approve``, all independent of the decision itself:
     instead of costing a second pause.
 """
 
+HITL_DECISION_EXTENSION = "urn:nannos:a2a:hitl-decision:1.0"
+"""What the server decided an approval prompt's answer was, when the user TYPED it.
+
+A click carries its own decision, so the client already knows the outcome. Words
+typed while a human-in-the-loop prompt is pending are classified server-side
+(``agent_common.core.hitl_resume``) into a decision the client never sees — so the
+server reports it on a ``working`` status-update with a DataPart::
+
+  {
+    "decisions": [
+      {
+        "id": "<the ask's _call_id>",            // absent when the ask carried none
+        "type": "approve" | "reject" | "edit",   // what the gate did with the call
+        "intent": "approve" | "reject" | "change" | "question" | "none"
+      }
+    ]
+  }
+
+``type`` is what happened to the call (only ``approve`` ran it); ``intent`` is how
+the words read — a typed "yes" to a save that needs a click is ``intent: approve``
+but ``type: reject``. ``none`` means the reply was not an answer to the prompt.
+Display-only: nothing is sent back. Emitted once per classification; a replay of
+the same node may repeat it, so clients key on ``id``.
+"""
+
 CONVERSATION_ORIGIN_EXTENSION = "urn:nannos:a2a:conversation-origin:1.0"
 """Request-side extension: what a new conversation originates from.
 
@@ -269,6 +294,7 @@ ALL_EXTENSIONS = [
     CONVERSATION_ORIGIN_EXTENSION,
     CLIENT_ACTION_EXTENSION,
     IN_TASK_AUTH_EXTENSION,
+    HITL_DECISION_EXTENSION,
 ]
 
 
@@ -390,6 +416,32 @@ def new_client_action_request_message(
         context_id=context_id or "",
         task_id=task_id or "",
         extensions=[CLIENT_ACTION_EXTENSION],
+    )
+
+
+def new_hitl_decision_message(
+    decisions: list[dict],
+    context_id: str | None = None,
+    task_id: str | None = None,
+) -> Message:
+    """Build a Message reporting how a typed answer to an approval prompt was read.
+
+    The message carries:
+      - A DataPart with {"decisions": [{"id", "type", "intent"}]}
+      - extensions=[HITL_DECISION_EXTENSION] for client classification
+    """
+    return Message(
+        role=Role.ROLE_AGENT,
+        parts=[
+            Part(
+                data=ParseDict({"decisions": decisions}, Value()),
+                metadata={"media_type": "application/json"},
+            )
+        ],
+        message_id=str(uuid.uuid4()),
+        context_id=context_id or "",
+        task_id=task_id or "",
+        extensions=[HITL_DECISION_EXTENSION],
     )
 
 

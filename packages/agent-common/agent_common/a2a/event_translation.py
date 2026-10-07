@@ -29,6 +29,7 @@ from .authentication import AuthenticationMethod, AuthPayload, ServiceAuthRequir
 from .extensions import (
     ACTIVITY_LOG_EXTENSION,
     CLIENT_ACTION_EXTENSION,
+    HITL_DECISION_EXTENSION,
     INTERMEDIATE_OUTPUT_EXTENSION,
     WORK_PLAN_EXTENSION,
 )
@@ -38,6 +39,7 @@ from .stream_events import (
     ArtifactUpdate,
     ClientActionMeta,
     EventMetadata,
+    HitlDecisionMeta,
     IntermediateOutputMeta,
     StreamEvent,
     TaskResponseData,
@@ -275,6 +277,8 @@ def metadata_from_status_message(message: Optional[Message]) -> Optional[EventMe
         return WorkPlanMeta(todos=list(data.get("todos", [])))
     if CLIENT_ACTION_EXTENSION in extensions and isinstance(data.get("directive"), dict):
         return ClientActionMeta(client_action=data["directive"])
+    if HITL_DECISION_EXTENSION in extensions and isinstance(data.get("decisions"), list):
+        return HitlDecisionMeta(hitl_decision=data["decisions"])
     return None
 
 
@@ -335,7 +339,7 @@ class A2AStreamTranslator:
         extra = {
             k: v
             for k, v in raw_event_metadata.items()
-            if k not in ("activity_log", "work_plan", "todos", "intermediate_output", "client_action")
+            if k not in ("activity_log", "work_plan", "todos", "intermediate_output", "client_action", "hitl_decision")
         }
         response = task_response(task_id, context_id, status, artifacts, extra_metadata=extra or None)
         raw_status_text = ""
