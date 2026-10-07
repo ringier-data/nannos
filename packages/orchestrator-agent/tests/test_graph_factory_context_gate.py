@@ -10,6 +10,7 @@ present in ``_create_middleware_stack`` and configured with the channel-only
 from unittest.mock import MagicMock
 
 from agent_common.middleware.continue_on_truncation import ContinueOnTruncationMiddleware
+from agent_common.middleware.premature_final_response import PrematureFinalResponseMiddleware
 from agent_common.middleware.conversation_context_tools_middleware import (
     ConversationContextToolsMiddleware,
 )
@@ -41,13 +42,15 @@ def _make_factory() -> GraphFactory:
 def test_context_gate_is_outermost_tool_shaping_middleware():
     stack = _make_factory()._create_middleware_stack()
 
-    # ContinueOnTruncationMiddleware is the outermost middleware overall, but it only
-    # wraps the model call — it shapes no tools. The context gate must remain the
-    # outermost *tool-shaping* middleware, immediately followed by DynamicToolDispatch
-    # (the first tool-call handler), so the gate's injected tool flows through it.
+    # ContinueOnTruncationMiddleware and PrematureFinalResponseMiddleware are the
+    # outermost middlewares overall, but they only wrap the model call — they shape no
+    # tools. The context gate must remain the outermost *tool-shaping* middleware,
+    # immediately followed by DynamicToolDispatch (the first tool-call handler), so the
+    # gate's injected tool flows through it.
     assert isinstance(stack[0], ContinueOnTruncationMiddleware)
-    assert isinstance(stack[1], ConversationContextToolsMiddleware)
-    assert isinstance(stack[2], DynamicToolDispatchMiddleware)
+    assert isinstance(stack[1], PrematureFinalResponseMiddleware)
+    assert isinstance(stack[2], ConversationContextToolsMiddleware)
+    assert isinstance(stack[3], DynamicToolDispatchMiddleware)
 
 
 def test_context_gate_rules_read_personal_file_channel_only():

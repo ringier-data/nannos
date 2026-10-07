@@ -115,39 +115,42 @@ class TestMiddlewareStack:
         # cache, user prefs after steering, playbook after prefs, then the code
         # interpreter (_PTCToleranceCodeInterpreterMiddleware, which exposes the
         # eval REPL + PTC bridge and hides PTC-exposed tools from the model itself).
-        assert len(stack) == 18
+        assert len(stack) == 19
         # stack[0] = ContinueOnTruncationMiddleware — outermost model-call wrapper; re-runs a
         # turn cut off mid-generation with a nudge + raised max_tokens. Only implements
         # wrap_model_call, so the context gate remains the outermost *tool-shaping* middleware.
         assert stack[0].__class__.__name__ == "ContinueOnTruncationMiddleware"
-        assert stack[1].__class__.__name__ == "ConversationContextToolsMiddleware"
-        assert isinstance(stack[2], DynamicToolDispatchMiddleware)
-        assert isinstance(stack[3], StoragePathsInstructionMiddleware)
+        # stack[1] = PrematureFinalResponseMiddleware — holds back a final response sent
+        # together with tool calls until the model has read their results.
+        assert stack[1].__class__.__name__ == "PrematureFinalResponseMiddleware"
+        assert stack[2].__class__.__name__ == "ConversationContextToolsMiddleware"
+        assert isinstance(stack[3], DynamicToolDispatchMiddleware)
+        assert isinstance(stack[4], StoragePathsInstructionMiddleware)
         # Provider-agnostic caching under the gateway: the cache breakpoint
         # is injected as an OpenAI-format cache_control block that LiteLLM translates
         # per provider, replacing the old Bedrock-only BedrockPromptCachingMiddleware.
-        assert isinstance(stack[4], LiteLLMPromptCachingMiddleware)
-        # stack[5] = SteeringMiddleware (from ringier_a2a_sdk)
-        assert stack[5].__class__.__name__ == "SteeringMiddleware"
-        assert isinstance(stack[6], UserPreferencesMiddleware)
-        # stack[7] = PlaybookInjectionMiddleware
-        assert stack[7].__class__.__name__ == "PlaybookInjectionMiddleware"
-        # stack[8] = CodeInterpreterMiddleware (eval REPL + PTC bridge; also hides
+        assert isinstance(stack[5], LiteLLMPromptCachingMiddleware)
+        # stack[6] = SteeringMiddleware (from ringier_a2a_sdk)
+        assert stack[6].__class__.__name__ == "SteeringMiddleware"
+        assert isinstance(stack[7], UserPreferencesMiddleware)
+        # stack[8] = PlaybookInjectionMiddleware
+        assert stack[8].__class__.__name__ == "PlaybookInjectionMiddleware"
+        # stack[9] = CodeInterpreterMiddleware (eval REPL + PTC bridge; also hides
         # every PTC-exposed tool from the model's bound tool list)
-        assert stack[8].__class__.__name__ == "_PTCToleranceCodeInterpreterMiddleware"
-        # stack[9] = ToolStatusMiddleware (emits status for tool calls)
-        assert stack[9].__class__.__name__ == "ToolStatusMiddleware"
-        assert isinstance(stack[10], RepeatedToolCallMiddleware)
-        assert isinstance(stack[11], AuthErrorDetectionMiddleware)
-        assert stack[12].__class__.__name__ == "ErrorClassificationMiddleware"
-        # stack[13] = ConditionalHumanInTheLoopMiddleware
-        assert stack[13].__class__.__name__ == "ConditionalHumanInTheLoopMiddleware"
-        assert isinstance(stack[14], ToolRetryMiddleware)
-        assert isinstance(stack[15], A2ATaskTrackingMiddleware)
-        assert isinstance(stack[16], TodoStatusMiddleware)
+        assert stack[9].__class__.__name__ == "_PTCToleranceCodeInterpreterMiddleware"
+        # stack[10] = ToolStatusMiddleware (emits status for tool calls)
+        assert stack[10].__class__.__name__ == "ToolStatusMiddleware"
+        assert isinstance(stack[11], RepeatedToolCallMiddleware)
+        assert isinstance(stack[12], AuthErrorDetectionMiddleware)
+        assert stack[13].__class__.__name__ == "ErrorClassificationMiddleware"
+        # stack[14] = ConditionalHumanInTheLoopMiddleware
+        assert stack[14].__class__.__name__ == "ConditionalHumanInTheLoopMiddleware"
+        assert isinstance(stack[15], ToolRetryMiddleware)
+        assert isinstance(stack[16], A2ATaskTrackingMiddleware)
+        assert isinstance(stack[17], TodoStatusMiddleware)
         # Innermost: strips duplicate plain-text content from AIMessages that
         # carry a FinalResponseSchema tool call.
-        assert stack[17].__class__.__name__ == "FinalResponseTextStripMiddleware"
+        assert stack[18].__class__.__name__ == "FinalResponseTextStripMiddleware"
 
     @patch("app.core.graph_factory._has_aws_credentials", return_value=True)
     @patch("langgraph.store.postgres.aio.AsyncPostgresStore")
@@ -193,7 +196,7 @@ class TestMiddlewareStack:
         # LiteLLM caching is present even for non-Bedrock models...
         assert any(isinstance(m, LiteLLMPromptCachingMiddleware) for m in stack)
         # ...and the stack matches the Bedrock case (no provider-conditional branch).
-        assert len(stack) == 18
+        assert len(stack) == 19
 
     @patch("app.core.graph_factory._has_aws_credentials", return_value=True)
     @patch("langgraph.store.postgres.aio.AsyncPostgresStore")

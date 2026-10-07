@@ -47,6 +47,7 @@ from agent_common.a2a.stream_events import (
     ActivityLogMeta,
     ArtifactUpdate,
     ErrorEvent,
+    HitlDecisionMeta,
     StreamEvent,
     TaskResponseData,
     TaskUpdate,
@@ -55,7 +56,12 @@ from agent_common.a2a.stream_events import (
 from agent_common.agents.dynamic_agent import DynamicLocalAgentRunnable
 from agent_common.agents.foundry_agent import FoundryLocalAgentRunnable
 from agent_common.core.graph_utils import code_interpreter_ptc_enabled
-from agent_common.core.hitl_resume import KIND_AUTH, interrupt_kind, pending_authorization_answer
+from agent_common.core.hitl_resume import (
+    HITL_DECISION_EVENT,
+    KIND_AUTH,
+    interrupt_kind,
+    pending_authorization_answer,
+)
 from agent_common.core.model_factory import create_model, get_default_fast_model, require_default_model
 from agent_common.core.stream_watchdog import inter_chunk_timeout
 from langchain.agents.middleware.types import (
@@ -1951,6 +1957,20 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                             except Exception as e:
                                 logger.debug(f"Failed to forward sub-agent todos: {e}")
                         continue  # todo snapshots are not status messages
+
+                    # How the user's TYPED answer to the sub-agent's approval card was
+                    # read: re-emitted on the orchestrator's stream so it reaches the client.
+                    if isinstance(item.event_metadata, HitlDecisionMeta):
+                        if stream_writer:
+                            try:
+                                result = stream_writer(
+                                    (HITL_DECISION_EVENT, {"decisions": item.event_metadata.hitl_decision})
+                                )
+                                if inspect.iscoroutine(result):
+                                    await result
+                            except Exception:
+                                logger.debug("Failed to forward sub-agent HITL decision", exc_info=True)
+                        continue  # display-only, not a status message
 
                     # Forward intermediate working-status messages to the orchestrator.
                     # Use the raw A2A protocol status text (from task.status.message)

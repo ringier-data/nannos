@@ -13,6 +13,7 @@ from agent_common.a2a.extensions import (
     CLIENT_ACTION_EXTENSION,
     CONVERSATION_ORIGIN_EXTENSION,
     FEEDBACK_REQUEST_EXTENSION,
+    HITL_DECISION_EXTENSION,
     HUMAN_IN_THE_LOOP_EXTENSION,
     IN_TASK_AUTH_EXTENSION,
     INTERMEDIATE_OUTPUT_EXTENSION,
@@ -22,6 +23,7 @@ from agent_common.a2a.extensions import (
     new_client_action_message,
     new_client_action_request_message,
     new_feedback_request_message,
+    new_hitl_decision_message,
     new_hitl_interrupt_message,
     new_work_plan_message,
 )
@@ -32,6 +34,7 @@ __all__ = [
     "CLIENT_ACTION_EXTENSION",
     "CONVERSATION_ORIGIN_EXTENSION",
     "FEEDBACK_REQUEST_EXTENSION",
+    "HITL_DECISION_EXTENSION",
     "HUMAN_IN_THE_LOOP_EXTENSION",
     "IN_TASK_AUTH_EXTENSION",
     "INTERMEDIATE_OUTPUT_EXTENSION",
@@ -41,6 +44,7 @@ __all__ = [
     "new_client_action_message",
     "new_client_action_request_message",
     "new_feedback_request_message",
+    "new_hitl_decision_message",
     "new_hitl_interrupt_message",
     "new_work_plan_message",
 ]

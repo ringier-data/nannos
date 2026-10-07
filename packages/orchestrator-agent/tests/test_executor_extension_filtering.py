@@ -15,6 +15,7 @@ from google.protobuf.json_format import MessageToDict
 
 from app.core.a2a_extensions import (
     ACTIVITY_LOG_EXTENSION,
+    HITL_DECISION_EXTENSION,
     IN_TASK_AUTH_EXTENSION,
     INTERMEDIATE_OUTPUT_EXTENSION,
     WORK_PLAN_EXTENSION,
@@ -703,3 +704,37 @@ class TestInTaskAuthExtensionFiltering:
         message = self._emitted_message(updater)
         assert "client_secret" not in str(message)
         assert "oauth2_client_config" not in str(message)
+
+
+# ===========================================================================
+# HITL decision extension (a typed answer to an approval, as the server read it)
+# ===========================================================================
+
+
+HITL_DECISIONS = [{"id": "call-9", "type": "approve", "intent": "approve"}]
+
+
+class TestHitlDecisionExtension:
+    def _item(self):
+        return AgentStreamResponse(
+            state=TaskState.TASK_STATE_WORKING, content="", metadata={"hitl_decision": HITL_DECISIONS}
+        )
+
+    @pytest.mark.asyncio
+    async def test_suppressed_when_not_negotiated(self, executor, updater, task):
+        await executor._handle_stream_item(
+            self._item(), updater, task, is_final=False, active_extensions={ACTIVITY_LOG_EXTENSION}
+        )
+        updater.update_status.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_emitted_as_working_status_with_data_part(self, executor, updater, task):
+        result = await executor._handle_stream_item(
+            self._item(), updater, task, is_final=False, active_extensions={HITL_DECISION_EXTENSION}
+        )
+        updater.update_status.assert_awaited_once()
+        state, msg = updater.update_status.call_args[0][:2]
+        assert state == TaskState.TASK_STATE_WORKING
+        assert list(msg.extensions) == [HITL_DECISION_EXTENSION]
+        assert MessageToDict(msg.parts[0].data) == {"decisions": HITL_DECISIONS}
+        assert result[0] is False  # display-only: never counts as answer content

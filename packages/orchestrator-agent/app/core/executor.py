@@ -53,6 +53,7 @@ from .a2a_extensions import (
     ACTIVITY_LOG_EXTENSION,
     CLIENT_ACTION_EXTENSION,
     FEEDBACK_REQUEST_EXTENSION,
+    HITL_DECISION_EXTENSION,
     HUMAN_IN_THE_LOOP_EXTENSION,
     IN_TASK_AUTH_EXTENSION,
     INTERMEDIATE_OUTPUT_EXTENSION,
@@ -62,6 +63,7 @@ from .a2a_extensions import (
     new_client_action_message,
     new_client_action_request_message,
     new_feedback_request_message,
+    new_hitl_decision_message,
     new_hitl_interrupt_message,
     new_work_plan_message,
 )
@@ -1502,6 +1504,16 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     task.context_id,
                     task.id,
                 ),
+            )
+            return first_chunk_sent, first_intermediate_chunk_sent  # Don't modify flags
+
+        # --- Typed answer to an approval, as the server read it → status-update with DataPart ---
+        if metadata.get("hitl_decision"):
+            if not _ext_active(HITL_DECISION_EXTENSION):
+                return first_chunk_sent, first_intermediate_chunk_sent  # Client didn't request this extension
+            await updater.update_status(
+                TaskState.TASK_STATE_WORKING,
+                new_hitl_decision_message(metadata["hitl_decision"], task.context_id, task.id),
             )
             return first_chunk_sent, first_intermediate_chunk_sent  # Don't modify flags
 

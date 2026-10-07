@@ -32,6 +32,7 @@ from agent_common.backends.attachments_store import (
     reset_current_attachments_backend,
     set_current_attachments_backend,
 )
+from agent_common.core.hitl_resume import HITL_DECISION_EVENT
 from agent_common.core.notify_user_tool import (
     NOTE_KIND,
     NOTIFY_USER_TOOL_NAME,
@@ -1307,6 +1308,18 @@ class OrchestratorDeepAgent:
                             )
                         continue  # Process next event
 
+                    elif event_type == HITL_DECISION_EVENT:
+                        # How the user's TYPED answer to a pending approval was read
+                        # (hitl_resume). The client settles its approval card to it.
+                        decisions = event_data.get("decisions")
+                        if decisions:
+                            yield AgentStreamResponse(
+                                state=TaskState.TASK_STATE_WORKING,
+                                content="",
+                                metadata={"hitl_decision": decisions},
+                            )
+                        continue  # Process next event
+
                     elif event_type == "status_history":
                         # ACTIVITY LOG from tool calls (orchestrator or sub-agents via middleware)
                         status_msg = event_data.get("message", "")
@@ -1535,6 +1548,7 @@ class OrchestratorDeepAgent:
             ArtifactUpdate,
             ClientActionMeta,
             ErrorEvent,
+            HitlDecisionMeta,
             IntermediateOutputMeta,
             TaskUpdate,
             WorkPlanMeta,
@@ -1604,6 +1618,13 @@ class OrchestratorDeepAgent:
                             state=TaskState.TASK_STATE_WORKING,
                             content="",
                             metadata={"client_action": meta.client_action},
+                        )
+                        continue
+                    if isinstance(meta, HitlDecisionMeta):
+                        yield AgentStreamResponse(
+                            state=TaskState.TASK_STATE_WORKING,
+                            content="",
+                            metadata={"hitl_decision": meta.hitl_decision},
                         )
                         continue
                     if isinstance(meta, ActivityLogMeta) or ev.status_text:
