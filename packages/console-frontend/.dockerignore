@@ -5,3 +5,5 @@ __pycache__
 *.md
 .vscode
 .env
+# The published agent definition (vite-plugins/agentSkills.ts) is markdown the build needs.
+!well-known/**

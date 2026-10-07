@@ -20,6 +20,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import { NannosForm } from '@/components/nannos/NannosForm';
+import type { SubmitOutcome } from '@nannos/embed-sdk';
 
 interface SkillEditorModalProps {
   open: boolean;
@@ -141,6 +143,15 @@ export function SkillEditorModal({
   const handleSave = () => {
     onChange(localSkills);
     onOpenChange(false);
+  };
+
+  // The modal's Save only hands the skills back to the sub-agent form; nothing is persisted yet.
+  const submitToForm = (): SubmitOutcome => {
+    handleSave();
+    return {
+      ok: true,
+      detail: 'Applied the skills to the sub-agent form and closed the editor — save the sub-agent to persist them.',
+    };
   };
 
   // Get content for active file of active skill
@@ -393,6 +404,20 @@ export function SkillEditorModal({
                 {activeFile === 'SKILL.md' ? (
                   /* Structured SKILL.md editor */
                   <div className="flex-1 flex flex-col gap-4 p-4 overflow-auto">
+                    {!disabled && (
+                      <NannosForm
+                        type="SubAgentSkill"
+                        id={activeSkill.name}
+                        fields={{
+                          description: [
+                            activeSkill.description,
+                            (v: string) => updateSkill(activeSkillIdx!, { description: v }),
+                          ],
+                          instructions: [activeSkill.body ?? '', (v: string) => updateSkill(activeSkillIdx!, { body: v })],
+                        }}
+                        submit={submitToForm}
+                      />
+                    )}
                     <div>
                       <Label className="text-sm font-medium">Description</Label>
                       <Input

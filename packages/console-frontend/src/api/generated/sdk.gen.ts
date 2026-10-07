@@ -159,8 +159,9 @@ export const updateCurrentUserSettingsApiV1AuthMeSettingsPatch = <ThrowOnError e
  * The orchestrator fetches this once per turn and folds ``version`` into its per-user
  * cache keys, so any entitlement change (tools, sub-agents, role) is picked up on the
  * user's next turn on every replica without a push-based invalidation. ``settings_version``
- * keys only its cached user record, so a preference change (model, thinking, custom
- * prompt) applies on the next turn without evicting capability discovery. Compare for
+ * keys only its caches that bake in preferences (user record, embedded runnable), so a
+ * preference change (model, thinking, custom prompt) applies on the next turn without
+ * evicting capability discovery. Compare for
  * equality only; the values have no other meaning. See ``services.entitlement_version``.
  */
 export const getCurrentUserEntitlementVersionApiV1AuthMeEntitlementVersionGet = <ThrowOnError extends boolean = false>(options?: Options<GetCurrentUserEntitlementVersionApiV1AuthMeEntitlementVersionGetData, ThrowOnError>) => (options?.client ?? client).get<GetCurrentUserEntitlementVersionApiV1AuthMeEntitlementVersionGetResponses, unknown, ThrowOnError>({ url: '/api/v1/auth/me/entitlement-version', ...options });
@@ -927,8 +928,12 @@ export const getSubAgentApiV1SubAgentsSubAgentIdGet = <ThrowOnError extends bool
  *
  * Use this tool ONLY for: system_prompt, model, name, mcp_tools, is_public.
  *
- * Requires write or owner permission. Configuration changes create a new version
- * that may require approval.
+ * Requires write or owner permission: the caller owns the agent, or a group they have
+ * write access in can reach it, or they are an admin in admin mode. Anything else — a
+ * system agent, another user's agent, admin mode off — is refused with 403, so do not
+ * propose this call for an agent the user can only read (its page offers no edit):
+ * tell them they lack write access here and who has it. Configuration changes create a
+ * new version that may require approval.
  */
 export const consoleUpdateSubAgent = <ThrowOnError extends boolean = false>(options: Options<ConsoleUpdateSubAgentData, ThrowOnError>) => (options.client ?? client).patch<ConsoleUpdateSubAgentResponses, ConsoleUpdateSubAgentErrors, ThrowOnError>({
     url: '/api/v1/sub-agents/{sub_agent_id}',
@@ -1965,7 +1970,9 @@ export const costPrefillApiV1AdminModelGatewayModelsModelNameCostPrefillGet = <T
  * The alias is also dropped from any tier's failover chain: leaving it there would have the
  * gateway fail over to a model it no longer serves, breaking at exactly the moment the primary
  * is down. Read the alias *before* deleting — afterwards the deployment is gone and there is
- * nothing left to map the id to a name.
+ * nothing left to map the id to a name. Only when no other deployment still serves the alias
+ * (a leftover duplicate, a config-defined twin): it is still live then, and dropping it would
+ * silently stop the tier failing over to it (nannos#339).
  */
 export const deleteModelApiV1AdminModelGatewayModelsModelIdDelete = <ThrowOnError extends boolean = false>(options: Options<DeleteModelApiV1AdminModelGatewayModelsModelIdDeleteData, ThrowOnError>) => (options.client ?? client).delete<DeleteModelApiV1AdminModelGatewayModelsModelIdDeleteResponses, DeleteModelApiV1AdminModelGatewayModelsModelIdDeleteErrors, ThrowOnError>({ url: '/api/v1/admin/model-gateway/models/{model_id}', ...options });
 

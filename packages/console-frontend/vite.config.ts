@@ -3,6 +3,7 @@ import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import path from 'path';
 import fs from 'fs';
+import { agentSkillsWellKnown } from './vite-plugins/agentSkills';
 
 const sdkSrc = path.resolve(__dirname, '../embed-sdk/src');
 // Only true while the SDK is a workspace sibling. If it is ever consumed as a
@@ -39,7 +40,13 @@ const backendTarget = `http://localhost:${process.env.CONSOLE_BACKEND_PORT || '5
 
 // https://vite.dev/config/
 export default defineConfig(({ command }) => ({
-  plugins: [react(), tailwindcss()],
+  plugins: [
+    react(),
+    tailwindcss(),
+    // Publishes the console's own Nannos agent definition ("Nannos Assistant": prompt,
+    // tool scope, skills) under /.well-known/agent-skills/ -- see vite-plugins/agentSkills.ts.
+    agentSkillsWellKnown(path.resolve(__dirname, 'well-known/agent-skills')),
+  ],
   server: {
     proxy: {
       '/api': {

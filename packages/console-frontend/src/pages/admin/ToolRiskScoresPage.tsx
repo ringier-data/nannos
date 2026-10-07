@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { keepPreviousData, useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { ShieldAlert, Trash2, Loader2, RefreshCw, Plus, Pencil, Search } from 'lucide-react';
 import { toast } from 'sonner';
+import { useObjectStateAdapter, type SubmitOutcome } from '@nannos/embed-sdk';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -20,9 +21,12 @@ import {
 } from '@/components/ui/dialog';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { Pagination } from '@/components/admin/Pagination';
+import { NannosForm } from '@/components/nannos/NannosForm';
+import { NannosActions } from '@/components/nannos/NannosActions';
 import { client } from '@/api/generated/client.gen';
 import { listRiskScoresApiMcpToolsRiskScoresGet } from '@/api/generated/sdk.gen';
 import { useDebouncedValue } from '@/hooks/use-debounced-value';
+import { getErrorMessage } from '@/lib/utils';
 
 interface RiskFactor {
   risky_values: Record<string, number>;
@@ -86,14 +90,14 @@ const ALL_ACTIONS = ['approve', 'edit', 'reject'] as const;
 const PAGE_SIZE = 20;
 
 /** Form state for add/edit dialog. */
-interface FormState {
+type FormState = {
   tool_name: string;
   server_slug: string;
   schema_hash: string;
   base_score: number;
   risk_factors_json: string;
   allowed_actions: string[];
-}
+};
 
 function emptyForm(): FormState {
   return {
@@ -125,6 +129,16 @@ export function ToolRiskScoresPage() {
   const [editingExisting, setEditingExisting] = useState(false);
   const [form, setForm] = useState<FormState>(emptyForm());
   const [jsonError, setJsonError] = useState<string | null>(null);
+  const nannosForm = useObjectStateAdapter(form, (next) => {
+    // A score is keyed by tool + server, so both are fixed once it exists (their inputs are disabled).
+    const patch = { ...next };
+    if (editingExisting) {
+      delete patch.tool_name;
+      delete patch.server_slug;
+    }
+    setForm((f) => ({ ...f, ...patch }));
+    if ('risk_factors_json' in next) setJsonError(null);
+  });
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState('');
   const debouncedSearch = useDebouncedValue(search.trim());
@@ -179,7 +193,8 @@ export function ToolRiskScoresPage() {
     setEditDialogOpen(true);
   };
 
-  const handleSave = () => {
+  // upsertMutation's onError toasts; this only reports the outcome to the assistant.
+  const save = async (): Promise<SubmitOutcome> => {
     // Validate JSON
     let riskFactors: Record<string, RiskFactor>;
     try {
@@ -187,22 +202,31 @@ export function ToolRiskScoresPage() {
       setJsonError(null);
     } catch {
       setJsonError('Invalid JSON for risk factors');
-      return;
+      return { ok: false, detail: 'Invalid JSON for risk factors' };
     }
 
     if (!form.tool_name.trim()) {
       toast.error('Tool name is required');
-      return;
+      return { ok: false, detail: 'Tool name is required' };
     }
 
-    upsertMutation.mutate({
-      tool_name: form.tool_name.trim(),
-      server_slug: form.server_slug.trim() || 'console',
-      schema_hash: form.schema_hash,
-      base_score: form.base_score,
-      risk_factors: riskFactors,
-      allowed_actions: form.allowed_actions,
-    });
+    try {
+      await upsertMutation.mutateAsync({
+        tool_name: form.tool_name.trim(),
+        server_slug: form.server_slug.trim() || 'console',
+        schema_hash: form.schema_hash,
+        base_score: form.base_score,
+        risk_factors: riskFactors,
+        allowed_actions: form.allowed_actions,
+      });
+      return true;
+    } catch (error) {
+      return { ok: false, detail: getErrorMessage(error) };
+    }
+  };
+
+  const handleSave = () => {
+    void save();
   };
 
   const toggleAction = (action: string) => {
@@ -223,6 +247,47 @@ export function ToolRiskScoresPage() {
 
   return (
     <div className="flex flex-col gap-6 p-4 pb-8">
+      {/* The header buttons and a row's editor, for the assistant: without them it could only
+          point at "Add Score", and told the user the page had none. Both open the ToolRiskScore
+          form, which takes this type:id while the dialog is open. */}
+      {!editDialogOpen && (
+        <NannosActions
+          type="ToolRiskScore"
+          id={undefined}
+          actions={{
+            create: {
+              label: 'Add score',
+              description: 'Open the Add Risk Score dialog with an empty, unsaved form; then fill it and submit.',
+              run: openAddDialog,
+            },
+            edit: {
+              label: 'Edit a score',
+              description:
+                "Open a listed score's editor. Only scores in the current list can be opened: search for the tool first.",
+              params: [{ name: 'tool_name', type: 'string', description: 'The tool name as listed' }],
+              run: ({ tool_name }) => {
+                const matches = scores.filter((s) => s.tool_name === tool_name);
+                if (matches.length === 1) return openEditDialog(matches[0]);
+                return {
+                  ok: false,
+                  detail: matches.length
+                    ? `${String(tool_name)} is listed for several servers; ask the user which one.`
+                    : `${String(tool_name)} is not in the current list. Search for it; if it has no score yet, create one.`,
+                };
+              },
+            },
+            search: {
+              label: 'Search',
+              description: 'Filter the list by tool name or server; an empty query clears it. Read the page after.',
+              params: [{ name: 'query', type: 'string', description: 'Tool name or server' }],
+              run: ({ query }) => {
+                setSearch(typeof query === 'string' ? query : '');
+                setPage(1);
+              },
+            },
+          }}
+        />
+      )}
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
@@ -497,6 +562,12 @@ export function ToolRiskScoresPage() {
       {/* Add/Edit Dialog */}
       <Dialog open={editDialogOpen} onOpenChange={setEditDialogOpen}>
         <DialogContent className="max-w-lg">
+          <NannosForm
+            type="ToolRiskScore"
+            id={editingExisting ? `${form.server_slug}/${form.tool_name}` : undefined}
+            form={nannosForm}
+            submit={save}
+          />
           <DialogHeader>
             <DialogTitle>{editingExisting ? 'Edit Risk Score' : 'Add Risk Score'}</DialogTitle>
             <DialogDescription>

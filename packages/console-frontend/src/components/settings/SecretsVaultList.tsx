@@ -33,6 +33,7 @@ import {
 import type { Secret, SecretType } from '@/api/generated/types.gen';
 import { getErrorMessage } from '@/lib/utils';
 import { SecretPermissionsDialog } from './SecretPermissionsDialog';
+import { NannosForm } from '@/components/nannos/NannosForm';
 
 const PAGE_SIZE = 20;
 
@@ -253,6 +254,8 @@ export function SecretsVaultList() {
       {/* Create Dialog */}
       <Dialog open={showCreateDialog} onOpenChange={setShowCreateDialog}>
         <DialogContent className="max-w-md">
+          {/* Name and description only: the secret value never goes to the assistant. */}
+          <NannosForm type="Secret" id={undefined} fields={{ name: [name, setName], description: [description, setDescription] }} />
           <DialogHeader>
             <DialogTitle>Create Secret</DialogTitle>
             <DialogDescription>

@@ -8,6 +8,8 @@ import {
   listScimTokensApiV1AdminScimTokensGetQueryKey,
   revokeScimTokenApiV1AdminScimTokensTokenIdDeleteMutation,
 } from '@/api/generated/@tanstack/react-query.gen';
+import type { SubmitOutcome } from '@nannos/embed-sdk';
+import { getErrorMessage } from '@/lib/utils';
 import type { ScimToken, ScimTokenCreate, ScimTokenCreated } from '@/api/generated/types.gen';
 import { Pagination } from '@/components/admin/Pagination';
 import { useDebouncedValue } from '@/hooks/use-debounced-value';
@@ -34,6 +36,8 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { ConfirmDialog } from '@/components/admin/ConfirmDialog';
+import { NannosForm } from '@/components/nannos/NannosForm';
+import { NannosActions } from '@/components/nannos/NannosActions';
 
 const PAGE_SIZE = 20;
 
@@ -100,11 +104,23 @@ export function ScimTokensPage() {
     setExpiresAt('');
   };
 
-  const handleCreate = () => {
+  // createMutation's onError toasts; this only reports the outcome to the assistant.
+  const create = async (): Promise<SubmitOutcome> => {
+    if (!name.trim()) return { ok: false, detail: 'Name is required' };
     const body: ScimTokenCreate = { name };
     if (description) body.description = description;
     if (expiresAt) body.expires_at = new Date(expiresAt).toISOString();
-    createMutation.mutate({ body });
+    try {
+      await createMutation.mutateAsync({ body });
+      // The token itself stays out of the reply: only the user sees it, once.
+      return { ok: true, detail: 'Token created; it is shown once in a dialog for the user to copy.' };
+    } catch (error) {
+      return { ok: false, detail: getErrorMessage(error) };
+    }
+  };
+
+  const handleCreate = () => {
+    void create();
   };
 
   const handleCopy = async (token: string) => {
@@ -136,6 +152,21 @@ export function ScimTokensPage() {
 
   return (
     <div className="space-y-6 p-4">
+      {/* The create button, for the assistant: without it the agent could only ask the user to
+          click it. It opens the ScimToken form, which takes this type:id while the dialog is open. */}
+      {!createDialogOpen && (
+        <NannosActions
+          type="ScimToken"
+          id={undefined}
+          actions={{
+            create: {
+              label: 'Create token',
+              description: 'Open the Create SCIM Token dialog with an empty, unsaved form; then fill it and submit.',
+              run: () => setCreateDialogOpen(true),
+            },
+          }}
+        />
+      )}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">SCIM Tokens</h1>
@@ -248,6 +279,12 @@ export function ScimTokensPage() {
         }}
       >
         <DialogContent>
+          <NannosForm
+            type="ScimToken"
+            id={undefined}
+            fields={{ name: [name, setName], description: [description, setDescription], expiresAt: [expiresAt, setExpiresAt] }}
+            submit={create}
+          />
           <DialogHeader>
             <DialogTitle>Create SCIM Token</DialogTitle>
             <DialogDescription>

@@ -4988,6 +4988,12 @@ export type ScheduledJob = {
      * Deleted At
      */
     deleted_at?: string | null;
+    /**
+     * Console Path
+     *
+     * The console page that shows this job. After changing it from another page, tell the user and offer to open it.
+     */
+    readonly console_path: string;
 };
 
 /**
@@ -6863,6 +6869,18 @@ export type SubAgent = {
     updated_at?: string;
     config_version?: SubAgentConfigVersion | null;
     embed_binding?: EmbedBinding | null;
+    /**
+     * Approval Blockers
+     *
+     * Only on a create or update response, when the new version stays a draft: why it was not approved automatically, measured against the auto-approve limits. State these reasons as given; the owner submits the version for approval.
+     */
+    approval_blockers?: Array<string> | null;
+    /**
+     * Console Path
+     *
+     * The console page that shows this sub-agent. After changing it from another page, tell the user and offer to open it.
+     */
+    readonly console_path: string;
 };
 
 /**
@@ -9430,6 +9448,299 @@ export type ReasonEnum = 'no_card' | 'card_under_other_provider' | 'provider_und
  * Operation
  */
 export type OperationEnum = 'set' | 'add' | 'remove';
+
+/**
+ * ScheduledJob
+ *
+ * A scheduled job as one user sees it: their SUBSCRIPTION with the DEFINITION folded in.
+ *
+ * ``id`` is the subscription id — what every client, link and notification has always
+ * called the job id — and ``user_id`` is the subscriber. The definition's fields are
+ * flattened onto it rather than nested because the split is a storage fact, not a
+ * UI concept (ADR-0010): an unshared job is still one form, and a plain subscriber
+ * sees the same page with the definition fields read-only. The trigger fields carry
+ * the trigger IN FORCE for this subscription (its override, else the defaults);
+ * ``trigger_inherited`` says which, and ``trigger_defaults`` carries the defaults
+ * themselves for a writer editing the group's schedule.
+ */
+export type ScheduledJobWritable = {
+    /**
+     * Id
+     */
+    id: number;
+    /**
+     * User Id
+     */
+    user_id: string;
+    /**
+     * Definition Id
+     */
+    definition_id: number;
+    /**
+     * Owner User Id
+     */
+    owner_user_id: string;
+    /**
+     * Owner Email
+     */
+    owner_email?: string | null;
+    effective_permission?: EffectivePermissionEnum;
+    /**
+     * Sub Agent Id
+     */
+    sub_agent_id?: number | null;
+    /**
+     * Name
+     */
+    name: string;
+    job_type: JobType;
+    schedule_kind: ScheduleKind;
+    /**
+     * Cron Expr
+     */
+    cron_expr?: string | null;
+    /**
+     * Timezone
+     */
+    timezone?: string | null;
+    /**
+     * Interval Seconds
+     */
+    interval_seconds?: number | null;
+    /**
+     * Run At
+     */
+    run_at?: string | null;
+    /**
+     * Trigger Inherited
+     */
+    trigger_inherited?: boolean;
+    /**
+     * Timezone Override
+     */
+    timezone_override?: string | null;
+    trigger_defaults?: TriggerDefaults | null;
+    trigger_policy?: TriggerPolicy;
+    /**
+     * Next Run At
+     */
+    next_run_at: string;
+    /**
+     * Last Run At
+     */
+    last_run_at?: string | null;
+    /**
+     * Retry At
+     */
+    retry_at?: string | null;
+    /**
+     * Prompt
+     */
+    prompt?: string | null;
+    /**
+     * Notification Message
+     */
+    notification_message?: string | null;
+    /**
+     * Check Tool
+     */
+    check_tool?: string | null;
+    /**
+     * Check Args
+     */
+    check_args?: {
+        [key: string]: unknown;
+    } | null;
+    /**
+     * Check Args Exprs
+     */
+    check_args_exprs?: {
+        [key: string]: string;
+    } | null;
+    /**
+     * Cel Expr
+     */
+    cel_expr?: string | null;
+    /**
+     * Llm Condition
+     */
+    llm_condition?: string | null;
+    /**
+     * Destroy After Trigger
+     */
+    destroy_after_trigger?: boolean;
+    /**
+     * Last Check Result
+     */
+    last_check_result?: {
+        [key: string]: unknown;
+    } | null;
+    /**
+     * Delivery Channel Id
+     */
+    delivery_channel_id?: number | null;
+    /**
+     * Delivery Reachability
+     */
+    delivery_reachability?: _0Enum2 | null;
+    /**
+     * Voice Call
+     */
+    voice_call?: boolean;
+    /**
+     * Enabled
+     */
+    enabled: boolean;
+    /**
+     * Max Failures
+     */
+    max_failures: number;
+    /**
+     * Consecutive Failures
+     */
+    consecutive_failures: number;
+    pause_code?: PauseCode | null;
+    /**
+     * Paused Reason
+     */
+    paused_reason?: string | null;
+    /**
+     * Revision
+     */
+    revision?: number;
+    /**
+     * Is Public
+     */
+    is_public?: boolean;
+    /**
+     * Suspended At
+     */
+    suspended_at?: string | null;
+    /**
+     * Suspended By User Id
+     */
+    suspended_by_user_id?: string | null;
+    /**
+     * Suspended Reason
+     */
+    suspended_reason?: string | null;
+    /**
+     * Activated By
+     */
+    activated_by?: string;
+    /**
+     * Activated By Groups
+     */
+    activated_by_groups?: Array<number> | null;
+    /**
+     * Subscriber Count
+     */
+    subscriber_count?: number;
+    /**
+     * Created At
+     */
+    created_at: string;
+    /**
+     * Updated At
+     */
+    updated_at: string;
+    /**
+     * Deleted At
+     */
+    deleted_at?: string | null;
+};
+
+/**
+ * SubAgent
+ *
+ * Sub-agent model with full config version (including skill body/files).
+ *
+ * Metadata (name, owner, type) lives on sub_agents table.
+ * Configuration data (description, model, config, status) lives on sub_agent_config_versions.
+ * The config_version field holds the joined version data (default or specific version).
+ */
+export type SubAgentWritable = {
+    /**
+     * Id
+     */
+    id: number;
+    /**
+     * Name
+     */
+    name: string;
+    /**
+     * Owner User Id
+     */
+    owner_user_id: string;
+    owner?: SubAgentOwner | null;
+    owner_status?: OwnerStatus;
+    type: SubAgentType;
+    /**
+     * System Role
+     */
+    system_role?: string | null;
+    /**
+     * Current Version
+     */
+    current_version?: number;
+    /**
+     * Default Version
+     */
+    default_version?: number | null;
+    /**
+     * Is Public
+     */
+    is_public?: boolean | null;
+    /**
+     * Is Activated
+     */
+    is_activated?: boolean | null;
+    activated_by?: ActivationSource | null;
+    /**
+     * Activated By Groups
+     */
+    activated_by_groups?: Array<number> | null;
+    /**
+     * Effective Permission
+     */
+    effective_permission?: EffectivePermissionEnum | null;
+    /**
+     * Deleted At
+     */
+    deleted_at?: string | null;
+    /**
+     * Created At
+     */
+    created_at?: string;
+    /**
+     * Updated At
+     */
+    updated_at?: string;
+    config_version?: SubAgentConfigVersion | null;
+    embed_binding?: EmbedBinding | null;
+    /**
+     * Approval Blockers
+     *
+     * Only on a create or update response, when the new version stays a draft: why it was not approved automatically, measured against the auto-approve limits. State these reasons as given; the owner submits the version for approval.
+     */
+    approval_blockers?: Array<string> | null;
+};
+
+/**
+ * SubAgentListFullResponse
+ *
+ * Response model for listing sub-agents with full details.
+ */
+export type SubAgentListFullResponseWritable = {
+    /**
+     * Items
+     */
+    items: Array<SubAgentWritable>;
+    /**
+     * Total
+     */
+    total: number;
+};
 
 export type LoginApiV1AuthLoginGetData = {
     body?: never;

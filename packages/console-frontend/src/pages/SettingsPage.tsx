@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Save, Loader2, Settings as SettingsIcon, Shield, Bot, Wrench, Globe, Key, Phone, X, ShieldCheck } from 'lucide-react';
 import { toast } from 'sonner';
@@ -23,6 +23,9 @@ import { SecretsVaultList } from '@/components/settings/SecretsVaultList';
 import { ExtendedThinkingConfig } from '@/components/settings/ExtendedThinkingConfig';
 import { PhoneVerificationDialog } from '@/components/settings/PhoneVerificationDialog';
 import { ToolBypassRulesList } from '@/components/settings/ToolBypassRulesList';
+import { NannosForm } from '@/components/nannos/NannosForm';
+import type { ObjectAction, SubmitOutcome } from '@nannos/embed-sdk';
+import { getErrorMessage } from '@/lib/utils';
 import { useAvailableModels, modelSupportsThinking, getAvailableThinkingLevels, modelSelectOptions, getModelLabel } from '@/config/models';
 
 const LANGUAGE_OPTIONS = [
@@ -78,6 +81,22 @@ export function SettingsPage() {
   const [enableThinking, setEnableThinking] = useState<boolean | null>(null);
   const [thinkingLevel, setThinkingLevel] = useState<OrchestratorThinkingLevel | null>(null);
   const [verifyDialogOpen, setVerifyDialogOpen] = useState(false);
+  const [phoneDraft, setPhoneDraft] = useState<string | undefined>();
+  // The phone is not a form field: changing it means proving ownership by a code. The
+  // assistant can start that (number prefilled); the user sends and enters the code.
+  const changePhoneAction: ObjectAction = {
+    label: 'Change phone number',
+    description:
+      'Open the phone verification dialog with this number filled in. Nothing changes until the user ' +
+      'sends the code and enters it — tell them to.',
+    params: [{ name: 'phone', type: 'string', description: 'E.164, e.g. +41791234567 (no spaces)' }],
+    run: ({ phone }) => {
+      const number = typeof phone === 'string' ? phone.replace(/[\s()-]/g, '') : '';
+      if (!/^\+[1-9]\d{1,14}$/.test(number)) return { ok: false, detail: 'Not an E.164 number, e.g. +41791234567.' };
+      setPhoneDraft(number);
+      setVerifyDialogOpen(true);
+    },
+  };
   const [hasChanges, setHasChanges] = useState(false);
 
   const { data: settingsData, isLoading } = useQuery({
@@ -93,9 +112,17 @@ export function SettingsPage() {
 
   const settings = settingsData?.data;
 
+  // Seed only while the form is clean: a background refetch (window focus, another
+  // tab's save) must not wipe unsaved edits, the assistant's included. A ref, not a
+  // dep, so flipping hasChanges after a save doesn't re-seed from the stale copy.
+  const hasChangesRef = useRef(hasChanges);
+  useEffect(() => {
+    hasChangesRef.current = hasChanges;
+  }, [hasChanges]);
+
   // Initialize form when data loads
   useEffect(() => {
-    if (settings) {
+    if (settings && !hasChangesRef.current) {
       setLanguage(settings.language ?? 'en');
       setTimezone(settings.timezone ?? 'UTC');
       setCustomPrompt(settings.custom_prompt ?? '');
@@ -180,11 +207,42 @@ export function SettingsPage() {
     setHasChanges(true);
   };
 
+  // Assistant writes to the model/thinking trio. The agent may set all three in one
+  // tick and in any order, so the requested values accumulate here and every write
+  // re-derives the trio with the same rules the handlers above apply.
+  const agentModelRef = useRef({ model: preferredModel, enable: enableThinking, level: thinkingLevel });
+  useEffect(() => {
+    agentModelRef.current = { model: preferredModel, enable: enableThinking, level: thinkingLevel };
+  }, [preferredModel, enableThinking, thinkingLevel]);
+  const writeAgentModel = (patch: Partial<typeof agentModelRef.current>) => {
+    if (patch.model && !availableModels.some((m) => m.value === patch.model)) return;
+    const requested = { ...agentModelRef.current, ...patch };
+    // Picking a level is what turns thinking on, as in the level select.
+    if (patch.level) requested.enable = true;
+    agentModelRef.current = requested;
+    const { model } = requested;
+    let enable: boolean | null = null;
+    let level: OrchestratorThinkingLevel | null = null;
+    if (model !== null && modelSupportsThinking(model, availableModels)) {
+      enable = requested.enable;
+      if (enable) {
+        const levels = getAvailableThinkingLevels(model, availableModels);
+        level = levels.find((opt) => opt.value === requested.level)?.value ?? levels[0]?.value ?? 'low';
+      }
+    }
+    setPreferredModel(model);
+    setEnableThinking(enable);
+    setThinkingLevel(level);
+    setHasChanges(true);
+  };
+
   // Get all available IANA timezones
   const TIMEZONE_OPTIONS = useMemo(() => {
     try {
+      // Chrome's list has no "UTC" (nor any Etc/*), yet UTC is this page's own default
+      // and a saved value: without it the dropdown shows blank for those users.
       const timezones = Intl.supportedValuesOf('timeZone');
-      return timezones.map((tz) => ({
+      return [...(timezones.includes('UTC') ? [] : ['UTC']), ...timezones].map((tz) => ({
         value: tz,
         label: tz.replace(/_/g, ' '),
       }));
@@ -202,22 +260,32 @@ export function SettingsPage() {
     }
   }, []);
 
-  const handleSave = () => {
+  const save = async (): Promise<SubmitOutcome> => {
     // When preferred_model is null (default), also send thinking settings as null to use agent defaults
     const shouldUseDefaults = preferredModel === null;
 
-    updateMutation.mutate({
-      body: {
-        language,
-        timezone,
-        custom_prompt: customPrompt || null,
-        mcp_tools: mcpTools,
-        preferred_model: preferredModel,
-        enable_thinking: shouldUseDefaults ? null : enableThinking,
-        thinking_level: shouldUseDefaults ? null : thinkingLevel,
+    try {
+      await updateMutation.mutateAsync({
+        body: {
+          language,
+          timezone,
+          custom_prompt: customPrompt || null,
+          mcp_tools: mcpTools,
+          preferred_model: preferredModel,
+          enable_thinking: shouldUseDefaults ? null : enableThinking,
+          thinking_level: shouldUseDefaults ? null : thinkingLevel,
 
-      },
-    });
+        },
+      });
+      return true;
+    } catch (err) {
+      // onError has already toasted.
+      return { ok: false, detail: getErrorMessage(err) };
+    }
+  };
+
+  const handleSave = () => {
+    void save();
   };
 
   if (isLoading) {
@@ -266,6 +334,37 @@ export function SettingsPage() {
           </button>
         ))}
       </div>
+
+      {/* Registered once the saved settings are in: an apply that lands earlier (a client
+          action auto-settled right after a reload) was reported done, then overwritten by
+          the data-load effect above. */}
+      {settings && (activeTab === 'preferences' || activeTab === 'tools') && (
+        <NannosForm
+          type="Settings"
+          id="me"
+          dirty={hasChanges}
+          actions={activeTab === 'preferences' ? { change_phone: changePhoneAction } : undefined}
+          // Each tab offers the fields it shows; one save path persists them all.
+          fields={
+            activeTab === 'preferences'
+              ? {
+                  preferredModel: [preferredModel, (v: string | null) => writeAgentModel({ model: v })],
+                  enableThinking: [enableThinking, (v: boolean | null) => writeAgentModel({ enable: v })],
+                  thinkingLevel: [thinkingLevel, (v: OrchestratorThinkingLevel | null) => writeAgentModel({ level: v })],
+                  language: [language, handleLanguageChange],
+                  timezone: [
+                    timezone,
+                    (v: string) => {
+                      if (TIMEZONE_OPTIONS.some((o) => o.value === v)) handleTimezoneChange(v);
+                    },
+                  ],
+                  customPrompt: [customPrompt, handleCustomPromptChange],
+                }
+              : { mcpTools: [mcpTools, handleMcpToolsChange] }
+          }
+          submit={save}
+        />
+      )}
 
       {/* Tab Content */}
       {activeTab === 'preferences' && (
@@ -413,7 +512,11 @@ export function SettingsPage() {
 
           <PhoneVerificationDialog
             open={verifyDialogOpen}
-            onOpenChange={setVerifyDialogOpen}
+            onOpenChange={(o) => {
+              setVerifyDialogOpen(o);
+              if (!o) setPhoneDraft(undefined);
+            }}
+            initialNumber={phoneDraft}
             onVerified={() => {
               queryClient.invalidateQueries({ queryKey: getCurrentUserApiV1AuthMeGetQueryKey() });
             }}

@@ -11,6 +11,8 @@ import {
   testOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdTestPostMutation,
   updateOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdPatchMutation,
 } from '@/api/generated/@tanstack/react-query.gen';
+import type { SubmitOutcome } from '@nannos/embed-sdk';
+import { getErrorMessage } from '@/lib/utils';
 import type { OutboundScimEndpoint, OutboundScimEndpointUpdate } from '@/api/generated/types.gen';
 import { Pagination } from '@/components/admin/Pagination';
 import { useDebouncedValue } from '@/hooks/use-debounced-value';
@@ -31,6 +33,8 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { ConfirmDialog } from '@/components/admin/ConfirmDialog';
+import { NannosForm } from '@/components/nannos/NannosForm';
+import { NannosActions } from '@/components/nannos/NannosActions';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 
 const PAGE_SIZE = 20;
@@ -155,17 +159,30 @@ export function OutboundScimPage() {
     setIsMcpGateway(false);
   };
 
+  // The mutations' onError toasts; create/update only report the outcome to the assistant.
+  const create = async (): Promise<SubmitOutcome> => {
+    // The same fields the Add Endpoint button requires; the bearer token is typed by the user only.
+    if (!name.trim() || !endpointUrl.trim()) return { ok: false, detail: 'Name and endpoint URL are required' };
+    if (!bearerToken.trim()) return { ok: false, detail: 'The user must enter the bearer token first' };
+    try {
+      await createMutation.mutateAsync({
+        body: {
+          name,
+          endpoint_url: endpointUrl,
+          bearer_token: bearerToken,
+          push_users: pushUsers,
+          push_groups: pushGroups,
+          is_mcp_gateway: isMcpGateway,
+        },
+      });
+      return true;
+    } catch (error) {
+      return { ok: false, detail: getErrorMessage(error) };
+    }
+  };
+
   const handleCreate = () => {
-    createMutation.mutate({
-      body: {
-        name,
-        endpoint_url: endpointUrl,
-        bearer_token: bearerToken,
-        push_users: pushUsers,
-        push_groups: pushGroups,
-        is_mcp_gateway: isMcpGateway,
-      },
-    });
+    void create();
   };
 
   const openEditDialog = (endpoint: OutboundScimEndpoint) => {
@@ -179,8 +196,9 @@ export function OutboundScimPage() {
     setEditDialog({ open: true, endpoint });
   };
 
-  const handleUpdate = () => {
-    if (!editDialog.endpoint) return;
+  const update = async (): Promise<SubmitOutcome> => {
+    if (!editDialog.endpoint) return { ok: false, detail: 'No endpoint is being edited' };
+    if (!editName.trim() || !editEndpointUrl.trim()) return { ok: false, detail: 'Name and endpoint URL are required' };
     const body: OutboundScimEndpointUpdate = {
       name: editName,
       endpoint_url: editEndpointUrl,
@@ -190,7 +208,16 @@ export function OutboundScimPage() {
       is_mcp_gateway: editIsMcpGateway,
     };
     if (editBearerToken) body.bearer_token = editBearerToken;
-    updateMutation.mutate({ path: { endpoint_id: editDialog.endpoint.id }, body });
+    try {
+      await updateMutation.mutateAsync({ path: { endpoint_id: editDialog.endpoint.id }, body });
+      return true;
+    } catch (error) {
+      return { ok: false, detail: getErrorMessage(error) };
+    }
+  };
+
+  const handleUpdate = () => {
+    void update();
   };
 
   const endpoints = data?.data ?? [];
@@ -207,6 +234,21 @@ export function OutboundScimPage() {
 
   return (
     <div className="space-y-6 p-4">
+      {/* The create button, for the assistant: without it the agent could only ask the user to
+          click it. It opens the OutboundScimEndpoint form, which takes this type:id while the dialog is open. */}
+      {!createDialogOpen && (
+        <NannosActions
+          type="OutboundScimEndpoint"
+          id={undefined}
+          actions={{
+            create: {
+              label: 'Add endpoint',
+              description: 'Open the Add Endpoint dialog with an empty, unsaved form; then fill it and submit.',
+              run: () => setCreateDialogOpen(true),
+            },
+          }}
+        />
+      )}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Outbound SCIM Endpoints</h1>
@@ -339,6 +381,18 @@ export function OutboundScimPage() {
         }}
       >
         <DialogContent>
+          <NannosForm
+            type="OutboundScimEndpoint"
+            id={undefined}
+            fields={{
+              name: [name, setName],
+              endpointUrl: [endpointUrl, setEndpointUrl],
+              pushUsers: [pushUsers, setPushUsers],
+              pushGroups: [pushGroups, setPushGroups],
+              isMcpGateway: [isMcpGateway, setIsMcpGateway],
+            }}
+            submit={create}
+          />
           <DialogHeader>
             <DialogTitle>Add Outbound SCIM Endpoint</DialogTitle>
             <DialogDescription>
@@ -415,6 +469,19 @@ export function OutboundScimPage() {
         }}
       >
         <DialogContent>
+          <NannosForm
+            type="OutboundScimEndpoint"
+            id={editDialog.endpoint?.id}
+            fields={{
+              name: [editName, setEditName],
+              endpointUrl: [editEndpointUrl, setEditEndpointUrl],
+              pushUsers: [editPushUsers, setEditPushUsers],
+              pushGroups: [editPushGroups, setEditPushGroups],
+              isMcpGateway: [editIsMcpGateway, setEditIsMcpGateway],
+              enabled: [editEnabled, setEditEnabled],
+            }}
+            submit={update}
+          />
           <DialogHeader>
             <DialogTitle>Edit Endpoint</DialogTitle>
             <DialogDescription>

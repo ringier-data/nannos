@@ -5,6 +5,7 @@ import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
+import { NannosForm } from '@/components/nannos/NannosForm';
 import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import {
@@ -271,6 +272,11 @@ export function ApprovalDialog({
 
         {action === 'reject' && (
           <div className="space-y-2 py-4">
+            <NannosForm
+              type="SubAgentRejection"
+              id={subAgent.id}
+              fields={{ rejection_reason: [rejectionReason, setRejectionReason] }}
+            />
             <Label htmlFor="rejectionReason">Rejection Reason *</Label>
             <Textarea
               id="rejectionReason"

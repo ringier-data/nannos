@@ -34,10 +34,14 @@ function getTabFromHash(): TabId {
   return TAB_IDS.has(hash) ? (hash as TabId) : 'my';
 }
 
-export function CatalogsPage() {
+/** `create`: the Create Catalog dialog is open — the page at /app/catalogs/new. */
+export function CatalogsPage({ create = false }: { create?: boolean }) {
   const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState<TabId>(getTabFromHash);
-  const [showCreateDialog, setShowCreateDialog] = useState(false);
+  const showCreateDialog = create;
+  // The tab lives in the hash; opening or closing the dialog keeps it.
+  const setShowCreateDialog = (open: boolean) =>
+    navigate(`${open ? '/app/catalogs/new' : '/app/catalogs'}${window.location.hash}`);
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
   const debouncedSearch = useDebouncedValue(search);

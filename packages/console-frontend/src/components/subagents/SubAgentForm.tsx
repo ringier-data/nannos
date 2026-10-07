@@ -37,10 +37,14 @@ import { useQuery } from '@tanstack/react-query';
 import { listSecretsApiV1SecretsGetOptions } from '@/api/generated/@tanstack/react-query.gen';
 import { client } from '@/api/generated/client.gen';
 import { SUB_AGENT_NAME_HINT, subAgentNameError } from '@/lib/subAgentName';
+import { NannosForm } from '@/components/nannos/NannosForm';
+import { AssistantChangesBar } from '@/components/nannos/AssistantChangesBar';
+import type { SubmitOutcome } from '@nannos/embed-sdk';
 
 interface SubAgentFormProps {
   subAgent?: SubAgent;
-  onSubmit: (data: SubAgentFormData) => Promise<void>;
+  /** Resolves `{ ok: false, detail }` (or throws) when nothing was saved. */
+  onSubmit: (data: SubAgentFormData) => Promise<SubmitOutcome>;
   onCancel: () => void;
   isSubmitting?: boolean;
   /** Which type card starts selected when creating. Ignored while editing. */
@@ -283,13 +287,11 @@ export function SubAgentForm({
     return null;
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-
+  const save = async (): Promise<SubmitOutcome> => {
     const validationError = validate();
     if (validationError) {
       toast.error('Validation Error', { description: validationError });
-      return;
+      return { ok: false, detail: validationError };
     }
 
     let configuration;
@@ -345,7 +347,7 @@ export function SubAgentForm({
     }
 
     try {
-      await onSubmit({
+      return await onSubmit({
         name: name.trim(),
         description: description.trim(),
         model: type === 'local' && !isTierSelected ? modelAlias.trim() : undefined,
@@ -357,8 +359,29 @@ export function SubAgentForm({
         ...(type === 'local' && { sandbox_enabled: sandboxEnabled }),
       });
     } catch (err) {
-      toast.error('Error', { description: err instanceof Error ? err.message : 'An error occurred' });
+      const detail = err instanceof Error ? err.message : 'An error occurred';
+      toast.error('Error', { description: detail });
+      return { ok: false, detail };
     }
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    void save();
+  };
+
+  const handleEnableThinkingChange = (checked: boolean) => {
+    setEnableThinking(checked);
+    if (!checked) {
+      setThinkingLevel(null);
+    } else if (thinkingLevel === null) {
+      setThinkingLevel('low');
+    }
+  };
+
+  const handleSandboxChange = (checked: boolean) => {
+    setSandboxEnabled(checked);
+    if (!checked) setSandboxAutoEnabled(false);
   };
 
   const handleTypeChange = (newType: SubAgentType) => {
@@ -402,6 +425,31 @@ export function SubAgentForm({
 
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
+      {/* Every type's fields stay mapped, so the assistant can set `type` and that type's fields in one go. */}
+      <NannosForm
+        type="SubAgent"
+        id={subAgent?.id}
+        submit={save}
+        fields={{
+          ...(!isEditing && { type: [type, handleTypeChange] }),
+          name: [name, setName],
+          description: [description, setDescription],
+          is_public: [isPublic, setIsPublic],
+          model: [modelSelection, setModelSelection],
+          system_prompt: [systemPrompt, setSystemPrompt],
+          mcp_tools: [mcpTools, setMcpTools],
+          enable_thinking: [enableThinking, handleEnableThinkingChange],
+          thinking_level: [thinkingLevel, setThinkingLevel],
+          sandbox_enabled: [sandboxEnabled, handleSandboxChange],
+          agent_url: [agentUrl, setAgentUrl],
+          foundry_hostname: [foundryHostname, setFoundryHostname],
+          foundry_client_id: [foundryClientId, setFoundryClientId],
+          foundry_ontology_rid: [foundryOntologyRid, setFoundryOntologyRid],
+          foundry_query_api_name: [foundryQueryApiName, setFoundryQueryApiName],
+          foundry_scopes: [foundryScopes, setFoundryScopes],
+          foundry_version: [foundryVersion, setFoundryVersion],
+        }}
+      />
       {/* Type Selection Cards - Prominent at the top */}
       {!isEditing && (
         <div>
@@ -739,14 +787,7 @@ export function SubAgentForm({
                     model={modelAlias}
                     enableThinking={enableThinking}
                     thinkingLevel={thinkingLevel}
-                    onEnableThinkingChange={(checked) => {
-                      setEnableThinking(checked);
-                      if (!checked) {
-                        setThinkingLevel(null);
-                      } else if (thinkingLevel === null) {
-                        setThinkingLevel('low');
-                      }
-                    }}
+                    onEnableThinkingChange={handleEnableThinkingChange}
                     onThinkingLevelChange={setThinkingLevel}
                     disabled={isSubmitting}
                     showAsCard={false}
@@ -771,7 +812,7 @@ export function SubAgentForm({
 
           {/* MCP Tools Card - Collapsible, only for local agents */}
           {type === 'local' && (
-            <Card>
+            <Card data-nannos-field="mcp_tools">
               <Collapsible open={isMcpToolsOpen} onOpenChange={setIsMcpToolsOpen}>
                 <CardHeader>
                   <CollapsibleTrigger className="flex w-full items-center justify-between hover:opacity-80 transition-opacity [&[data-state=open]>svg]:rotate-180">
@@ -941,10 +982,7 @@ export function SubAgentForm({
                   <Switch
                     id="sandbox_enabled"
                     checked={sandboxEnabled}
-                    onCheckedChange={(checked) => {
-                      setSandboxEnabled(checked);
-                      if (!checked) setSandboxAutoEnabled(false);
-                    }}
+                    onCheckedChange={handleSandboxChange}
                     disabled={isSubmitting}
                   />
                 </div>
@@ -1126,7 +1164,8 @@ export function SubAgentForm({
       </div>
 
       {/* Actions */}
-      <div className="flex justify-end gap-3 pt-4 border-t sticky bottom-0 bg-background py-4">
+      <div className="flex flex-wrap justify-end gap-3 pt-4 border-t sticky bottom-0 bg-background py-4">
+        <AssistantChangesBar type="SubAgent" id={subAgent?.id} className="mr-auto" />
         <Button type="button" variant="outline" onClick={onCancel} disabled={isSubmitting}>
           Cancel
         </Button>

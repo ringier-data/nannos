@@ -2,6 +2,7 @@ import { useState, useMemo, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Plus, Edit2, Trash2, Copy, Info, Search, ChevronDown, ChevronLeft, ChevronRight } from 'lucide-react';
 import { toast } from 'sonner';
+import { useObjectStateAdapter, type SubmitOutcome } from '@nannos/embed-sdk';
 import {
   createRateCardEntryApiV1AdminRateCardsEntryPostMutation,
   expireRateCardEntryApiV1AdminRateCardsExpireRateIdPostMutation,
@@ -32,6 +33,9 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import { CardListSkeleton } from '@/components/skeletons';
 import { Badge } from '@/components/ui/badge';
 import { ProviderMismatchBanner } from '@/components/admin/ProviderMismatchBanner';
+import { NannosForm } from '@/components/nannos/NannosForm';
+import { NannosActions } from '@/components/nannos/NannosActions';
+import { getErrorMessage } from '@/lib/utils';
 import { PROVIDER_CONFIG_QUERY_KEY } from '@/lib/providerCheckQuery';
 
 interface GroupedModel {
@@ -214,6 +218,21 @@ export function RateCardsPage() {
 
   return (
     <div className="container mx-auto p-6 space-y-6">
+      {/* The create button, for the assistant: without it the agent could only ask the user to
+          click it. It opens the ModelPricing form, which takes this type:id while the dialog is open. */}
+      {!addModelOpen && (
+        <NannosActions
+          type="ModelPricing"
+          id={undefined}
+          actions={{
+            create: {
+              label: 'Add model pricing',
+              description: 'Open the Add Model Pricing dialog with an empty, unsaved form; then fill it and submit.',
+              run: () => { setEditModel(null); setAddModelOpen(true); },
+            },
+          }}
+        />
+      )}
       <div className="flex justify-between items-center">
         <div>
           <h1 className="text-3xl font-bold">Rate Cards</h1>
@@ -509,6 +528,17 @@ function ModelPricingDialog({ open, onOpenChange, onSubmit, existingModel }: {
     output_breakdown: [] as Array<{ billing_unit: string; price: string }>,
   });
 
+  const nannosForm = useObjectStateAdapter(formData, (next) => {
+    // Provider, model and pattern identify the card, so they are fixed on edit (their inputs are disabled).
+    const patch = { ...next };
+    if (isEdit) {
+      delete patch.provider;
+      delete patch.model_name;
+      delete patch.model_name_pattern;
+    }
+    setFormData((f) => ({ ...f, ...patch }));
+  });
+
   // Reset or pre-fill form when dialog opens/changes
   useEffect(() => {
     if (open) {
@@ -600,7 +630,7 @@ function ModelPricingDialog({ open, onOpenChange, onSubmit, existingModel }: {
     setFormData({ ...formData, output_breakdown: updated });
   };
 
-  const handleSubmit = async () => {
+  const handleSubmit = async (): Promise<SubmitOutcome> => {
     const entries: RateCardEntryCreate[] = [];
 
     // Add input price if provided
@@ -653,7 +683,7 @@ function ModelPricingDialog({ open, onOpenChange, onSubmit, existingModel }: {
 
     if (entries.length === 0) {
       toast.error('Please provide at least one price');
-      return;
+      return { ok: false, detail: 'Please provide at least one price' };
     }
 
     // Keep the dialog open when a write fails, so the entered prices aren't lost and the toast's
@@ -661,15 +691,22 @@ function ModelPricingDialog({ open, onOpenChange, onSubmit, existingModel }: {
     // failure themselves; swallowing it here only stops the unhandled rejection.
     try {
       await onSubmit(entries);
-    } catch {
-      return;
+    } catch (error) {
+      return { ok: false, detail: getErrorMessage(error) };
     }
     onOpenChange(false);
+    return true;
   };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-y-auto">
+        <NannosForm
+          type="ModelPricing"
+          id={existingModel ? `${existingModel.provider}/${existingModel.model_name}` : undefined}
+          form={nannosForm}
+          submit={handleSubmit}
+        />
         <DialogHeader>
           <DialogTitle>{isEdit ? 'Edit' : 'Add'} Model Pricing</DialogTitle>
           <DialogDescription>

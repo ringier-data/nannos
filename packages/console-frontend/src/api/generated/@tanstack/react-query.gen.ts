@@ -270,8 +270,9 @@ export const getCurrentUserEntitlementVersionApiV1AuthMeEntitlementVersionGetQue
  * The orchestrator fetches this once per turn and folds ``version`` into its per-user
  * cache keys, so any entitlement change (tools, sub-agents, role) is picked up on the
  * user's next turn on every replica without a push-based invalidation. ``settings_version``
- * keys only its cached user record, so a preference change (model, thinking, custom
- * prompt) applies on the next turn without evicting capability discovery. Compare for
+ * keys only its caches that bake in preferences (user record, embedded runnable), so a
+ * preference change (model, thinking, custom prompt) applies on the next turn without
+ * evicting capability discovery. Compare for
  * equality only; the values have no other meaning. See ``services.entitlement_version``.
  */
 export const getCurrentUserEntitlementVersionApiV1AuthMeEntitlementVersionGetOptions = (options?: Options<GetCurrentUserEntitlementVersionApiV1AuthMeEntitlementVersionGetData>) => queryOptions<GetCurrentUserEntitlementVersionApiV1AuthMeEntitlementVersionGetResponse, DefaultError, GetCurrentUserEntitlementVersionApiV1AuthMeEntitlementVersionGetResponse, ReturnType<typeof getCurrentUserEntitlementVersionApiV1AuthMeEntitlementVersionGetQueryKey>>({
@@ -1732,8 +1733,12 @@ export const getSubAgentApiV1SubAgentsSubAgentIdGetOptions = (options: Options<G
  *
  * Use this tool ONLY for: system_prompt, model, name, mcp_tools, is_public.
  *
- * Requires write or owner permission. Configuration changes create a new version
- * that may require approval.
+ * Requires write or owner permission: the caller owns the agent, or a group they have
+ * write access in can reach it, or they are an admin in admin mode. Anything else — a
+ * system agent, another user's agent, admin mode off — is refused with 403, so do not
+ * propose this call for an agent the user can only read (its page offers no edit):
+ * tell them they lack write access here and who has it. Configuration changes create a
+ * new version that may require approval.
  */
 export const consoleUpdateSubAgentMutation = (options?: Partial<Options<ConsoleUpdateSubAgentData>>): UseMutationOptions<ConsoleUpdateSubAgentResponse, ConsoleUpdateSubAgentError, Options<ConsoleUpdateSubAgentData>> => {
     const mutationOptions: UseMutationOptions<ConsoleUpdateSubAgentResponse, ConsoleUpdateSubAgentError, Options<ConsoleUpdateSubAgentData>> = {
@@ -3999,7 +4004,9 @@ export const costPrefillApiV1AdminModelGatewayModelsModelNameCostPrefillGetOptio
  * The alias is also dropped from any tier's failover chain: leaving it there would have the
  * gateway fail over to a model it no longer serves, breaking at exactly the moment the primary
  * is down. Read the alias *before* deleting — afterwards the deployment is gone and there is
- * nothing left to map the id to a name.
+ * nothing left to map the id to a name. Only when no other deployment still serves the alias
+ * (a leftover duplicate, a config-defined twin): it is still live then, and dropping it would
+ * silently stop the tier failing over to it (nannos#339).
  */
 export const deleteModelApiV1AdminModelGatewayModelsModelIdDeleteMutation = (options?: Partial<Options<DeleteModelApiV1AdminModelGatewayModelsModelIdDeleteData>>): UseMutationOptions<DeleteModelApiV1AdminModelGatewayModelsModelIdDeleteResponse, DeleteModelApiV1AdminModelGatewayModelsModelIdDeleteError, Options<DeleteModelApiV1AdminModelGatewayModelsModelIdDeleteData>> => {
     const mutationOptions: UseMutationOptions<DeleteModelApiV1AdminModelGatewayModelsModelIdDeleteResponse, DeleteModelApiV1AdminModelGatewayModelsModelIdDeleteError, Options<DeleteModelApiV1AdminModelGatewayModelsModelIdDeleteData>> = {

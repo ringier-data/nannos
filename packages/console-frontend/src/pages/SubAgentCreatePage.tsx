@@ -12,6 +12,7 @@ import { consoleCreateSubAgentMutation } from '@/api/generated/@tanstack/react-q
 import type { SubAgent } from '@/api/generated/types.gen';
 import { useAuth } from '@/contexts/AuthContext';
 import { getErrorMessage } from '@/lib/utils';
+import type { SubmitOutcome } from '@nannos/embed-sdk';
 
 export function SubAgentCreatePage() {
   const navigate = useNavigate();
@@ -36,32 +37,42 @@ export function SubAgentCreatePage() {
     },
   });
 
-  const handleSubmit = async (data: SubAgentFormData) => {
+  const handleSubmit = async (data: SubAgentFormData): Promise<SubmitOutcome> => {
     // Extract configuration fields based on agent type
     const config = data.configuration;
 
-    createMutation.mutate({
-      body: {
-        name: data.name,
-        description: data.description,
-        model: data.model as any, // Cast to ModelEnum - validated by form
-        model_tier: data.model_tier,
-        type: data.type,
-        is_public: data.is_public,
-        system_prompt: 'system_prompt' in config ? config.system_prompt : undefined,
-        agent_url: 'agent_url' in config ? config.agent_url : undefined,
-        mcp_tools: 'mcp_tools' in config ? config.mcp_tools : undefined,
-        foundry_hostname: 'foundry_hostname' in config ? config.foundry_hostname : undefined,
-        foundry_client_id: 'foundry_client_id' in config ? config.foundry_client_id : undefined,
-        foundry_client_secret_ref: 'foundry_client_secret_ref' in config ? config.foundry_client_secret_ref : undefined,
-        foundry_ontology_rid: 'foundry_ontology_rid' in config ? config.foundry_ontology_rid : undefined,
-        foundry_query_api_name: 'foundry_query_api_name' in config ? config.foundry_query_api_name : undefined,
-        foundry_scopes: 'foundry_scopes' in config ? config.foundry_scopes as any : undefined,
-        foundry_version: 'foundry_version' in config ? config.foundry_version : undefined,
-        skills: data.skills,
-        sandbox_enabled: data.sandbox_enabled,
-      },
-    });
+    try {
+      const created = await createMutation.mutateAsync({
+        body: {
+          name: data.name,
+          description: data.description,
+          model: data.model as any, // Cast to ModelEnum - validated by form
+          model_tier: data.model_tier,
+          type: data.type,
+          is_public: data.is_public,
+          system_prompt: 'system_prompt' in config ? config.system_prompt : undefined,
+          agent_url: 'agent_url' in config ? config.agent_url : undefined,
+          mcp_tools: 'mcp_tools' in config ? config.mcp_tools : undefined,
+          foundry_hostname: 'foundry_hostname' in config ? config.foundry_hostname : undefined,
+          foundry_client_id: 'foundry_client_id' in config ? config.foundry_client_id : undefined,
+          foundry_client_secret_ref: 'foundry_client_secret_ref' in config ? config.foundry_client_secret_ref : undefined,
+          foundry_ontology_rid: 'foundry_ontology_rid' in config ? config.foundry_ontology_rid : undefined,
+          foundry_query_api_name: 'foundry_query_api_name' in config ? config.foundry_query_api_name : undefined,
+          foundry_scopes: 'foundry_scopes' in config ? config.foundry_scopes as any : undefined,
+          foundry_version: 'foundry_version' in config ? config.foundry_version : undefined,
+          skills: data.skills,
+          sandbox_enabled: data.sandbox_enabled,
+        },
+      });
+      // Why it stayed a draft, measured by the backend — the assistant repeats it, not a guess.
+      const blockers = created?.approval_blockers;
+      return blockers?.length
+        ? { ok: true, detail: `Created as a draft that needs approval: ${blockers.join('; ')}.` }
+        : true;
+    } catch (err) {
+      // onError already toasted.
+      return { ok: false, detail: getErrorMessage(err) };
+    }
   };
 
   const handleCancel = () => {

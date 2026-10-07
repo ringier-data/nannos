@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Loader2, Phone, MessageSquare } from 'lucide-react';
 import { toast } from 'sonner';
 import { client } from '@/api/generated/client.gen';
@@ -25,13 +25,18 @@ interface PhoneVerificationDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onVerified: () => void;
+  /** Prefill the number (the assistant's `change_phone`); the user still sends and enters the code. */
+  initialNumber?: string;
 }
 
 type Step = 'input' | 'verify';
 
-export function PhoneVerificationDialog({ open, onOpenChange, onVerified }: PhoneVerificationDialogProps) {
+export function PhoneVerificationDialog({ open, onOpenChange, onVerified, initialNumber }: PhoneVerificationDialogProps) {
   const [step, setStep] = useState<Step>('input');
   const [phoneNumber, setPhoneNumber] = useState('');
+  useEffect(() => {
+    if (open && initialNumber) setPhoneNumber(initialNumber);
+  }, [open, initialNumber]);
   const [channel, setChannel] = useState<'sms' | 'call'>('sms');
   const [code, setCode] = useState('');
   const [isSending, setIsSending] = useState(false);

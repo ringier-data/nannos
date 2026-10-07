@@ -16,6 +16,8 @@ import { Textarea } from '@/components/ui/textarea';
 import { updateCatalogMutation, getCatalogQueryKey, listCatalogsQueryKey } from '@/api/generated/@tanstack/react-query.gen';
 import type { Catalog } from '@/api/generated/types.gen';
 import { getErrorMessage } from '@/lib/utils';
+import { NannosForm } from '@/components/nannos/NannosForm';
+import type { SubmitOutcome } from '@nannos/embed-sdk';
 
 interface EditCatalogDialogProps {
   catalog: Catalog;
@@ -41,24 +43,40 @@ export function EditCatalogDialog({ catalog, open, onOpenChange }: EditCatalogDi
     },
   });
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
+  const save = async (): Promise<SubmitOutcome> => {
     if (!name.trim()) {
       toast.error('Name is required');
-      return;
+      return { ok: false, detail: 'Name is required' };
     }
-    updateMutation.mutate({
-      path: { catalog_id: catalog.id },
-      body: {
-        name: name.trim(),
-        description: description.trim() || undefined,
-      },
-    });
+    try {
+      await updateMutation.mutateAsync({
+        path: { catalog_id: catalog.id },
+        body: {
+          name: name.trim(),
+          description: description.trim() || undefined,
+        },
+      });
+      return true;
+    } catch (err) {
+      // onError has already toasted.
+      return { ok: false, detail: getErrorMessage(err) };
+    }
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    void save();
   };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
+        <NannosForm
+          type="Catalog"
+          id={catalog.id}
+          fields={{ name: [name, setName], description: [description, setDescription] }}
+          submit={save}
+        />
         <form onSubmit={handleSubmit}>
           <DialogHeader>
             <DialogTitle>Edit Catalog</DialogTitle>
