@@ -6,6 +6,7 @@ allowing the orchestrator to create and manage scheduled jobs conversationally.
 
 import json
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from typing import Any
@@ -1074,6 +1075,70 @@ async def validate_condition(
     )
 
 
+#: Keys that make a list item a distinct, persistent thing (a thread, an issue, a row):
+#: a list of those is what a repeating watch re-alerts on when nothing changed.
+_ITEM_ID_KEYS = ("id", "uid", "uuid", "key", "number", "threadId", "thread_id", "messageId", "message_id", "url")
+_READS_PREV = re.compile(r"(^|[^.\w])prev\b")
+
+
+def _identified_items(value: Any) -> int:
+    """How many items of a list carry an identity key (0 when it is not such a list)."""
+    if not isinstance(value, list):
+        return 0
+    return sum(1 for item in value if isinstance(item, dict) and any(k in item for k in _ITEM_ID_KEYS))
+
+
+def _items_in(result: Any) -> tuple[str | None, int]:
+    """The response's list of identified items, at the top or one level down (`result.threads`)."""
+    if _identified_items(result):
+        return None, _identified_items(result)
+    if isinstance(result, dict):
+        for key, value in result.items():
+            if _identified_items(value):
+                return str(key), _identified_items(value)
+    return None, 0
+
+
+async def _repeat_alert_note(data: ValidateConditionRequest, cel: Any) -> str | None:
+    """Warn when the watch would alert again on the SAME items if nothing changed — only then.
+
+    Re-evaluated with ``prev`` bound to this very response, which is what the next run sees
+    when nothing new arrived. Still firing on a list of identified items (threads, issues)
+    means every run re-alerts on them; firing on a plain state ("still down") or not firing
+    again is left alone — re-alerting on a lasting state can be the point.
+    """
+    if not cel.gate or not data.cel_expr:
+        return None
+    count = _identified_items(cel.value)
+    list_key: str | None = None
+    if not count:
+        list_key, count = _items_in(data.result)
+    if not count:
+        return None
+    try:
+        again = await evaluate_cel(data.cel_expr, result=data.result, now=datetime.now(timezone.utc), prev=data.result)
+    except (CelSyntaxError, CelEvaluationError):
+        return None
+    if not again.gate:
+        return None
+    reads_prev = _READS_PREV.search(re.sub(r"'[^']*'|\"[^\"]*\"", "", data.cel_expr)) is not None
+    items = f"result.{list_key}" if list_key else "result"
+    prev_items = f"prev.{list_key}" if list_key else "prev"
+    guard = f"has({prev_items})" if list_key else f"{prev_items} != null"
+    lead = (
+        "It reads prev but still fires when the response has not changed, so it does not de-duplicate"
+        if reads_prev
+        else "If nothing changes before the next run, this fires again"
+    )
+    return (
+        f"{lead}: on a repeating schedule the same {count} item(s) are alerted on every run "
+        "(checked by evaluating it with prev = this response). To alert once per new item, "
+        f"keep only items prev did not have, e.g. `{items}.filter(t, prev == null || !{guard} || "
+        f"!{prev_items}.exists(p, p.id == t.id))` (use the items' own id key). If re-alerting "
+        "while they are there is intended, ignore this."
+    )
+
+
 async def _validate_cel_condition(data: ValidateConditionRequest) -> ValidateConditionResponse:
     """Preview a CEL condition: same evaluator, same gate rule as the scheduler's run.
 
@@ -1114,6 +1179,10 @@ async def _validate_cel_condition(data: ValidateConditionRequest) -> ValidateCon
             "The expression returned a value, so the gate is 'non-empty'. What you see "
             "extracted is what a run records and hands to the model or agent."
         )
+
+    repeat = await _repeat_alert_note(data, cel)
+    if repeat:
+        notes.append(repeat)
 
     if data.llm_condition:
         if not cel.gate:

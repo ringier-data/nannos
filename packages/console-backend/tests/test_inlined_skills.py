@@ -17,7 +17,7 @@ from console_backend.models.sub_agent import (
     SubAgentType,
     SubAgentUpdate,
 )
-from console_backend.services.sub_agent_service import PromptLimitError
+from console_backend.services.sub_agent_service import PromptLimitError, _auto_approve_blockers
 from tests.test_skill_reference_modes import (
     _agent,
     _default_version,
@@ -313,3 +313,31 @@ async def test_a_bump_past_the_limit_is_a_failed_bump(
         )
     ).scalar_one()
     assert "auto-approve prompt limit" in err
+
+
+def test_auto_approve_blockers_name_the_measured_reason(monkeypatch):
+    """The assistant once blamed "more than 3 MCP tools" on an agent with 2: hand it the reason."""
+    monkeypatch.setattr(config.auto_approve, "max_system_prompt_length", 10)
+    monkeypatch.setattr(config.auto_approve, "max_mcp_tools_count", 3)
+    assert _auto_approve_blockers(SubAgentType.LOCAL, "short", ["a", "b"], False) == []
+    assert _auto_approve_blockers(SubAgentType.LOCAL, "x" * 8, ["a", "b"], False, inlined_length=5) == [
+        "system prompt plus inlined skills is 13 characters (limit 10)"
+    ]
+    assert _auto_approve_blockers(SubAgentType.LOCAL, "", ["a", "b", "c", "d"], True) == [
+        "4 MCP tools (limit 3)",
+        "public sub-agents always need approval",
+    ]
+    assert _auto_approve_blockers(SubAgentType.REMOTE, "", [], False) == [
+        "remote sub-agents are never approved automatically"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_update_that_stays_a_draft_says_why(wired, pg_session, test_user_db, prompt_limit):
+    svc, _registry, _activation = wired
+    agent_id = await _agent(svc, pg_session, test_user_db, "kb-blockers")
+    prompt_limit(20)
+    updated = await svc.update_sub_agent(pg_session, agent_id, SubAgentUpdate(system_prompt="y" * 30), test_user_db)
+    assert updated.approval_blockers == ["system prompt plus inlined skills is 30 characters (limit 20)"]
+    fitting = await svc.update_sub_agent(pg_session, agent_id, SubAgentUpdate(system_prompt="ok"), test_user_db)
+    assert fitting.approval_blockers is None

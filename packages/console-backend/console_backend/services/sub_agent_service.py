@@ -77,6 +77,36 @@ def _validate_automated_constraints(
         raise ValueError("Automated sub-agents must be private (is_public=False).")
 
 
+def _auto_approve_blockers(
+    sub_agent_type: SubAgentType,
+    system_prompt: str | None,
+    mcp_tools: list[str] | None,
+    is_public: bool | None,
+    inlined_length: int = 0,
+) -> list[str]:
+    """Why a version is NOT approved automatically, measured; empty when it is.
+
+    The prompt limit applies to the effective prompt: ``system_prompt`` plus the
+    inlined skills' bodies (ADR-0012). The reasons are returned to the caller, so the
+    assistant states the real one instead of guessing (it once blamed "more than 3 MCP
+    tools" on an agent that had 2).
+    """
+    if sub_agent_type not in {SubAgentType.AUTOMATED, SubAgentType.LOCAL}:
+        return [f"{sub_agent_type.value} sub-agents are never approved automatically"]
+    blockers: list[str] = []
+    prompt_length = len(system_prompt or "") + inlined_length
+    if prompt_length > config.auto_approve.max_system_prompt_length:
+        blockers.append(
+            f"system prompt plus inlined skills is {prompt_length} characters "
+            f"(limit {config.auto_approve.max_system_prompt_length})"
+        )
+    if len(mcp_tools or []) > config.auto_approve.max_mcp_tools_count:
+        blockers.append(f"{len(mcp_tools or [])} MCP tools (limit {config.auto_approve.max_mcp_tools_count})")
+    if is_public:
+        blockers.append("public sub-agents always need approval")
+    return blockers
+
+
 def _meets_auto_approve_constraints(
     sub_agent_type: SubAgentType,
     system_prompt: str | None,
@@ -84,18 +114,8 @@ def _meets_auto_approve_constraints(
     is_public: bool | None,
     inlined_length: int = 0,
 ) -> bool:
-    """Check if a sub-agent meets the constraints for auto-approval.
-
-    The prompt limit applies to the effective prompt: ``system_prompt`` plus the
-    inlined skills' bodies (ADR-0012).
-    """
-    if sub_agent_type not in {SubAgentType.AUTOMATED, SubAgentType.LOCAL}:
-        return False
-    return (
-        len(system_prompt or "") + inlined_length <= config.auto_approve.max_system_prompt_length
-        and len(mcp_tools or []) <= config.auto_approve.max_mcp_tools_count
-        and not (is_public if is_public is not None else False)
-    )
+    """Whether a sub-agent meets the constraints for auto-approval (see ``_auto_approve_blockers``)."""
+    return not _auto_approve_blockers(sub_agent_type, system_prompt, mcp_tools, is_public, inlined_length)
 
 
 def _left_pending(sub_agent: "SubAgent | None") -> bool:
@@ -1038,13 +1058,12 @@ class SubAgentService:
         # - AUTOMATED agents: always auto-approved (constraints already validated above)
         # - All other types: auto-approve if constraints happen to be met
         #   (system_prompt <= max chars, <= max MCP tools, private)
-        should_auto_approve = data.type == SubAgentType.AUTOMATED or _meets_auto_approve_constraints(
-            data.type,
-            data.system_prompt,
-            data.mcp_tools,
-            data.is_public,
-            inlined_length,
+        blockers = (
+            []
+            if data.type == SubAgentType.AUTOMATED
+            else _auto_approve_blockers(data.type, data.system_prompt, data.mcp_tools, data.is_public, inlined_length)
         )
+        should_auto_approve = not blockers
         if should_auto_approve:
             approval_ctx = ApprovalContext(
                 sub_agent_id=sub_agent_id,
@@ -1055,7 +1074,10 @@ class SubAgentService:
             await self.repo.approve_version(db, actor, approval_ctx)
             await db.commit()
 
-        return await self.get_sub_agent_by_id(db, sub_agent_id)  # type: ignore
+        created = await self.get_sub_agent_by_id(db, sub_agent_id)
+        if created and blockers:
+            created.approval_blockers = blockers
+        return created  # type: ignore
 
     async def update_sub_agent(
         self,
@@ -1078,6 +1100,8 @@ class SubAgentService:
         existing = await self.get_sub_agent_by_id(db, sub_agent_id)
         if not existing:
             return None
+        # Why the new version (if any) stays a draft — handed back to the caller.
+        blockers: list[str] = []
 
         # Check if user has write permission (owner or group write access)
         has_write_permission = await self.check_user_permission(db, sub_agent_id, actor.id, "write", sub_agent=existing)
@@ -1372,13 +1396,18 @@ class SubAgentService:
             )
 
             # Auto-approve AUTOMATED agents or LOCAL agents that meet the constraints (auto-approve config)
-            if existing.type == SubAgentType.AUTOMATED or _meets_auto_approve_constraints(
-                existing.type,
-                version_system_prompt,
-                version_mcp_tools,
-                data.is_public if data.is_public is not None else existing.is_public,
-                inlined_length,
-            ):
+            blockers = (
+                []
+                if existing.type == SubAgentType.AUTOMATED
+                else _auto_approve_blockers(
+                    existing.type,
+                    version_system_prompt,
+                    version_mcp_tools,
+                    data.is_public if data.is_public is not None else existing.is_public,
+                    inlined_length,
+                )
+            )
+            if not blockers:
                 # Get the release number for this version
                 result = await db.execute(
                     text("""
@@ -1399,7 +1428,10 @@ class SubAgentService:
                 await self.repo.approve_version(db, actor, approval_ctx)
 
         await db.commit()
-        return await self.get_sub_agent_by_id(db, sub_agent_id)
+        updated = await self.get_sub_agent_by_id(db, sub_agent_id)
+        if updated and blockers:
+            updated.approval_blockers = blockers
+        return updated
 
     async def delete_sub_agent(
         self,

@@ -534,8 +534,12 @@ async def update_sub_agent(
 
     Use this tool ONLY for: system_prompt, model, name, mcp_tools, is_public.
 
-    Requires write or owner permission. Configuration changes create a new version
-    that may require approval.
+    Requires write or owner permission: the caller owns the agent, or a group they have
+    write access in can reach it, or they are an admin in admin mode. Anything else — a
+    system agent, another user's agent, admin mode off — is refused with 403, so do not
+    propose this call for an agent the user can only read (its page offers no edit):
+    tell them they lack write access here and who has it. Configuration changes create a
+    new version that may require approval.
     """
     sub_agent_service = get_sub_agent_service(request)
     try:

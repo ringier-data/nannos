@@ -101,3 +101,88 @@ async def test_no_cookie_and_no_token_is_rejected(monkeypatch):
     resolve_token.assert_awaited_once_with("bad")
     assert "sid-2" not in app_module._socket_owned_sessions
     assert "sid-3" not in app_module._socket_owned_sessions
+
+
+def _cookie_connect_mocks(bind_result=20, bind_error: Exception | None = None):
+    """A cookie-authenticated socket plus the services `_bind_console_assistant` reaches."""
+    sio = _mock_sio()
+    user = SimpleNamespace(id="user-1")
+    sio.app_instance.state.user_service.get_user = AsyncMock(return_value=user)
+    embed = MagicMock()
+    embed.bind_connection = AsyncMock(return_value=bind_result, side_effect=bind_error)
+    sio.app_instance.state.embed_binding_service = embed
+    db = MagicMock()
+    db.commit = AsyncMock()
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=db)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    factory = MagicMock(return_value=cm)
+    return sio, embed, db, factory, user
+
+
+@pytest.mark.asyncio
+async def test_console_assistant_cookie_socket_binds_by_console_client_id(monkeypatch):
+    """The console hosting its own assistant: a cookie socket that asks for embed scope is
+    bound through the binding listing the console's OIDC client id, like a host's token."""
+    import app as app_module
+
+    monkeypatch.setattr(app_module.config.oidc, "client_id", "agent-console")
+    sio, embed, db, factory, user = _cookie_connect_mocks(bind_result=20)
+
+    with (
+        patch("app.sio", sio),
+        patch("app.get_async_session_factory", return_value=factory),
+        patch("app._resolve_socket_user_via_cookie", AsyncMock(return_value="browser-session")),
+        patch("app.socket_notification_manager", MagicMock()),
+    ):
+        assert await app_module.handle_connect("sid-c1", environ={}, auth={"embedScope": True}) is True
+
+    embed.bind_connection.assert_awaited_once_with(db, user=user, azp="agent-console")
+    db.commit.assert_awaited_once()
+    create_session = sio.app_instance.state.socket_session_service.create_session
+    assert create_session.await_args.kwargs["embedded_sub_agent_id"] == 20
+    assert create_session.await_args.kwargs["http_session_id"] == "browser-session"
+    # The browser login's session is never socket-owned (handle_disconnect must not delete it).
+    assert "sid-c1" not in app_module._socket_owned_sessions
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("auth", [None, {}, {"embedScope": "yes"}])
+async def test_cookie_socket_without_the_opt_in_stays_unbound(auth):
+    """The console's main chat connects with the same cookie and must keep the orchestrator."""
+    import app as app_module
+
+    sio, embed, _db, factory, _user = _cookie_connect_mocks()
+
+    with (
+        patch("app.sio", sio),
+        patch("app.get_async_session_factory", return_value=factory),
+        patch("app._resolve_socket_user_via_cookie", AsyncMock(return_value="browser-session")),
+        patch("app.socket_notification_manager", MagicMock()),
+    ):
+        assert await app_module.handle_connect("sid-c2", environ={}, auth=auth) is True
+
+    embed.bind_connection.assert_not_awaited()
+    create_session = sio.app_instance.state.socket_session_service.create_session
+    assert create_session.await_args.kwargs["embedded_sub_agent_id"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bind_result,bind_error", [(None, None), (None, RuntimeError("db down"))])
+async def test_console_assistant_binding_problem_connects_unbound(bind_result, bind_error):
+    """No binding for the console client yet, or a lookup failure: connect, unscoped."""
+    import app as app_module
+
+    sio, _embed, db, factory, _user = _cookie_connect_mocks(bind_result=bind_result, bind_error=bind_error)
+
+    with (
+        patch("app.sio", sio),
+        patch("app.get_async_session_factory", return_value=factory),
+        patch("app._resolve_socket_user_via_cookie", AsyncMock(return_value="browser-session")),
+        patch("app.socket_notification_manager", MagicMock()),
+    ):
+        assert await app_module.handle_connect("sid-c3", environ={}, auth={"embedScope": True}) is True
+
+    db.commit.assert_not_awaited()
+    create_session = sio.app_instance.state.socket_session_service.create_session
+    assert create_session.await_args.kwargs["embedded_sub_agent_id"] is None

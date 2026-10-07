@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from console_backend.config import config
@@ -128,6 +129,14 @@ def candidate_client_ids(claims: dict[str, Any] | None) -> list[str]:
     return candidates
 
 
+def _console_assistant_aliases() -> dict[str, str]:
+    """Read the console's own definition from where the deployment serves it (see config)."""
+    target = config.console_assistant_definition_url
+    if not config.console_assistant_enabled or not target or target == config.frontend_url:
+        return {}
+    return {config.frontend_url: target}
+
+
 class EmbedBindingService:
     def __init__(
         self,
@@ -147,7 +156,8 @@ class EmbedBindingService:
         # Local development binds localhost or a docker network; everywhere else the
         # authority must resolve to public addresses (SSRF guard in the client).
         self._client = client or WellKnownAgentClient(
-            allow_private_destinations=config.is_local()
+            allow_private_destinations=config.is_local(),
+            aliases=_console_assistant_aliases(),
         )
         # azp -> (monotonic expiry, sub_agent_id or None)
         self._azp_cache: dict[str, tuple[float, int | None]] = {}
@@ -268,7 +278,12 @@ class EmbedBindingService:
         return await self.sync_binding(db, sub_agent_id, force=True)
 
     async def create_bound_sub_agent(
-        self, db: AsyncSession, actor: User, data: EmbedBindingUpsert
+        self,
+        db: AsyncSession,
+        actor: User,
+        data: EmbedBindingUpsert,
+        *,
+        from_config: bool = False,
     ) -> EmbedBinding:
         """Create a local sub-agent FROM the host's published definition and bind it.
 
@@ -277,8 +292,12 @@ class EmbedBindingService:
         fails the request and leaves no half-made sub-agent behind. The row is created
         without a version and the first publish writes version 1 as the approved default,
         all in the caller's transaction.
+
+        ``from_config`` marks the console's own self-binding: its base URL is deployment
+        config (FRONTEND_URL), not admin input, so the https rule does not apply.
         """
-        self._validate_base_url(data.base_url)
+        if not from_config:
+            self._validate_base_url(data.base_url)
         await self._refuse_taken_azps(db, data.azps, exclude_sub_agent_id=None)
         try:
             definition = await self._client.fetch(data.base_url, force=True)
@@ -524,8 +543,57 @@ class EmbedBindingService:
             )
         return actor
 
+    async def ensure_console_assistant(self) -> int | None:
+        """Bind the console's own assistant if nothing binds the console's client yet.
+
+        The console is a host like the cockpit (ADR-0006, amendment 1): it publishes its
+        assistant under FRONTEND_URL/.well-known/agent-skills/, and its users arrive with
+        the console's OIDC client. Unlike a third-party host, that binding follows from the
+        deployment itself, so console-backend creates it — no admin step per environment.
+
+        Idempotent and race-safe: an existing binding for the client (made here, or by an
+        admin) is left alone, and the azp primary key settles two replicas starting at
+        once. A failure (the frontend not serving yet) is logged and retried on the next
+        sync pass. Returns the bound sub-agent id, or None.
+        """
+        if not config.console_assistant_enabled:
+            return None
+        azp = config.oidc.client_id
+        async with self._session_factory() as db:
+            existing = await self.sub_agent_id_for_azp(azp, db)
+            if existing is not None:
+                return existing
+            actor = await self._users.get_user(db, _SYSTEM_USER_ID)
+            if actor is None:
+                logger.warning("Console assistant: the seeded system user is missing; not binding")
+                return None
+            data = EmbedBindingUpsert(base_url=config.frontend_url, azps=[azp])
+            try:
+                binding = await self.create_bound_sub_agent(db, actor, data, from_config=True)
+                await db.commit()
+            except IntegrityError:
+                await db.rollback()
+                self._azp_cache.pop(azp, None)
+                logger.info("Console assistant: another replica bound it first")
+                return await self.sub_agent_id_for_azp(azp)
+            except EmbedBindingError as e:
+                await db.rollback()
+                # A not-yet-bound lookup is cached negative; the next pass must look again.
+                self._azp_cache.pop(azp, None)
+                logger.warning(f"Console assistant not bound yet, retrying next sync pass: {e}")
+                return None
+        logger.info(
+            f"Console assistant bound: sub-agent {binding.sub_agent_id} from {config.frontend_url} "
+            f"for client '{azp}'"
+        )
+        return binding.sub_agent_id
+
     async def sync_all(self) -> None:
         """One pass over every binding, each in its own transaction so one bad host cannot block the rest."""
+        try:
+            await self.ensure_console_assistant()
+        except Exception:  # noqa: BLE001 — the self-binding must not stop the other bindings' sync
+            logger.exception("Console assistant self-binding failed")
         async with self._session_factory() as db:
             rows = (
                 await db.execute(

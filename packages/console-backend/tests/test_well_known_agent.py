@@ -737,3 +737,21 @@ async def test_private_destinations_are_allowed_when_configured(monkeypatch):
 async def test_resolve_host_uses_the_system_resolver():
     addresses = await REAL_RESOLVE_HOST("localhost")
     assert set(addresses) & {"127.0.0.1", "::1"}
+
+
+@pytest.mark.asyncio
+async def test_aliased_authority_is_read_from_its_alias_but_recorded_public():
+    """The console's own definition: read from the frontend container in the pod, recorded
+    under FRONTEND_URL — and the SSRF guard does not apply to deployment config."""
+    alias = "http://localhost:8081"
+    client = WellKnownAgentClient(aliases={BASE: alias})
+    index_bytes, files = build_tree()
+    with respx.mock(assert_all_called=True) as router:
+        router.get(alias + INDEX_URL[len(BASE):]).mock(side_effect=_fresh(index_bytes))
+        for url, content in files.items():
+            router.get(alias + url[len(BASE):]).mock(side_effect=_fresh(content))
+        definition = await client.fetch(BASE)
+
+    assert definition.base_url == BASE and definition.index_url == INDEX_URL
+    assert definition.agent.url.startswith(BASE)
+    assert all(s.url.startswith(BASE) for s in definition.skills)

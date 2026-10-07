@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 
 from console_backend.models.embed_binding import EmbedBinding
 
@@ -395,6 +395,25 @@ class SubAgent(SubAgentBase):
     #: Set when the sub-agent's definition is published by a host and synced by console-backend
     #: (ADR-0006). Content routes reject edits while this is set.
     embed_binding: EmbedBinding | None = None
+    @computed_field(
+        description=(
+            "The console page that shows this sub-agent. After changing it from another page, tell the "
+            "user and offer to open it."
+        )
+    )
+    @property
+    def console_path(self) -> str:
+        # See ScheduledJob.console_path.
+        return f"/app/subagents/{self.id}"
+
+    approval_blockers: list[str] | None = Field(
+        default=None,
+        description=(
+            "Only on a create or update response, when the new version stays a draft: why it was not "
+            "approved automatically, measured against the auto-approve limits. State these reasons as "
+            "given; the owner submits the version for approval."
+        ),
+    )
 
 
 # Any alias registered on the Model Gateway (the gateway is the source of truth
