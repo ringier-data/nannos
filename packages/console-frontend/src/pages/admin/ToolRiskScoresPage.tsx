@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { keepPreviousData, useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { ShieldAlert, Trash2, Loader2, RefreshCw, Plus, Pencil, Search } from 'lucide-react';
 import { toast } from 'sonner';
-import { useObjectStateAdapter, type SubmitOutcome } from '@nannos/embed-sdk';
+import { useObjectStateAdapter, type ActionOutcome } from '@nannos/embed-sdk';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -194,7 +194,7 @@ export function ToolRiskScoresPage() {
   };
 
   // upsertMutation's onError toasts; this only reports the outcome to the assistant.
-  const save = async (): Promise<SubmitOutcome> => {
+  const save = async (): Promise<ActionOutcome> => {
     // Validate JSON
     let riskFactors: Record<string, RiskFactor>;
     try {
@@ -566,7 +566,7 @@ export function ToolRiskScoresPage() {
             type="ToolRiskScore"
             id={editingExisting ? `${form.server_slug}/${form.tool_name}` : undefined}
             form={nannosForm}
-            submit={save}
+            save={save}
           />
           <DialogHeader>
             <DialogTitle>{editingExisting ? 'Edit Risk Score' : 'Add Risk Score'}</DialogTitle>

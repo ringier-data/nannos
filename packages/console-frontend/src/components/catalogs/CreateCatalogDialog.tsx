@@ -17,7 +17,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { createCatalogMutation, listCatalogsQueryKey } from '@/api/generated/@tanstack/react-query.gen';
 import { getErrorMessage } from '@/lib/utils';
 import { NannosForm } from '@/components/nannos/NannosForm';
-import type { SubmitOutcome } from '@nannos/embed-sdk';
+import type { ActionOutcome } from '@nannos/embed-sdk';
 
 interface CreateCatalogDialogProps {
   open: boolean;
@@ -49,7 +49,7 @@ export function CreateCatalogDialog({ open, onOpenChange }: CreateCatalogDialogP
     setDescription('');
   };
 
-  const save = async (): Promise<SubmitOutcome> => {
+  const save = async (): Promise<ActionOutcome> => {
     if (!name.trim()) {
       toast.error('Name is required');
       return { ok: false, detail: 'Name is required' };
@@ -82,7 +82,7 @@ export function CreateCatalogDialog({ open, onOpenChange }: CreateCatalogDialogP
           type="Catalog"
           id={undefined}
           fields={{ name: [name, setName], description: [description, setDescription] }}
-          submit={save}
+          save={save}
         />
         <form onSubmit={handleSubmit}>
           <DialogHeader>

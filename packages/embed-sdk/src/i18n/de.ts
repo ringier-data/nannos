@@ -84,7 +84,6 @@ export const de: NannosStrings = {
   'hitl.clientAction.highlight': 'Zeigt auf etwas auf dieser Seite.',
   'hitl.clientAction.navigate': 'Öffnet eine andere Seite in dieser App.',
   'hitl.clientAction.readCurrentPage': 'Liest, was auf dieser Seite steht.',
-  'hitl.clientAction.submit': 'Speichert ein Formular auf dieser Seite.',
   'hitl.clientAction.invoke': 'Klickt „{action}“ auf dieser Seite – das wirkt sofort.',
 
   'auth.title': 'Freigabe erforderlich',

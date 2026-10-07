@@ -6,7 +6,7 @@ The manifest is read from the **RunnableConfig metadata** (provider-neutral), so
 single implementation serves every build path without depending on the
 orchestrator's typed `GraphRuntimeContext`.
 
-Manifest entry shape: `{type, id, scope, label?, fields?, fieldSpecs?, values?, submittable?, unsaved?, actions?}`,
+Manifest entry shape: `{type, id, scope, label?, fields?, fieldSpecs?, values?, unsaved?, actions?}`,
 with `actions: [{name, label, description?, params?: [{name, type, description?, enum?}]}]`.
 The orchestrator's `UserPreferencesMiddleware` reuses `inject_embedded_context`
 (it sources the manifest from its context); `ClientObjectsMiddleware` is for
@@ -97,8 +97,6 @@ def render_client_objects_block(client_objects: Any) -> str | None:
         desc = f"- type={obj.get('type')} id={obj.get('id')} scope={obj.get('scope')}"
         if obj.get("label"):
             desc += f" label={obj['label']!r}"
-        if obj.get("submittable") is True:
-            desc += " submittable"
         # The host's own dirty state — what the user typed, not only the agent's fills.
         if obj.get("unsaved") is True:
             desc += " unsaved"
@@ -134,12 +132,12 @@ def render_client_objects_block(client_objects: Any) -> str | None:
         "<client_objects>\n"
         "The user's application has registered these on-screen objects. You can act on "
         "them with the `client_action` tool: kind='apply' fills a form with values (nothing "
-        "is saved; the changed fields are marked for the user), kind='submit' saves a "
-        "`submittable` object through the application's own save action once the user "
-        "wants it saved (they approve it), kind='highlight' points at an object, "
-        "kind='navigate' opens a path, kind='invoke' runs one of an object's listed `actions` "
-        "(never saves — except an action marked `requires approval`: it saves, and the user approves it "
-        "with a click like a save). Only target objects listed here, and only use fields and actions "
+        "is saved; the changed fields are marked for the user), kind='highlight' points at an object, "
+        "kind='navigate' opens a path, kind='invoke' runs one of an object's listed `actions` — "
+        "including saving: an open form offers `save`. An action marked `requires approval` (`save`, "
+        "and buttons like run now or set as default) changes something for real: invoke it only when "
+        "the user wants that done, alone, after the results of your fills; the user approves it with a "
+        "click. Only target objects listed here, and only use fields and actions "
         "they declare. A detail page in view mode offers an action such as `edit` — invoke it "
         "before apply. A form behind a button is reached through that button's action. If no "
         "action exists for what the user wants, tell them exactly which button to click; never "

@@ -41,13 +41,12 @@ export class ObjectRegistry {
   /** Compact index pushed with each turn — progressive disclosure: no schema, no state. */
   manifest(): ManifestEntry[] {
     return [...this.objects.values()].map((o) => {
-      const { type, id, scope, label, fields, fieldSpecs, includeValues, getState, submit, actions } = o;
+      const { type, id, scope, label, fields, fieldSpecs, includeValues, getState, actions } = o;
       const entry: ManifestEntry = {
         type,
         id,
         scope,
         ...(label ? { label } : {}),
-        ...(submit ? { submittable: true } : {}),
         ...(isDirty(o) ? { unsaved: true } : {}),
         ...(actions && Object.keys(actions).length
           ? {

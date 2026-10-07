@@ -526,11 +526,17 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         corrective_messages: dict[int, ToolMessage] = {}
         refused = _refused_this_turn(messages)
         # The step's first ``client_action`` invoke, if any — see 1c below.
+        step_context: Any = getattr(runtime, "context", None)
+        # The step's first invoke that changes the screen (``edit``, a dialog) — not one
+        # that saves: a save is refused when it shares a step (1c), and must not win over
+        # the fill next to it, or it saves the form as it was before that fill.
         step_invoke = next(
             (
                 tc
                 for tc in last_ai_msg.tool_calls
-                if tc["name"] == CLIENT_ACTION_TOOL_NAME and (tc.get("args") or {}).get("kind") == "invoke"
+                if tc["name"] == CLIENT_ACTION_TOOL_NAME
+                and (tc.get("args") or {}).get("kind") == "invoke"
+                and not _invoke_requires_approval(tc.get("args") or {}, step_context)
             ),
             None,
         )
@@ -584,7 +590,8 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
                 )
                 continue
 
-            # 1c. A ``client_action`` save runs in the browser the moment the user
+            # 1c. A saving ``client_action`` (an invoke the host marked requiresApproval,
+            #     e.g. a form's ``save``) runs in the browser the moment the user
             #     approves it — before any sibling call of the same step. Sent next
             #     to the ``apply`` that fills the form, it saved the form as it was
             #     and the fill landed afterwards, unsaved, while the agent was told
@@ -613,14 +620,15 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
                 continue
             if (
                 tool_name == CLIENT_ACTION_TOOL_NAME
-                and args.get("kind") == "submit"
                 and len(last_ai_msg.tool_calls) > 1
+                and _invoke_requires_approval(args, step_context)
             ):
+                action = args.get("action")
                 corrective_messages[idx] = ToolMessage(
                     content=(
-                        "NOT RUN: kind='submit' must be called on its own, after the results of "
-                        "your other calls are back — the form was not saved. Check those results, "
-                        "then call client_action with kind='submit' again, alone."
+                        f"NOT RUN: '{action}' saves, so it must be invoked on its own, after the results of "
+                        "your other calls are back — nothing was saved. Check those results, then invoke "
+                        f"'{action}' again, alone."
                     ),
                     name=tool_name,
                     tool_call_id=tool_call["id"],

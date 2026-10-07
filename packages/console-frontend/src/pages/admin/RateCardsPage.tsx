@@ -2,7 +2,7 @@ import { useState, useMemo, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Plus, Edit2, Trash2, Copy, Info, Search, ChevronDown, ChevronLeft, ChevronRight } from 'lucide-react';
 import { toast } from 'sonner';
-import { useObjectStateAdapter, type SubmitOutcome } from '@nannos/embed-sdk';
+import { useObjectStateAdapter, type ActionOutcome } from '@nannos/embed-sdk';
 import {
   createRateCardEntryApiV1AdminRateCardsEntryPostMutation,
   expireRateCardEntryApiV1AdminRateCardsExpireRateIdPostMutation,
@@ -630,7 +630,7 @@ function ModelPricingDialog({ open, onOpenChange, onSubmit, existingModel }: {
     setFormData({ ...formData, output_breakdown: updated });
   };
 
-  const handleSubmit = async (): Promise<SubmitOutcome> => {
+  const handleSubmit = async (): Promise<ActionOutcome> => {
     const entries: RateCardEntryCreate[] = [];
 
     // Add input price if provided
@@ -705,7 +705,7 @@ function ModelPricingDialog({ open, onOpenChange, onSubmit, existingModel }: {
           type="ModelPricing"
           id={existingModel ? `${existingModel.provider}/${existingModel.model_name}` : undefined}
           form={nannosForm}
-          submit={handleSubmit}
+          save={handleSubmit}
         />
         <DialogHeader>
           <DialogTitle>{isEdit ? 'Edit' : 'Add'} Model Pricing</DialogTitle>

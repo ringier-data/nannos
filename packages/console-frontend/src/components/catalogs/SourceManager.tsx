@@ -34,7 +34,7 @@ import {
 import { client } from '@/api/generated/client.gen';
 import { getErrorMessage } from '@/lib/utils';
 import { NannosForm } from '@/components/nannos/NannosForm';
-import type { SubmitOutcome } from '@nannos/embed-sdk';
+import type { ActionOutcome } from '@nannos/embed-sdk';
 
 // --- Types (will come from SDK after regen) ---
 
@@ -403,7 +403,7 @@ export function SourceManager({ catalogId, canEdit }: SourceManagerProps) {
 
   // Resolves with what happened, for the assistant's submit; onError has already toasted a failure.
   const addSourceOutcome = useCallback(
-    async (base: Omit<CatalogSource, 'id'>): Promise<SubmitOutcome> => {
+    async (base: Omit<CatalogSource, 'id'>): Promise<ActionOutcome> => {
       try {
         await addMutation.mutateAsync(base);
         return true;
@@ -414,7 +414,7 @@ export function SourceManager({ catalogId, canEdit }: SourceManagerProps) {
     [addMutation],
   );
 
-  const handleSaveDriveSource = useCallback(async (): Promise<SubmitOutcome> => {
+  const handleSaveDriveSource = useCallback(async (): Promise<ActionOutcome> => {
     if (!selectedDrive) return { ok: false, detail: 'No drive selected' };
     const base: Omit<CatalogSource, 'id'> = selectedFolder
       ? {
@@ -435,7 +435,7 @@ export function SourceManager({ catalogId, canEdit }: SourceManagerProps) {
     return addSourceOutcome(base);
   }, [selectedDrive, selectedFolder, wizardExcludePatterns, addSourceOutcome]);
 
-  const handleSaveSharedFolder = useCallback(async (): Promise<SubmitOutcome> => {
+  const handleSaveSharedFolder = useCallback(async (): Promise<ActionOutcome> => {
     if (!sharedFolderRoot) return { ok: false, detail: 'No shared folder selected' };
     const target = selectedSharedSubfolder ?? sharedFolderRoot;
     const base: Omit<CatalogSource, 'id'> = {
@@ -774,7 +774,7 @@ interface FolderBrowserPanelProps {
   summaryText: React.ReactNode;
   excludePatterns: string[];
   onExcludePatternsChange: (patterns: string[]) => void;
-  onSave: () => Promise<SubmitOutcome>;
+  onSave: () => Promise<ActionOutcome>;
   onCancel: () => void;
   saving: boolean;
 }
@@ -888,7 +888,7 @@ function FolderBrowserPanel({
             id={undefined}
             parentId={catalogId}
             fields={{ excludeFolderPatterns: [excludePatterns, onExcludePatternsChange] }}
-            submit={onSave}
+            save={onSave}
           />
           <ExclusionPatternEditor
             patterns={excludePatterns}

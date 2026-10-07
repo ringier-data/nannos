@@ -388,8 +388,8 @@ def _no_answer(resume: Any, action_requests: list[Any]) -> list[dict[str, Any]]:
 
 
 def _needs_a_click(action_requests: list[Any]) -> bool:
-    """A pending call only an explicit Approve may run: a ``client_action`` save, or
-    an ``invoke`` of a page action the host marked ``requiresApproval``.
+    """A pending call only an explicit Approve may run: a ``client_action`` invoke of an
+    action the host marked ``requiresApproval`` (a form's ``save``, "run now", …).
 
     Either writes to the server the moment it runs, so typed words — however they
     classify — are never consent for it. The card is right there. A plain ``invoke``
@@ -399,8 +399,8 @@ def _needs_a_click(action_requests: list[Any]) -> bool:
         if not isinstance(request, dict) or request.get("name") != "client_action":
             continue
         args = request.get("args") or {}
-        # A save, or a page action the host marked requiresApproval (it saves too).
-        if args.get("kind") == "submit" or args.get("_requires_click") is True:
+        # An action the host marked requiresApproval (a form's `save`, "run now", …).
+        if args.get("_requires_click") is True:
             return True
     return False
 
@@ -418,28 +418,16 @@ def _from_intent(intent: str | None, reply: str, action_requests: list[Any]) -> 
     said = f" They said: {reply.strip()}" if isinstance(reply, str) and reply.strip() else ""
     if intent == "approve" and _needs_a_click(action_requests):
         logger.info("[HITL] A typed reply cannot approve a save; it was not run")
-        if not any(
-            isinstance(r, dict) and (r.get("args") or {}).get("kind") == "submit" for r in action_requests or []
-        ):
-            return reject_decisions(
-                action_requests,
-                f"The action was NOT run: it saves, so it needs the user to click Approve, and they "
-                f"typed a message instead.{said} Do NOT tell them it was done. That approval card is "
-                f"closed now: if they want it, send the same invoke again (alone) so a new card "
-                f"appears, and tell them it has not run yet and to click Approve on it. "
-                f"{NOT_APPROVED_CLAUSE}",
-            )
         return reject_decisions(
             action_requests,
             # Their words agree to the save, so "respond to what they said" read as
-            # "confirm it": the agent told them it was saved. And the card they
-            # would click is settled by this very answer — only a new submit
-            # brings one back.
-            f"The form was NOT saved: saving needs the user to click Approve, and they "
-            f"typed a message instead.{said} Do NOT tell them it was saved. That approval "
-            f"card is closed now: if they want it saved, send the same submit again (alone) "
-            f"so a new card appears, and tell them the form is not saved yet and to click "
-            f"Approve on it. {NOT_APPROVED_CLAUSE}",
+            # "confirm it": the agent told them it was saved. And the card they would
+            # click is settled by this very answer — only a new invoke brings one back.
+            f"It was NOT done: this action saves, so it needs the user to click Approve, and they "
+            f"typed a message instead.{said} Do NOT tell them it was saved or done. That approval "
+            f"card is closed now: if they want it, send the same invoke again (alone) so a new card "
+            f"appears, and tell them it has not happened yet and to click Approve on it. "
+            f"{NOT_APPROVED_CLAUSE}",
         )
     if intent == "approve":
         logger.info("[HITL] Classified the user's reply as an approval")

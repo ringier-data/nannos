@@ -5,7 +5,7 @@ import {
   type ObjectAction,
   type RouteId,
   type StateField,
-  type SubmitOutcome,
+  type ActionOutcome,
 } from '@nannos/embed-sdk';
 import type { consoleObjectTypes } from './consoleObjects';
 import { useConsoleForm } from './useConsoleForm';
@@ -17,13 +17,13 @@ type NannosFormProps = {
   id: RouteId;
   parentId?: RouteId;
   /**
-   * The form's own Save, for the assistant's `submit` (the user approves it first).
+   * The form's own Save, offered to the assistant as the action `save` (the user approves it first).
    * Run exactly what the Save button runs; resolve `false` or `{ ok: false, detail }`
    * when nothing was saved (validation refused, the request failed), so the assistant
    * is told the truth. Leave it out where saving needs a decision only the user can
    * make (a confirmation, a change summary they must write).
    */
-  submit?: () => SubmitOutcome | Promise<SubmitOutcome>;
+  save?: () => ActionOutcome | Promise<ActionOutcome>;
   /** What the user could click inside the form that the assistant may do too (open a
    *  sub-dialog, run a check) — `invoke` actions. Never something that saves. */
   actions?: Record<string, ObjectAction>;
@@ -63,7 +63,7 @@ export function NannosForm(props: NannosFormProps) {
     type: props.type,
     id: props.id,
     parentId: props.parentId,
-    submit: props.submit,
+    save: props.save,
     actions: props.actions,
     ...(tracksDirty ? { isDirty } : {}),
   });

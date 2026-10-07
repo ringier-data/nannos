@@ -8,7 +8,9 @@ Embed the Nannos assistant into any React app. You get three things:
    at (`apply`), points at fields (`highlight`), moves them (`navigate`), or
    reads what they see (`read_current_page`), through *your* form layer. Form
    fills (`apply`) run without an approval card and mark the changed fields;
-   saving (`submit`) asks for approval. `apply` and `read_current_page` are ROUND TRIPS: the turn
+   pressing a button the page offers is `invoke`, and saving is one of those
+   buttons: a form's `save` (or any action marked `requiresApproval`) asks for the
+   user's click first. `apply` and `read_current_page` are ROUND TRIPS: the turn
    pauses until the browser reports what actually happened (which fields
    landed vs. were rejected; the sanitized page snapshot), so the agent never
    assumes success.

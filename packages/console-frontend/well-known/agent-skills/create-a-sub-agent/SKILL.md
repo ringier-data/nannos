@@ -37,8 +37,8 @@ Steps:
 10. Save:
     - Create form open (/app/subagents/new) or the agent's edit form → apply: type
       first, then name, description, model, system prompt, tools, thinking. Then
-      submit when the user wants it saved; on the edit form that opens the change
-      summary dialog — fill its summary with apply and submit that.
+      invoke `save` when the user wants it saved; on the edit form that opens the change
+      summary dialog — fill its summary with apply and invoke that dialog's `save`.
     - No form open → summarise and, on confirmation, console_create_sub_agent
       (type, name, description, model_tier or model, system_prompt, mcp_tools,
       skills). For later changes: console_update_sub_agent — but never while that

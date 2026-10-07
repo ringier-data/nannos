@@ -22,7 +22,7 @@ import {
 } from '@/api/generated/@tanstack/react-query.gen';
 import type { EmbedBinding, EmbedBindingUpsert } from '@/api/generated/types.gen';
 import { getErrorMessage } from '@/lib/utils';
-import type { SubmitOutcome } from '@nannos/embed-sdk';
+import type { ActionOutcome } from '@nannos/embed-sdk';
 
 interface EmbedBindingPanelProps {
   subAgentId: number;
@@ -93,7 +93,7 @@ export function EmbedBindingPanel({ subAgentId, binding, canManage, onChanged }:
     },
   });
 
-  const saveBinding = async (body: EmbedBindingUpsert): Promise<SubmitOutcome> => {
+  const saveBinding = async (body: EmbedBindingUpsert): Promise<ActionOutcome> => {
     try {
       const result = await setMutation.mutateAsync({ path: { sub_agent_id: subAgentId }, body });
       return result.last_error ? { ok: true, detail: `Saved, but the first fetch failed: ${result.last_error}` } : true;

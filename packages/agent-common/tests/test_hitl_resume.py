@@ -213,17 +213,22 @@ class TestDecisionsFromResume:
 
     @pytest.mark.asyncio
     async def test_typed_words_never_approve_a_save(self):
-        """A client_action save writes the form to the server: only the click counts."""
-        save = [{"name": "client_action", "args": {"kind": "submit", "target_type": "SubAgent", "target_id": "new"}}]
+        """A form's save writes it to the server: only the click counts, never typed words."""
+        save = [
+            {
+                "name": "client_action",
+                "args": {"kind": "invoke", "target_type": "SubAgent", "target_id": "new", "action": "save", "_requires_click": True},
+            }
+        ]
         with _classification("approve"):
             decisions = await decisions_from_resume("yes", save)
         assert [d["type"] for d in decisions] == ["reject"]
         message = decisions[0]["message"]
-        assert "saving needs the user to click Approve" in message
+        assert "it needs the user to click Approve" in message
         # "yes save it" must not read as "confirm the save": the agent claimed it was
-        # saved. The answered card is closed, so a click needs a fresh submit.
+        # saved. The answered card is closed, so a click needs a fresh invoke.
         assert "Do NOT tell them it was saved" in message
-        assert "send the same submit again" in message
+        assert "send the same invoke again" in message
         # A clicked approval (structural) still runs it.
         assert (await decisions_from_resume({"decisions": [{"type": "approve"}]}, save))[0]["type"] == "approve"
 
@@ -239,7 +244,7 @@ class TestDecisionsFromResume:
         with _classification("approve"):
             decisions = await decisions_from_resume("yes do it", marked)
         assert [d["type"] for d in decisions] == ["reject"]
-        assert "The action was NOT run" in decisions[0]["message"]
+        assert "It was NOT done" in decisions[0]["message"]
         assert "send the same invoke again" in decisions[0]["message"]
 
     def test_sync_twin_classifies_too(self):
@@ -267,7 +272,7 @@ class TestTypedDecisionAnnouncement:
 
     @pytest.mark.asyncio
     async def test_a_typed_yes_to_a_save_reads_approve_but_did_not_run(self):
-        save = [{"name": "client_action", "args": {"_call_id": "c1", "kind": "submit"}}]
+        save = [{"name": "client_action", "args": {"_call_id": "c1", "kind": "invoke", "_requires_click": True}}]
         events, writer = self._writer()
         with writer, _classification("approve"):
             await decisions_from_resume("yes", save)

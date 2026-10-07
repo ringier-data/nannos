@@ -31,7 +31,7 @@ import {
   schedulerRemoveGroupDefaultJobMutation,
   consoleListMcpServersOptions,
 } from '@/api/generated/@tanstack/react-query.gen';
-import type { SubmitOutcome } from '@nannos/embed-sdk';
+import type { ActionOutcome } from '@nannos/embed-sdk';
 import type { RoleEnum, McpGatewayStatusResponse, McpGatewayServerPermissionsResponse } from '@/api/generated';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -503,7 +503,7 @@ export function GroupDetailPage() {
   };
 
   // The mutations' onError toasts; these only report the outcome to the assistant.
-  const saveGroup = async (): Promise<SubmitOutcome> => {
+  const saveGroup = async (): Promise<ActionOutcome> => {
     try {
       await updateMutation.mutateAsync({
         path: { group_id: groupId },
@@ -522,7 +522,7 @@ export function GroupDetailPage() {
     void saveGroup();
   };
 
-  const addMembers = async (): Promise<SubmitOutcome> => {
+  const addMembers = async (): Promise<ActionOutcome> => {
     if (unresolvedMembersRef.current.length)
       return {
         ok: false,
@@ -547,7 +547,7 @@ export function GroupDetailPage() {
     void addMembers();
   };
 
-  const grantServerAccess = async (): Promise<SubmitOutcome> => {
+  const grantServerAccess = async (): Promise<ActionOutcome> => {
     if (!selectedServerSlug) return { ok: false, detail: 'No server selected' };
     try {
       await grantServerAccessMutation.mutateAsync({ serverSlug: selectedServerSlug, role: selectedServerRole });
@@ -710,7 +710,7 @@ export function GroupDetailPage() {
             type="Group"
             id={groupId}
             fields={{ name: [editName, setEditName], description: [editDescription, setEditDescription] }}
-            submit={saveGroup}
+            save={saveGroup}
           />
           <CardHeader>
             <CardTitle>Edit Group</CardTitle>
@@ -1231,7 +1231,7 @@ export function GroupDetailPage() {
                 },
               },
             }}
-            submit={addMembers}
+            save={addMembers}
           />
           <DialogHeader>
             <DialogTitle>Add Members</DialogTitle>
@@ -1342,7 +1342,7 @@ export function GroupDetailPage() {
             id={undefined}
             parentId={groupId}
             fields={{ server_slug: [selectedServerSlug, setSelectedServerSlug], role: [selectedServerRole, setSelectedServerRole] }}
-            submit={grantServerAccess}
+            save={grantServerAccess}
           />
           <DialogHeader>
             <DialogTitle>Grant Server Access</DialogTitle>

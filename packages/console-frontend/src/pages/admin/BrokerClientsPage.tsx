@@ -10,7 +10,7 @@ import {
   updateBrokerClientApiV1AdminBrokerClientsClientPkPatchMutation,
 } from '@/api/generated/@tanstack/react-query.gen';
 import type { BrokerClient, BrokerClientUpdate } from '@/api/generated';
-import type { SubmitOutcome } from '@nannos/embed-sdk';
+import type { ActionOutcome } from '@nannos/embed-sdk';
 import { formatApiError } from '@/api/scheduler';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -127,7 +127,7 @@ export function BrokerClientsPage() {
   const closeForm = () => setFormDialog({ open: false, brokerClient: null });
 
   // The mutations' onError toasts; this only reports the outcome to the assistant.
-  const save = async (): Promise<SubmitOutcome> => {
+  const save = async (): Promise<ActionOutcome> => {
     if (!canSave) return { ok: false, detail: 'Client ID, name and at least one redirect URI are required' };
     const body = {
       name: name.trim(),
@@ -301,7 +301,7 @@ export function BrokerClientsPage() {
               enabled: [enabled, setEnabled],
               requireBindingSecret: [requireBindingSecret, setRequireBindingSecret],
             }}
-            submit={save}
+            save={save}
           />
           <DialogHeader>
             <DialogTitle>{editing ? 'Edit Broker Client' : 'Register Broker Client'}</DialogTitle>

@@ -12,7 +12,7 @@ import { consoleCreateSubAgentMutation } from '@/api/generated/@tanstack/react-q
 import type { SubAgent } from '@/api/generated/types.gen';
 import { useAuth } from '@/contexts/AuthContext';
 import { getErrorMessage } from '@/lib/utils';
-import type { SubmitOutcome } from '@nannos/embed-sdk';
+import type { ActionOutcome } from '@nannos/embed-sdk';
 
 export function SubAgentCreatePage() {
   const navigate = useNavigate();
@@ -37,7 +37,7 @@ export function SubAgentCreatePage() {
     },
   });
 
-  const handleSubmit = async (data: SubAgentFormData): Promise<SubmitOutcome> => {
+  const handleSubmit = async (data: SubAgentFormData): Promise<ActionOutcome> => {
     // Extract configuration fields based on agent type
     const config = data.configuration;
 

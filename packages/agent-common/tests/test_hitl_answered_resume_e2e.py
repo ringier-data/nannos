@@ -67,7 +67,7 @@ class _ScriptedModel(BaseChatModel):
                 tool_calls=[
                     {
                         "name": "client_action",
-                        "args": {"kind": "submit", "target_type": "Settings", "target_id": "me"},
+                        "args": {"kind": "invoke", "target_type": "Settings", "target_id": "me", "action": "save"},
                         "id": f"ca-{self.turn}",
                     }
                 ],
@@ -147,7 +147,12 @@ def test_answered_jumps_only_when_nothing_is_left_for_the_tools_node():
     assert "jump_to" not in _answered(ai, [])
 
 
-class _ApplyAndSubmitModel(_ScriptedModel):
+_SAVE = {"kind": "invoke", "target_type": "S", "target_id": "1", "action": "save"}
+#: The page's object list: the form offers its Save as an approval-gated action.
+_FORM = [{"type": "S", "id": "1", "scope": "update", "actions": [{"name": "save", "label": "Save", "requiresApproval": True}]}]
+
+
+class _ApplyAndSaveModel(_ScriptedModel):
     """Sends the fill and the save in ONE step first; alone once told to."""
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):  # type: ignore[override]
@@ -157,10 +162,10 @@ class _ApplyAndSubmitModel(_ScriptedModel):
         if isinstance(last, HumanMessage):
             calls = [
                 {"name": "client_action", "args": {"kind": "apply", "target_type": "S", "target_id": "1"}, "id": "fill"},
-                {"name": "client_action", "args": {"kind": "submit", "target_type": "S", "target_id": "1"}, "id": "save"},
+                {"name": "client_action", "args": _SAVE, "id": "save"},
             ]
         elif isinstance(last, ToolMessage) and last.tool_call_id in ("fill", "save"):
-            calls = [{"name": "client_action", "args": {"kind": "submit", "target_type": "S", "target_id": "1"}, "id": "save-2"}]
+            calls = [{"name": "client_action", "args": _SAVE, "id": "save-2"}]
         else:
             calls = [{"name": "Answer", "args": {"text": "saved"}, "id": "ans"}]
         return ChatResult(generations=[ChatGeneration(message=AIMessage(content="", tool_calls=calls))])
@@ -168,10 +173,10 @@ class _ApplyAndSubmitModel(_ScriptedModel):
 
 @pytest.mark.asyncio
 async def test_a_save_sent_with_its_fill_waits_for_the_fill():
-    model = _ApplyAndSubmitModel()
+    model = _ApplyAndSaveModel()
     executions: list = []
     agent = _build(model, executions)
-    config = {"configurable": {"thread_id": "fill-and-save"}}
+    config = {"configurable": {"thread_id": "fill-and-save"}, "metadata": {"client_objects": _FORM}}
 
     first = await agent.ainvoke({"messages": [HumanMessage(content="fill and save")]}, config)
     # The save sharing the step was answered, not put before the user: only the
@@ -185,7 +190,7 @@ async def test_a_save_sent_with_its_fill_waits_for_the_fill():
     assert refused and "NOT RUN" in refused[0].content and refused[0].status == "error"
     # Next step: the save alone, asking for approval on its own.
     requests = second["__interrupt__"][0].value["action_requests"]
-    assert [(r["args"]["kind"], r["args"]["_call_id"]) for r in requests] == [("submit", "save-2")]
+    assert [(r["args"]["action"], r["args"]["_call_id"]) for r in requests] == [("save", "save-2")]
 
 
 class _InvokeArgs(_ClientActionArgs):
@@ -307,7 +312,7 @@ class _RetriesARefusalModel(_ScriptedModel):
         self.calls += 1
         assert self.calls < 20, "runaway loop"
         last = messages[-1]
-        save = {"kind": "submit", "target_type": "BudgetGuard", "target_id": "settings"}
+        save = {"kind": "invoke", "target_type": "BudgetGuard", "target_id": "settings", "action": "save"}
         if isinstance(last, HumanMessage) or (isinstance(last, ToolMessage) and "NOT RUN" not in last.content):
             calls = [{"name": "client_action", "args": save, "id": f"save-{self.calls}"}]
         else:

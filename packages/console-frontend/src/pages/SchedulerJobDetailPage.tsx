@@ -93,7 +93,7 @@ import { DeliveryChannelOptions, DeliveryReachabilityNote } from '@/components/s
 import { NannosForm } from '@/components/nannos/NannosForm';
 import { NannosActions } from '@/components/nannos/NannosActions';
 import { AssistantChangesBar } from '@/components/nannos/AssistantChangesBar';
-import type { ObjectAction, StateField, SubmitOutcome } from '@nannos/embed-sdk';
+import type { ObjectAction, StateField, ActionOutcome } from '@nannos/embed-sdk';
 
 interface SchedulerNotification {
   job_id: number;
@@ -870,7 +870,7 @@ function EditForm({
 
   // Also the assistant's `submit`: resolves only once the save is stored, and says why
   // when it is not (the same message the form shows).
-  async function handleSave(): Promise<SubmitOutcome> {
+  async function handleSave(): Promise<ActionOutcome> {
     // What the disabled Save button refuses; the assistant can still call this.
     if (!dirty) return { ok: false, detail: 'No changes to save.' };
     if (mutation.isPending) return { ok: false, detail: 'A save is already in progress.' };
@@ -1162,7 +1162,7 @@ function EditForm({
           id={job.id}
           fields={nannosFields}
           dirty={dirty}
-          submit={handleSave}
+          save={handleSave}
           actions={job.job_type === 'watch' && canWrite ? { run_check: runCheckAction } : undefined}
         />
       ) : (

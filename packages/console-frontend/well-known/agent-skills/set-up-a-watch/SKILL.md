@@ -65,7 +65,7 @@ Steps:
      a literal "me", and never widen it to "has any assignee" to make the error
      disappear. If the tool is not known to be read-only, run_check does
      not call it — ask the user to click "Run it anyway" in the form. When the user
-     wants it created, submit the form (they approve the save).
+     wants it created, invoke the form's `save` (they approve it).
    - No form open → summarise the job in plain words, and on confirmation call
      scheduler_create_job (job_type "watch", a name of at least 5 characters,
      check_tool, check_args, cel_expr and/or llm_condition, schedule fields,

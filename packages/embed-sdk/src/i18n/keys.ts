@@ -108,7 +108,6 @@ export interface NannosStrings {
   'hitl.clientAction.highlight': string;
   'hitl.clientAction.navigate': string;
   'hitl.clientAction.readCurrentPage': string;
-  'hitl.clientAction.submit': string;
   /** {action}: the button's label. */
   'hitl.clientAction.invoke': string;
 

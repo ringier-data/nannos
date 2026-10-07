@@ -39,12 +39,12 @@ import { client } from '@/api/generated/client.gen';
 import { SUB_AGENT_NAME_HINT, subAgentNameError } from '@/lib/subAgentName';
 import { NannosForm } from '@/components/nannos/NannosForm';
 import { AssistantChangesBar } from '@/components/nannos/AssistantChangesBar';
-import type { SubmitOutcome } from '@nannos/embed-sdk';
+import type { ActionOutcome } from '@nannos/embed-sdk';
 
 interface SubAgentFormProps {
   subAgent?: SubAgent;
   /** Resolves `{ ok: false, detail }` (or throws) when nothing was saved. */
-  onSubmit: (data: SubAgentFormData) => Promise<SubmitOutcome>;
+  onSubmit: (data: SubAgentFormData) => Promise<ActionOutcome>;
   onCancel: () => void;
   isSubmitting?: boolean;
   /** Which type card starts selected when creating. Ignored while editing. */
@@ -287,7 +287,7 @@ export function SubAgentForm({
     return null;
   };
 
-  const save = async (): Promise<SubmitOutcome> => {
+  const save = async (): Promise<ActionOutcome> => {
     const validationError = validate();
     if (validationError) {
       toast.error('Validation Error', { description: validationError });
@@ -429,7 +429,7 @@ export function SubAgentForm({
       <NannosForm
         type="SubAgent"
         id={subAgent?.id}
-        submit={save}
+        save={save}
         fields={{
           ...(!isEditing && { type: [type, handleTypeChange] }),
           name: [name, setName],

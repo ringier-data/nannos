@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tansta
 import { Link, useNavigate } from 'react-router';
 import { Search, Plus, MoreHorizontal, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
-import type { SubmitOutcome } from '@nannos/embed-sdk';
+import type { ActionOutcome } from '@nannos/embed-sdk';
 import { useAuth } from '@/contexts/AuthContext';
 import { getErrorMessage } from '@/lib/utils';
 import { useDebouncedValue } from '@/hooks/use-debounced-value';
@@ -143,7 +143,7 @@ export function GroupsPage() {
   });
 
   // createMutation's onError toasts; this only reports the outcome to the assistant.
-  const createGroup = async (): Promise<SubmitOutcome> => {
+  const createGroup = async (): Promise<ActionOutcome> => {
     if (!newGroupName.trim()) return { ok: false, detail: 'Name is required' };
     try {
       await createMutation.mutateAsync({
@@ -319,7 +319,7 @@ export function GroupsPage() {
             type="Group"
             id={undefined}
             fields={{ name: [newGroupName, setNewGroupName], description: [newGroupDescription, setNewGroupDescription] }}
-            submit={createGroup}
+            save={createGroup}
           />
           <DialogHeader>
             <DialogTitle>Create Group</DialogTitle>

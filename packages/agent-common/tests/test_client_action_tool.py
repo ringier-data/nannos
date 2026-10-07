@@ -12,6 +12,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from agent_common.core.client_action_tool import (
+    ClientActionInput,
     _client_action_handler,
     render_client_action_result,
 )
@@ -199,40 +200,36 @@ class TestResultRendering:
         assert "do not assume" in render_client_action_result("apply", "weird").lower()
 
 
-class TestSubmit:
-    @pytest.mark.asyncio
-    async def test_submit_requires_a_target(self):
-        out = await _client_action_handler(kind="submit")
-        assert out.startswith("Error:")
+class TestSave:
+    """Saving is an invoke of the form's `save` action — there is no `submit` kind."""
 
     @pytest.mark.asyncio
-    async def test_submit_is_a_round_trip_and_reports_the_save(self):
+    async def test_save_is_an_invoke_round_trip_and_reports_the_save(self):
         with patch(
             "agent_common.core.client_action_tool.interrupt",
-            return_value={"ok": True},
+            return_value={"ok": True, "saved": True, "content": "{}"},
         ) as fake_interrupt:
             out = await _client_action_handler(
-                kind="submit", target_type="Settings", target_id="me", tool_call_id="call-2"
+                kind="invoke", target_type="Settings", target_id="me", action="save", tool_call_id="call-2"
             )
-        fake_interrupt.assert_called_once_with(
-            {
-                "client_action_request": {
-                    "id": "call-2",
-                    "directive": {"kind": "submit", "target": {"type": "Settings", "id": "me"}},
-                }
-            }
-        )
-        assert out == "The application saved the form."
+        directive = fake_interrupt.call_args.args[0]["client_action_request"]["directive"]
+        assert directive["kind"] == "invoke" and directive["action"] == "save"
+        assert "SAVED the change" in out
 
-    def test_a_form_without_a_save_action_is_reported(self):
-        out = render_client_action_result("submit", {"ok": False, "reason": "not-submittable"})
-        assert "cannot be saved by the assistant" in out
+    def test_submit_is_no_longer_a_kind(self):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            ClientActionInput(kind="submit", target_type="Settings", target_id="me")
 
     def test_a_save_on_a_closed_form_says_nothing_was_saved_and_how_to_redo_it(self):
-        detail = "It is shown read-only right now: no form is open, so nothing was saved."
-        out = render_client_action_result("submit", {"ok": False, "reason": "not-submittable", "detail": detail})
+        detail = (
+            "It is shown read-only right now: no form is open, so nothing was saved and no unsaved values "
+            "are on screen. This object offers: edit."
+        )
+        out = render_client_action_result("invoke", {"ok": False, "reason": "unknown-action", "detail": detail})
         assert "nothing was saved" in out and detail in out
-        assert "fill the form again" in out
+        assert "open the form again" in out
         assert "page's own button" not in out
 
 

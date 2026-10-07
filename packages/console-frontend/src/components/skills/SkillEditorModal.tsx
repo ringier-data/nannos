@@ -21,7 +21,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { NannosForm } from '@/components/nannos/NannosForm';
-import type { SubmitOutcome } from '@nannos/embed-sdk';
+import type { ActionOutcome } from '@nannos/embed-sdk';
 
 interface SkillEditorModalProps {
   open: boolean;
@@ -146,7 +146,7 @@ export function SkillEditorModal({
   };
 
   // The modal's Save only hands the skills back to the sub-agent form; nothing is persisted yet.
-  const submitToForm = (): SubmitOutcome => {
+  const submitToForm = (): ActionOutcome => {
     handleSave();
     return {
       ok: true,
@@ -415,7 +415,7 @@ export function SkillEditorModal({
                           ],
                           instructions: [activeSkill.body ?? '', (v: string) => updateSkill(activeSkillIdx!, { body: v })],
                         }}
-                        submit={submitToForm}
+                        save={submitToForm}
                       />
                     )}
                     <div>

@@ -74,7 +74,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { getErrorMessage } from '@/lib/utils';
-import type { SubmitOutcome } from '@nannos/embed-sdk';
+import type { ActionOutcome } from '@nannos/embed-sdk';
 import { describeSkillReferencedConflict } from '@/lib/skillConflict';
 import { SkillImportPanel } from '@/components/skills/SkillImportPanel';
 import { NannosForm } from '@/components/nannos/NannosForm';
@@ -475,7 +475,7 @@ export function SkillRegistryPage() {
     return { ...draftSkill, files: updatedFiles };
   };
 
-  const handleSaveDraft = async (): Promise<SubmitOutcome> => {
+  const handleSaveDraft = async (): Promise<ActionOutcome> => {
     if (!draftSkill) return { ok: false, detail: 'No unsaved changes' };
     const flushed = flushDraftEdits();
     if (!flushed) return { ok: false, detail: 'No unsaved changes' };
@@ -1527,7 +1527,7 @@ export function SkillRegistryPage() {
                             (v: string) => writeAgentDraft({ visibility: v }),
                           ],
                         }}
-                        submit={handleSaveDraft}
+                        save={handleSaveDraft}
                       />
                     )}
                     <div className="space-y-2">

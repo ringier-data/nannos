@@ -119,6 +119,25 @@ describe('zodFormRegistration', () => {
     expect(state.startDate).toBe('2026-08-01'); // the clean bridged value is sent instead
   });
 
+  it("offers the form's save as the approval-gated action `save`, next to its own actions", async () => {
+    const adapter = makeAdapter();
+    const save = vi.fn(() => true);
+    const reg = zodFormRegistration({
+      type: 'Campaign',
+      id: '7',
+      scope: 'update',
+      schema,
+      adapter,
+      save,
+      actions: { edit: { label: 'Edit', run: () => true } },
+    });
+    expect(Object.keys(reg.actions ?? {})).toEqual(['edit', 'save']);
+    expect(reg.actions?.save).toMatchObject({ label: 'Save', requiresApproval: true });
+    await reg.actions?.save.run({});
+    expect(save).toHaveBeenCalledOnce();
+    expect(zodFormRegistration({ type: 'Campaign', id: '7', scope: 'update', schema, adapter }).actions).toBeUndefined();
+  });
+
   it('drops invalid/unknown fields without touching the form, and reports rejections', () => {
     const adapter = makeAdapter();
     const setSpy = vi.spyOn(adapter, 'set');

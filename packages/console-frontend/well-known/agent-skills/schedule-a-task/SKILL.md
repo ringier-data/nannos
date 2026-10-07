@@ -39,8 +39,8 @@ Steps:
 7. Write it:
    - New Job form open (/app/scheduler/new) → apply: job type "task" first, then the
      agent (or inline agent fields), instruction, schedule kind, its value, delivery.
-     Submit only when the user wants it created.
-   - A job's page → invoke `edit` if it is read-only, then apply and submit.
+     Invoke its `save` only when the user wants it created.
+   - A job's page → invoke `edit` if it is read-only, then apply and `save`.
    - No form → summarise in plain words, and on confirmation scheduler_create_job
      (name ≥ 5 characters, job_type "task", sub_agent_id or sub_agent_parameters,
      prompt, schedule fields, delivery_channel_id). Offer to open /app/scheduler/<id>.

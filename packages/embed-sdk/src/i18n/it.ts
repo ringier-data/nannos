@@ -85,7 +85,6 @@ export const it: NannosStrings = {
   'hitl.clientAction.highlight': 'Indica un elemento di questa pagina.',
   'hitl.clientAction.navigate': 'Apre un’altra pagina di questa app.',
   'hitl.clientAction.readCurrentPage': 'Legge ciò che si trova in questa pagina.',
-  'hitl.clientAction.submit': 'Salva un modulo di questa pagina.',
   'hitl.clientAction.invoke': 'Preme «{action}» in questa pagina, con effetto immediato.',
 
   'auth.title': 'Autorizzazione necessaria',

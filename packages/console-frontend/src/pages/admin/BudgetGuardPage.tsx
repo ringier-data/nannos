@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Loader2, Lock, AlertTriangle, ShieldCheck } from 'lucide-react';
 import { toast } from 'sonner';
-import type { SubmitOutcome } from '@nannos/embed-sdk';
+import type { ActionOutcome } from '@nannos/embed-sdk';
 
 import {
   getBudgetSettings,
@@ -74,7 +74,7 @@ export function BudgetGuardPage() {
   });
 
   // The mutation's onError toasts; this only reports the outcome to the assistant.
-  const save = async (): Promise<SubmitOutcome> => {
+  const save = async (): Promise<ActionOutcome> => {
     const limitNum = Number(limit);
     if (!Number.isFinite(limitNum) || limitNum <= 0) {
       toast.error('Monthly limit must be a positive number');
@@ -181,7 +181,7 @@ export function BudgetGuardPage() {
               type="BudgetGuard"
               id="settings"
               fields={{ enabled: [enabled, setEnabled], limit: [limit, setLimit], thresholds: [thresholds, setThresholds] }}
-              submit={save}
+              save={save}
             />
           )}
           <div className="flex items-center justify-between">

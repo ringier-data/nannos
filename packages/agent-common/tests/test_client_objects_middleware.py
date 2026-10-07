@@ -273,9 +273,9 @@ class TestRenderAndSystemHelper:
         # The agent paused a job, refreshed over the name the user had typed and called
         # the job by that unsaved name: it only knew its own fills.
         block = render_client_objects_block(
-            [{"type": "ExistingScheduledJob", "id": "1", "scope": "update", "submittable": True, "unsaved": True}]
+            [{"type": "ExistingScheduledJob", "id": "1", "scope": "update", "unsaved": True}]
         )
-        assert "type=ExistingScheduledJob id=1 scope=update submittable unsaved" in block
+        assert "type=ExistingScheduledJob id=1 scope=update unsaved" in block
         assert "no object here is marked `unsaved`" in block
         assert "describe the saved state, not the form's values" in block
 

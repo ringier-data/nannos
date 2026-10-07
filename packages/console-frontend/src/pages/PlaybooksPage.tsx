@@ -26,7 +26,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
 import { NannosForm } from '@/components/nannos/NannosForm';
-import type { SubmitOutcome } from '@nannos/embed-sdk';
+import type { ActionOutcome } from '@nannos/embed-sdk';
 import { getErrorMessage } from '@/lib/utils';
 
 /** "personal" or a group ID string */
@@ -146,7 +146,7 @@ export function PlaybooksPage() {
     onError: () => toast.error('Failed to save playbook'),
   });
 
-  const savePlaybook = async (): Promise<SubmitOutcome> => {
+  const savePlaybook = async (): Promise<ActionOutcome> => {
     try {
       await updatePlaybookMutation.mutateAsync({
         path: { agent_name: selectedAgent, scope: apiScope },
@@ -249,7 +249,7 @@ export function PlaybooksPage() {
               type="Playbook"
               id={`${selectedAgent}/${selectedScope}`}
               fields={{ content: [displayContent, setEditedContent] }}
-              submit={savePlaybook}
+              save={savePlaybook}
             />
             <p className="text-xs text-muted-foreground">
               {isPersonalScope

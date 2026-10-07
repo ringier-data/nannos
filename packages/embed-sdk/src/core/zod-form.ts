@@ -9,7 +9,7 @@
 // `.shape[f].safeParse`.
 
 import { z } from 'zod';
-import type { ApplyResult, FieldSpec, RegisterInput, Scope, SubmitOutcome } from './types';
+import type { ApplyResult, FieldSpec, RegisterInput, Scope, ActionOutcome } from './types';
 
 /** Minimal read/write view of the host's form, by field name. Framework-free:
  *  react-hook-form → `{ get: f => form.getValues(f), set: (f,v) => form.setValue(f,v,opts), snapshot: () => form.getValues() }`. */
@@ -120,8 +120,9 @@ export interface ZodFormRegistrationInput<TState> {
   adapter: FormAdapter;
   /** Bridges for fields with no 1:1 form key (keyed by schema field name). */
   overrides?: Record<string, FieldBridge>;
-  /** The form's own save action, for the agent's (approved) `submit` — see RegisterInput. */
-  submit?: () => SubmitOutcome | Promise<SubmitOutcome>;
+  /** The form's own Save (its button's handler). Offered as the action `save`, marked
+   *  `requiresApproval`: the agent asks, the user clicks Approve, then it runs. */
+  save?: () => ActionOutcome | Promise<ActionOutcome>;
   /** What the agent may `invoke` on this form — see RegisterInput.actions. */
   actions?: RegisterInput['actions'];
   /** See `RegisterInput.isDirty`. */
@@ -137,6 +138,27 @@ export interface ZodFormRegistrationInput<TState> {
  *
  *   nannos.register(zodFormRegistration({ type, id, scope, schema, adapter, overrides }))
  */
+/** What a form's Save is offered as. Approval-gated: it persists the form. */
+export const SAVE_ACTION = 'save';
+
+function withSave(
+  actions: RegisterInput['actions'],
+  save: (() => ActionOutcome | Promise<ActionOutcome>) | undefined,
+): RegisterInput['actions'] {
+  if (!save) return actions;
+  return {
+    ...actions,
+    [SAVE_ACTION]: {
+      label: 'Save',
+      description:
+        "Save this form through its own Save button. Send it alone, after the results of your fills; the " +
+        'user approves it with a click.',
+      requiresApproval: true,
+      run: () => save(),
+    },
+  };
+}
+
 export function zodFormRegistration<TState = Record<string, unknown>>(
   input: ZodFormRegistrationInput<TState>,
 ): RegisterInput<TState> {
@@ -156,8 +178,7 @@ export function zodFormRegistration<TState = Record<string, unknown>>(
     fields,
     fieldSpecs,
     includeValues: input.includeValues,
-    ...(input.submit ? { submit: input.submit } : {}),
-    ...(input.actions ? { actions: input.actions } : {}),
+    ...(input.save || input.actions ? { actions: withSave(input.actions, input.save) } : {}),
     ...(input.isDirty ? { isDirty: input.isDirty } : {}),
     restore: (values) => {
       for (const [field, value] of Object.entries(values as Record<string, unknown>)) {

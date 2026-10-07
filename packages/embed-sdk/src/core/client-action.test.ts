@@ -151,19 +151,21 @@ describe('extractClientActionDirective (envelope demux)', () => {
   });
 });
 
-describe('submit and changed-field marks', () => {
+describe('saving and changed-field marks', () => {
   const target = { type: 'Settings', id: 'me' };
-  function registry(submit?: () => unknown) {
+  // A form's Save, as a form registration offers it: the approval-gated action `save`.
+  function registry(save?: () => unknown) {
     const r = new ObjectRegistry();
     r.register({
       ...target,
       scope: 'update',
       getState: () => ({}),
       apply: () => ({ applied: ['language'], rejected: [] }),
-      ...(submit ? { submit: submit as () => void } : {}),
+      ...(save ? { actions: { save: { label: 'Save', requiresApproval: true, run: save as () => void } } } : {}),
     });
     return r;
   }
+  const save = { kind: 'invoke', target, action: 'save' } as const;
 
   it('records what an apply wrote, with undo, and marks it', async () => {
     const state: Record<string, unknown> = { language: 'en' };
@@ -226,31 +228,31 @@ describe('submit and changed-field marks', () => {
     expect(changes.get(target)).toHaveLength(0);
   });
 
-  it("saves through the host's submit and clears the marks", async () => {
-    const submit = vi.fn(async () => undefined);
+  it("saves through the form's save action once approved, and clears the marks", async () => {
+    const run = vi.fn(async () => undefined);
     const clearChanged = vi.fn();
     const changes = new ChangeStore();
     changes.record(target, { language: 'en' }, ['language'], async () => ['language']);
-    const res = await executeClientAction({ kind: 'submit', target }, { registry: registry(submit), clearChanged, changes });
-    expect(res).toEqual({ ok: true });
+    const res = await executeClientAction(save, { registry: registry(run), clearChanged, changes, approved: true });
+    expect(res).toMatchObject({ ok: true, saved: true });
     expect(changes.get(target)).toHaveLength(0);
-    expect(submit).toHaveBeenCalledOnce();
+    expect(run).toHaveBeenCalledOnce();
     expect(clearChanged).toHaveBeenCalledWith(target);
   });
 
   it('reports a refused save and keeps the marks', async () => {
     const clearChanged = vi.fn();
     const res = await executeClientAction(
-      { kind: 'submit', target },
-      { registry: registry(() => ({ ok: false, detail: 'Name is required' })), clearChanged },
+      save,
+      { registry: registry(() => ({ ok: false, detail: 'Name is required' })), clearChanged, approved: true },
     );
     expect(res).toEqual({ ok: false, reason: 'failed', detail: 'Name is required' });
     expect(clearChanged).not.toHaveBeenCalled();
   });
 
-  it('refuses to submit an object without a save action', async () => {
-    const res = await executeClientAction({ kind: 'submit', target }, { registry: registry() });
-    expect(res).toEqual({ ok: false, reason: 'not-submittable' });
+  it('refuses to save an object without a save action, naming what it offers', async () => {
+    const res = await executeClientAction(save, { registry: registry(), approved: true });
+    expect(res).toEqual({ ok: false, reason: 'unknown-action', detail: 'This object offers no actions.' });
   });
 
   it('says a save landed on a read-only view: no form open, nothing on screen', async () => {
@@ -264,14 +266,19 @@ describe('submit and changed-field marks', () => {
       getState: () => ({}),
       actions: { edit: { label: 'Edit', run: () => ({ ok: true }) } },
     });
-    const res = await executeClientAction({ kind: 'submit', target: { type: 'SubAgent', id: '9' } }, { registry: r });
-    expect(res).toMatchObject({ ok: false, reason: 'not-submittable' });
-    expect(res.ok === false && res.detail).toMatch(/no form is open, so nothing was saved.*It offers: edit\./);
+    const res = await executeClientAction(
+      { kind: 'invoke', target: { type: 'SubAgent', id: '9' }, action: 'save' },
+      { registry: r, approved: true },
+    );
+    expect(res).toMatchObject({ ok: false, reason: 'unknown-action' });
+    expect(res.ok === false && res.detail).toMatch(/no form is open, so nothing was saved.*offers: edit\./);
   });
 
-  it('advertises submittable objects in the manifest', () => {
-    expect(registry(() => true).manifest()[0].submittable).toBe(true);
-    expect(registry().manifest()[0].submittable).toBeUndefined();
+  it('lists a form\'s save as an approval-gated action in the manifest', () => {
+    expect(registry(() => true).manifest()[0].actions).toEqual([
+      { name: 'save', label: 'Save', requiresApproval: true },
+    ]);
+    expect(registry().manifest()[0].actions).toBeUndefined();
   });
 });
 

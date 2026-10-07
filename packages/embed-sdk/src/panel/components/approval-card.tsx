@@ -20,6 +20,7 @@ import {
 import { Textarea } from '../../components/ui/textarea';
 import { cn } from '../../lib/utils';
 import { format, useStrings } from '../../react';
+import { SAVE_ACTION } from '../../core';
 import type { NannosStrings } from '../../i18n/keys';
 import { CLIENT_ACTION_TOOL, clientActionSummaryKey, toolPartTitle } from '../tool-title';
 import { InterruptActions, InterruptCard } from './interrupt-card';
@@ -83,7 +84,7 @@ function argRows(approval: PendingApproval): Array<[string, unknown]> {
  *  args (`{ kind, target_type, target_id }`). Null for every other kind. */
 function actionTarget(
   input: Record<string, unknown>,
-  kind: 'apply' | 'submit' | 'invoke',
+  kind: 'apply' | 'invoke',
 ): { type: string; id: string } | null {
   const directive = input.directive;
   if (typeof directive === 'object' && directive !== null) {
@@ -203,25 +204,21 @@ function ApprovalSection({
   // getState mid-render) → null → the plain args table below.
   const engine = useChatEngineOptional();
   const target = approval.toolName === CLIENT_ACTION_TOOL ? actionTarget(approval.input, 'apply') : null;
-  // A save names the form it saves, as the page labelled it ("Your settings").
-  const submitTarget = approval.toolName === CLIENT_ACTION_TOOL ? actionTarget(approval.input, 'submit') : null;
-  // An action that saves (host-marked requiresApproval) is named the same way, and its
-  // sentence says which button it presses.
+  // An action that saves (requiresApproval) says which button it presses.
   const invokeTarget = approval.toolName === CLIENT_ACTION_TOOL ? actionTarget(approval.input, 'invoke') : null;
-  // Only a save names its form: an action's sentence already names the button, and the
-  // object it hangs on can be a list or a create form whose label would mislead.
-  const submitLabel = submitTarget
-    ? (engine?.core.registry.get(submitTarget.type, submitTarget.id)?.label ?? null)
-    : null;
+  const invokedName = invokeTarget
+    ? ((approval.input.action ?? (approval.input.directive as { action?: unknown } | undefined)?.action) as
+        | string
+        | undefined)
+    : undefined;
+  const invokedHandle = invokeTarget ? engine?.core.registry.get(invokeTarget.type, invokeTarget.id) : undefined;
   const invokedAction = invokeTarget
-    ? (() => {
-        const name = (approval.input.action ?? (approval.input.directive as { action?: unknown } | undefined)?.action) as
-          | string
-          | undefined;
-        const handle = engine?.core.registry.get(invokeTarget.type, invokeTarget.id);
-        return (name && handle?.actions?.[name]?.label) || name || null;
-      })()
+    ? (invokedName && invokedHandle?.actions?.[invokedName]?.label) || invokedName || null
     : null;
+  // A form's Save also names the form, as the page labelled it ("Your settings"). Any
+  // other action does not: the object it hangs on can be a list or a create form
+  // whose label would mislead.
+  const saveLabel = invokedName === SAVE_ACTION ? (invokedHandle?.label ?? null) : null;
   let currentState: Record<string, unknown> | null = null;
   if (target && engine && rows.length > 0) {
     try {
@@ -258,11 +255,11 @@ function ApprovalSection({
       state="approval-requested"
       className={cn(divided && 'border-t')}
     >
-      {/* Wraps: a long title (a submit's form label) must not run off a narrow dock. */}
+      {/* Wraps: a long title (a save's form label) must not run off a narrow dock. */}
       <ConfirmationTitle className="flex min-w-0 flex-wrap items-baseline gap-x-1.5">
         <span className="min-w-0 font-bold text-xs [overflow-wrap:anywhere]">
           {toolPartTitle(approval.toolName, approval.input)}{summary && (`: ${summary}`)}
-          {submitLabel && ` (${submitLabel})`}
+          {saveLabel && ` (${saveLabel})`}
         </span>
         {rows.length === 1 && !currentState && (
           <span

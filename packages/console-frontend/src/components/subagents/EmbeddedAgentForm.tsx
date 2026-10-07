@@ -17,7 +17,7 @@ import {
 } from '@/api/generated/@tanstack/react-query.gen';
 import type { EmbedBindingProbe } from '@/api/generated/types.gen';
 import { getErrorMessage } from '@/lib/utils';
-import type { SubmitOutcome } from '@nannos/embed-sdk';
+import type { ActionOutcome } from '@nannos/embed-sdk';
 import { Link } from 'react-router';
 
 interface EmbeddedAgentFormProps {
@@ -71,7 +71,7 @@ export function EmbeddedAgentForm({ onCancel, onCreated }: EmbeddedAgentFormProp
     setProbe(null);
   };
 
-  const save = async (): Promise<SubmitOutcome> => {
+  const save = async (): Promise<ActionOutcome> => {
     if (busy) return { ok: false, detail: 'A test or save is already in progress' };
     if (!trimmedUrl) return { ok: false, detail: 'The base URL is required' };
     if (azps.length === 0) return { ok: false, detail: 'At least one OAuth client id is required' };
@@ -95,7 +95,7 @@ export function EmbeddedAgentForm({ onCancel, onCreated }: EmbeddedAgentFormProp
         type="EmbeddedAgent"
         id={undefined}
         fields={{ base_url: [baseUrl, changeBaseUrl], azps: [azps, (next: string[]) => setAzpsText(next.join('\n'))] }}
-        submit={save}
+        save={save}
       />
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Main Form Column */}

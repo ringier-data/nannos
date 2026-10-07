@@ -22,7 +22,7 @@ Steps:
    scripts/check.py) — executable files make the agent run them in a sandbox.
 5. Decide where it lives:
    - Registry editor open (/app/skill-registry) → apply the Skill fields (name,
-     description, instructions, visibility), then submit it when the user wants it saved.
+     description, instructions, visibility), then invoke `save` when the user wants it saved.
    - A sub-agent's skill editor open → apply the SubAgentSkill fields there.
    - No form open → console_create_skill with agent_name set explicitly (the target
      sub-agent's exact name, or "orchestrator" for the user's main agent — never the

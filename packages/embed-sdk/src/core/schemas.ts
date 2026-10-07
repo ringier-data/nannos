@@ -52,16 +52,8 @@ export const readCurrentPageDirective = z.object({
   kind: z.literal('read_current_page'),
 });
 
-/** Save a registered object through the host's own save action — the one kind
- *  that persists anything, so it is the one the agent's risk gate asks about. */
-export const submitDirective = z.object({
-  kind: z.literal('submit'),
-  target: z.object({ type: z.string(), id: z.string() }),
-});
-
 export const clientActionDirective = z.discriminatedUnion('kind', [
   applyDirective,
-  submitDirective,
   highlightDirective,
   navigateDirective,
   readCurrentPageDirective,

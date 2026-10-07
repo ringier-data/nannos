@@ -17,7 +17,7 @@ import { updateCatalogMutation, getCatalogQueryKey, listCatalogsQueryKey } from 
 import type { Catalog } from '@/api/generated/types.gen';
 import { getErrorMessage } from '@/lib/utils';
 import { NannosForm } from '@/components/nannos/NannosForm';
-import type { SubmitOutcome } from '@nannos/embed-sdk';
+import type { ActionOutcome } from '@nannos/embed-sdk';
 
 interface EditCatalogDialogProps {
   catalog: Catalog;
@@ -43,7 +43,7 @@ export function EditCatalogDialog({ catalog, open, onOpenChange }: EditCatalogDi
     },
   });
 
-  const save = async (): Promise<SubmitOutcome> => {
+  const save = async (): Promise<ActionOutcome> => {
     if (!name.trim()) {
       toast.error('Name is required');
       return { ok: false, detail: 'Name is required' };
@@ -75,7 +75,7 @@ export function EditCatalogDialog({ catalog, open, onOpenChange }: EditCatalogDi
           type="Catalog"
           id={catalog.id}
           fields={{ name: [name, setName], description: [description, setDescription] }}
-          submit={save}
+          save={save}
         />
         <form onSubmit={handleSubmit}>
           <DialogHeader>

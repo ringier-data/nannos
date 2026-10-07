@@ -10,7 +10,7 @@ directive against host-registered handles. Two delivery modes:
   wraps it in a `urn:nannos:a2a:client-action:1.0` status message. No result
   comes back (the user sees the effect immediately).
 
-- ``apply`` / ``submit`` / ``read_current_page`` / ``navigate`` / ``invoke`` — a ROUND TRIP: the tool
+- ``apply`` / ``read_current_page`` / ``navigate`` / ``invoke`` — a ROUND TRIP: the tool
   ``interrupt()``s with the directive in the
   interrupt value; the executor emits it as ``input_required`` (same extension,
   ``{"request": ...}`` payload), the SDK executes it and auto-resumes with a
@@ -18,14 +18,13 @@ directive against host-registered handles. Two delivery modes:
   agent therefore KNOWS which fields landed and which were rejected, instead of
   assuming success. The directive rides the interrupt value ONLY — nothing is
   emitted before ``interrupt()``, so the resume replay of this handler cannot
-  double-execute. ``apply`` only writes into the host's form (validated, unsaved);
-  ``submit`` asks the host to SAVE the form through its own save action — the one
-  kind that persists anything, so it is the one the risk gate always asks about.
+  double-execute. ``apply`` only writes into the host's form (validated, unsaved).
   ``invoke`` runs a named action a registered object lists in the manifest (enter
-  edit mode, open a create dialog, start a check the user completes). By the host
-  contract an action never saves — unless the host marked it ``requiresApproval``, and
-  then the user approves it with a click, like a save; the result carries the page after it settled, so
-  the model sees the form the action opened. ``navigate`` is refused while the
+  edit mode, open a create dialog, start a check the user completes — or save: a form
+  offers its Save as the action ``save``). An action the host marked
+  ``requiresApproval`` persists something, so the risk gate asks the user, and only
+  their click runs it; any other action runs freely. The result carries the page after
+  it settled, so the model sees the form the action opened. ``navigate`` is refused while the
   assistant has unsaved changes on an open form, unless ``discard_changes`` is set
   — which the model may only do after the user said to discard.
 
@@ -53,22 +52,20 @@ CLIENT_ACTION_TOOL_NAME = "client_action"
 class ClientActionInput(BaseModel):
     """Arguments for a client-action directive."""
 
-    kind: Literal["apply", "highlight", "invoke", "navigate", "read_current_page", "submit"] = Field(
+    kind: Literal["apply", "highlight", "invoke", "navigate", "read_current_page"] = Field(
         description=(
             "apply: write field values into a registered on-screen object (e.g. fill a form) — "
             "nothing is saved, the changed fields are marked for the user; returns which fields "
             "landed vs. were rejected; "
-            "submit: save a registered form through the application's own save action (only for "
-            "objects marked `submittable`; the user approves first) — use after apply when the "
-            "user wants it saved; "
             "highlight: draw the user's attention to a registered object/field; "
             "navigate: ask the host app to open a path (refused while you have unsaved changes on "
             "an open form — see discard_changes); "
             "invoke: run a named action a registered object offers — only one its manifest entry lists "
             "under `actions` (e.g. `edit` to put a detail page in edit mode before apply, open a create "
-            "dialog that has no route, run a watch's check). An action never saves anything — except one marked "
-            "`requires approval`: it saves, the user approves it with a click like a save, so only use it "
-            "when they want that done; the result "
+            "dialog that has no route, run a watch's check, save a form with its `save`). An action marked "
+            "`requires approval` (a form's `save`, \"run now\", \"set as default\") changes something for "
+            "real: the user approves it with a click, so use it only when they want that done, and send "
+            "it alone after the results of your fills; the result "
             "carries the page after it ran, including any form it opened; "
             "read_current_page: ask the application for a snapshot of what the user currently "
             "sees (page state the host exposes: rows, filters, unsaved values) — use when "
@@ -159,24 +156,19 @@ def render_client_action_result(kind: str, result: Any) -> str:
     if not result.get("ok"):
         reason = result.get("reason") or "unknown"
         detail = result.get("detail") or result.get("message") or ""
-        if reason == "not-submittable":
-            if detail:
-                # The form closed under the approval (reload, edit mode left): the
-                # fill is gone, so "use the page's own button" points at nothing.
-                return (
-                    f"The action FAILED: nothing was saved. {detail} Tell the user plainly; to save, "
-                    "fill the form again and ask for approval again."
-                )
-            return (
-                "The action FAILED: this object cannot be saved by the assistant. Ask the user to "
-                "save it with the page's own button."
-            )
         if reason == "unknown-target":
             return (
                 "The action FAILED: the target object is no longer on the user's screen "
                 "(they may have navigated away). Check <current_page>/<client_objects> and adjust."
             )
         if reason == "unknown-action":
+            if "no form is open" in detail:
+                # A save approved after the form closed (reload, edit mode left): the fill
+                # is gone, so "use the page's own button" would point at nothing.
+                return (
+                    f"The action FAILED: nothing was saved. {detail} Tell the user plainly; to save, "
+                    "open the form again (its `edit`), fill it and ask for approval again."
+                )
             return (
                 "The action FAILED: the object offers no such action. Only actions listed under the "
                 "object's `actions` in <client_objects> (or the latest page snapshot) can be invoked. " + detail
@@ -188,8 +180,8 @@ def render_client_action_result(kind: str, result: Any) -> str:
                 + (f" ({detail})" if detail else "")
                 + ". Ask the user whether to save them first or discard them. Never discard on your "
                 "own: call navigate again with discard_changes=true only after the user said to "
-                "discard; if they want them saved, save first (kind='submit' when the form is "
-                "`submittable`, otherwise they save it themselves)."
+                "discard; if they want them saved, save first (invoke the form's `save` when it "
+                "offers one, otherwise they save it themselves)."
             )
         if reason == "no-result":
             return (
@@ -230,12 +222,10 @@ def render_client_action_result(kind: str, result: Any) -> str:
             )
         lines.append(
             "Nothing is saved yet — the changed fields are marked for the user. If they want it "
-            "saved and the object is `submittable`, use kind='submit'; otherwise they save it themselves."
+            "saved, invoke the object's `save` (alone, next step) when it offers one; otherwise they "
+            "save it themselves."
         )
         return " ".join(lines)
-    if kind == "submit":
-        detail = result.get("detail") or result.get("message") or ""
-        return ("The application saved the form." + (f" {detail}" if detail else "")).strip()
     if kind == "navigate":
         content = result.get("content")
         landed = (
@@ -285,10 +275,10 @@ async def _client_action_handler(
     tool_call_id: str = "",
 ) -> str:
     directive: dict[str, Any] = {"kind": kind}
-    if kind in ("apply", "highlight", "submit", "invoke"):
+    if kind in ("apply", "highlight", "invoke"):
         if not target_type or not target_id:
             return (
-                "Error: apply/highlight/submit/invoke require target_type and target_id from the client "
+                "Error: apply/highlight/invoke require target_type and target_id from the client "
                 "objects manifest."
             )
         directive["target"] = {"type": target_type, "id": target_id}
@@ -317,7 +307,7 @@ async def _client_action_handler(
     # ``navigate`` too: the page context and open objects the model sees were taken
     # when the turn began, so without the landed page in the result it cannot tell a
     # navigation happened — and navigates again until loop detection stops it.
-    if kind in ("apply", "read_current_page", "submit", "navigate", "invoke"):
+    if kind in ("apply", "read_current_page", "navigate", "invoke"):
         # ROUND TRIP: pause the graph until the browser reports what happened.
         # The directive rides the interrupt value (NOT the custom stream): the
         # resume replays this handler from the top, and anything emitted before
@@ -352,13 +342,13 @@ def create_client_action_tool() -> StructuredTool:
             "Act on the user's application. Use kind='apply' to fill/update a registered "
             "on-screen form with values (listed in <client_objects>; nothing is saved — the "
             "changed fields are marked for the user; the result tells you which fields "
-            "landed vs. were rejected), kind='submit' to save a `submittable` form through the "
-            "application's own save action (the user approves first — only when they want it "
-            "saved), kind='invoke' to run an action an object lists under `actions` (enter edit "
-            "mode, open a dialog, start a check — never saves unless marked `requires approval`), "
+            "landed vs. were rejected), kind='invoke' to run an action an object lists under "
+            "`actions` (enter edit mode, open a dialog, start a check, or save a form with its "
+            "`save` — an action marked `requires approval` changes something for real, so the user "
+            "approves it first; only when they want it done), "
             "kind='highlight' to point at an "
             "object/field, kind='navigate' to open a path, kind='read_current_page' to get a "
-            "sanitized snapshot of what the user currently sees. apply/highlight/submit/invoke only "
+            "sanitized snapshot of what the user currently sees. apply/highlight/invoke only "
             "target objects present in the manifest."
         ),
         args_schema=ClientActionInput,

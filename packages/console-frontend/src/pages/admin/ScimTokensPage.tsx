@@ -8,7 +8,7 @@ import {
   listScimTokensApiV1AdminScimTokensGetQueryKey,
   revokeScimTokenApiV1AdminScimTokensTokenIdDeleteMutation,
 } from '@/api/generated/@tanstack/react-query.gen';
-import type { SubmitOutcome } from '@nannos/embed-sdk';
+import type { ActionOutcome } from '@nannos/embed-sdk';
 import { getErrorMessage } from '@/lib/utils';
 import type { ScimToken, ScimTokenCreate, ScimTokenCreated } from '@/api/generated/types.gen';
 import { Pagination } from '@/components/admin/Pagination';
@@ -105,7 +105,7 @@ export function ScimTokensPage() {
   };
 
   // createMutation's onError toasts; this only reports the outcome to the assistant.
-  const create = async (): Promise<SubmitOutcome> => {
+  const create = async (): Promise<ActionOutcome> => {
     if (!name.trim()) return { ok: false, detail: 'Name is required' };
     const body: ScimTokenCreate = { name };
     if (description) body.description = description;
@@ -283,7 +283,7 @@ export function ScimTokensPage() {
             type="ScimToken"
             id={undefined}
             fields={{ name: [name, setName], description: [description, setDescription], expiresAt: [expiresAt, setExpiresAt] }}
-            submit={create}
+            save={create}
           />
           <DialogHeader>
             <DialogTitle>Create SCIM Token</DialogTitle>

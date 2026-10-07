@@ -14,7 +14,7 @@ import {
   type NannosCore,
   type ObjectHandle,
   type Scope,
-  type SubmitOutcome,
+  type ActionOutcome,
   type ZodObjectLike,
 } from '../core';
 import { useAssistant } from './provider';
@@ -45,10 +45,10 @@ export interface UseNannosZodFormOptions<TState> {
   setValueOptions?: unknown;
   /** Override the core from context (rarely needed — <NannosProvider> supplies it). */
   core?: NannosCore | null;
-  /** The form's own save action (its Save button's handler), so the agent can propose
-   *  saving — the user approves first. Read at call time: a fresh function each render
-   *  does not re-register. Its presence is part of the registration. */
-  submit?: () => SubmitOutcome | Promise<SubmitOutcome>;
+  /** The form's own Save (its button's handler), offered as the approval-gated action
+   *  `save`. Read at call time: a fresh function each render does not re-register. Its
+   *  presence is part of the registration. */
+  save?: () => ActionOutcome | Promise<ActionOutcome>;
   /** What the agent may `invoke` on this form (open a sub-dialog, run a check) — see
    *  `RegisterInput.actions`. Never something that saves. */
   actions?: Record<string, ObjectAction>;
@@ -74,16 +74,16 @@ const DEFAULT_SET_OPTIONS = { shouldDirty: true, shouldValidate: true, shouldTou
 export function useNannosZodForm<TState = Record<string, unknown>>(
   options: UseNannosZodFormOptions<TState>,
 ): void {
-  const { form, type, id, scope, schema, overrides, includeValues, label, setValueOptions, submit, actions, isDirty } =
+  const { form, type, id, scope, schema, overrides, includeValues, label, setValueOptions, save, actions, isDirty } =
     options;
   const isDirtyRef = useRef(isDirty);
   isDirtyRef.current = isDirty;
   const tracksDirty = !!isDirty;
   const ctxCore = useAssistant().core;
   const core = options.core ?? ctxCore;
-  const submitRef = useRef(submit);
-  submitRef.current = submit;
-  const submittable = !!submit;
+  const saveRef = useRef(save);
+  saveRef.current = save;
+  const savable = !!save;
   const actionsRef = useRef(actions);
   actionsRef.current = actions;
   const actionsSig = actionsSignature(actions);
@@ -118,7 +118,7 @@ export function useNannosZodForm<TState = Record<string, unknown>>(
         overrides,
         includeValues,
         label,
-        ...(submittable ? { submit: () => submitRef.current?.() } : {}),
+        ...(savable ? { save: () => saveRef.current?.() } : {}),
         ...(tracksDirty ? { isDirty: () => isDirtyRef.current?.() === true } : {}),
         actions: stableActions(actionsRef),
       }),
@@ -126,5 +126,5 @@ export function useNannosZodForm<TState = Record<string, unknown>>(
     return () => handle.dispose();
     // Re-register on identifying inputs + the schema/override SHAPE (shapeSig).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [core, form, type, id, scope, includeValues, label, shapeSig, submittable, actionsSig, tracksDirty]);
+  }, [core, form, type, id, scope, includeValues, label, shapeSig, savable, actionsSig, tracksDirty]);
 }

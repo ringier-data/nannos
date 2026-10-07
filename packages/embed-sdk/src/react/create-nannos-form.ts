@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { useNannosZodForm, type FormLike } from './use-nannos-form';
-import type { ObjectAction, SubmitOutcome, ZodObjectLike } from '../core';
+import type { ObjectAction, ActionOutcome, ZodObjectLike } from '../core';
 import { useAssistant } from './provider';
 import { actionsSignature, stableActions } from './stable-actions';
 import {
@@ -23,8 +23,8 @@ export interface UseNannosFormOptions {
   /** Parent id, for `nested` types (e.g. the campaign a theme belongs to). */
   parentId?: RouteId;
   includeValues?: boolean;
-  /** The form's own save action — see `UseNannosZodFormOptions.submit`. */
-  submit?: () => SubmitOutcome | Promise<SubmitOutcome>;
+  /** The form's own Save — see `UseNannosZodFormOptions.save`. */
+  save?: () => ActionOutcome | Promise<ActionOutcome>;
   /** What the agent may `invoke` on this form — see `UseNannosZodFormOptions.actions`. */
   actions?: Record<string, ObjectAction>;
   /** Whether the form holds unsaved edits — see `UseNannosZodFormOptions.isDirty`. */
@@ -52,7 +52,7 @@ export function createNannosForm(registry: ObjectTypeRegistry) {
     id,
     parentId,
     includeValues = true,
-    submit,
+    save,
     actions,
     isDirty,
   }: UseNannosFormOptions): void {
@@ -76,7 +76,7 @@ export function createNannosForm(registry: ObjectTypeRegistry) {
       overrides: definition?.overrides,
       includeValues,
       label: definition ? deriveManifestLabel(definition, id, parentId) : type,
-      submit,
+      save,
       actions,
       isDirty,
     });

@@ -15,7 +15,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { parseAzps } from '@/components/subagents/embedBinding';
 import { NannosForm } from '@/components/nannos/NannosForm';
 import type { EmbedBindingUpsert } from '@/api/generated/types.gen';
-import type { SubmitOutcome } from '@nannos/embed-sdk';
+import type { ActionOutcome } from '@nannos/embed-sdk';
 
 interface EmbedBindingDialogProps {
   /** The sub-agent being bound; names the form for the assistant. */
@@ -29,7 +29,7 @@ interface EmbedBindingDialogProps {
   initial?: { baseUrl: string; azps: string[] };
   pending?: boolean;
   /** Resolves `{ ok: false, detail }` when nothing was saved. */
-  onSubmit: (values: EmbedBindingUpsert) => Promise<SubmitOutcome>;
+  onSubmit: (values: EmbedBindingUpsert) => Promise<ActionOutcome>;
 }
 
 /**
@@ -76,7 +76,7 @@ interface EmbedBindingFormProps {
   submitLabel: string;
   onCancel: () => void;
   /** Resolves `{ ok: false, detail }` when nothing was saved. */
-  onSubmit: (values: EmbedBindingUpsert) => Promise<SubmitOutcome>;
+  onSubmit: (values: EmbedBindingUpsert) => Promise<ActionOutcome>;
 }
 
 function EmbedBindingForm({ subAgentId, initial, pending, submitLabel, onCancel, onSubmit }: EmbedBindingFormProps) {
@@ -86,7 +86,7 @@ function EmbedBindingForm({ subAgentId, initial, pending, submitLabel, onCancel,
   const azps = parseAzps(azpsText);
   const canSubmit = baseUrl.trim().length > 0 && azps.length > 0 && !pending;
 
-  const submit = async (): Promise<SubmitOutcome> => {
+  const submit = async (): Promise<ActionOutcome> => {
     if (pending) return { ok: false, detail: 'A save is already in progress' };
     if (!baseUrl.trim()) return { ok: false, detail: 'The authority origin is required' };
     if (azps.length === 0) return { ok: false, detail: 'At least one OAuth client id is required' };
@@ -100,7 +100,7 @@ function EmbedBindingForm({ subAgentId, initial, pending, submitLabel, onCancel,
         parentId={subAgentId}
         id={initial ? subAgentId : undefined}
         fields={{ base_url: [baseUrl, setBaseUrl], azps: [azps, (next: string[]) => setAzpsText(next.join('\n'))] }}
-        submit={submit}
+        save={submit}
       />
       <div className="space-y-4">
         <div className="space-y-1.5">

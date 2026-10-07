@@ -1,7 +1,8 @@
 import type { ObjectRegistry } from './registry';
 import type { AppliedChange, ChangeStore } from './change-store';
-import type { ApplyResult, SubmitOutcome } from './types';
+import type { ApplyResult, ActionOutcome } from './types';
 import { clientActionDirective } from './schemas';
+import { SAVE_ACTION } from './zod-form';
 import { sanitizeReadResult, sanitizeReadResultWithScreen } from './page-read';
 import { CLIENT_ACTION_EXT } from './extensions';
 
@@ -36,7 +37,7 @@ export interface ClientActionDeps {
   /** Mark the fields an `apply` wrote, so the user sees what changed (nothing is
    *  saved yet). Each change can undo itself; `captured` is what `beforeApply` read. */
   markChanged?: (target: { type: string; id: string }, changes: AppliedChange[], captured: unknown) => void;
-  /** Drop the marks of a target — after a successful `submit` saved it. */
+  /** Drop the marks of a target — after an action that saves (its `save`) succeeded. */
   clearChanged?: (target: { type: string; id: string }) => void;
   /** Answers `read_current_page`: the raw "what does the user see" object (the
    *  provider assembles it from the merged page context + registered readers).
@@ -71,7 +72,6 @@ export type ClientActionResult =
         | 'unknown-target'
         | 'unknown-action'
         | 'unsupported'
-        | 'not-submittable'
         | 'unsaved-changes'
         | 'failed';
       detail?: string;
@@ -81,9 +81,9 @@ export type ClientActionResult =
  * Sandboxed executor of `urn:nannos:a2a:client-action` directives. It runs ONLY
  * against handles the host registered; an unknown target is refused, not guessed.
  *
- * There is NO confirm layer here: approval for the consequential kind (`submit`,
- * which saves) happens ONCE, upstream, at the agent's tool-call HITL gate (the
- * `client_action` tool is risk-scored by kind — see tool_risk_scorer). An `apply`
+ * There is NO confirm layer here: approval for an action that saves (marked
+ * `requiresApproval`, e.g. a form's `save`) happens ONCE, upstream, at the agent's
+ * tool-call HITL gate, and the run carries it (`deps.approved`). An `apply`
  * only writes into the unsaved form, so it runs without approval and its fields are
  * marked as changed (`markChanged`). The `confirm` field on a directive is ignored.
  */
@@ -166,35 +166,6 @@ export async function executeClientAction(
       }
       return { ok: true };
     }
-    case 'submit': {
-      const handle = deps.registry.get(directive.target.type, directive.target.id);
-      if (!handle) return { ok: false, reason: 'unknown-target' };
-      if (!handle.submit) {
-        // A save approved after the form closed (a reload, the user left edit
-        // mode) lands on the object's VIEW: the fill it was meant to save is
-        // gone, and without saying so the agent told the user it was still on
-        // screen and to press a Save button that does not exist.
-        const offered = Object.keys(handle.actions ?? {});
-        return {
-          ok: false,
-          reason: 'not-submittable',
-          ...(handle.scope === 'view' && {
-            detail:
-              'It is shown read-only right now: no form is open, so nothing was saved and no unsaved ' +
-              'values are on screen.' +
-              (offered.length ? ` It offers: ${offered.join(', ')}.` : ''),
-          }),
-        };
-      }
-      const outcome = normalizeSubmit(await handle.submit());
-      if (outcome.ok) {
-        deps.changes?.clear(directive.target);
-        deps.clearChanged?.(directive.target);
-      }
-      return outcome.ok
-        ? { ok: true, ...(outcome.detail ? { detail: outcome.detail } : {}) }
-        : { ok: false, reason: 'failed', ...(outcome.detail ? { detail: outcome.detail } : {}) };
-    }
     case 'highlight': {
       if (!deps.registry.get(directive.target.type, directive.target.id))
         return { ok: false, reason: 'unknown-target' };
@@ -207,10 +178,19 @@ export async function executeClientAction(
       const action = handle.actions?.[directive.action];
       if (!action) {
         const offered = Object.keys(handle.actions ?? {});
+        const offers = offered.length ? `This object offers: ${offered.join(', ')}.` : 'This object offers no actions.';
         return {
           ok: false,
           reason: 'unknown-action',
-          detail: offered.length ? `This object offers: ${offered.join(', ')}.` : 'This object offers no actions.',
+          // A save approved after the form closed (a reload, the user left edit mode)
+          // lands on the object's VIEW: the fill it was meant to save is gone, and
+          // without saying so the agent told the user it was still on screen and to
+          // press a Save button that does not exist.
+          detail:
+            directive.action === SAVE_ACTION && handle.scope === 'view'
+              ? 'It is shown read-only right now: no form is open, so nothing was saved and no unsaved ' +
+                `values are on screen. ${offers}`
+              : offers,
         };
       }
       if (action.requiresApproval && !deps.approved) {
@@ -222,11 +202,17 @@ export async function executeClientAction(
       }
       let outcome: { ok: boolean; detail?: string };
       try {
-        outcome = normalizeSubmit(await action.run(directive.args ?? {}));
+        outcome = normalizeOutcome(await action.run(directive.args ?? {}));
       } catch (err) {
         outcome = { ok: false, detail: err instanceof Error ? err.message : String(err) };
       }
       if (!outcome.ok) return { ok: false, reason: 'failed', ...(outcome.detail ? { detail: outcome.detail } : {}) };
+      // It saved: whatever the assistant filled into this object is saved now, so its
+      // marks go (a form's `save` is such an action).
+      if (action.requiresApproval) {
+        deps.changes?.clear(directive.target);
+        deps.clearChanged?.(directive.target);
+      }
       // An action usually opens something that registers its own form (a dialog, edit
       // mode): hand the agent the page as it settled, like a navigate.
       await settleRegistrations(deps.registry);
@@ -318,7 +304,7 @@ function sameValue(a: unknown, b: unknown): boolean {
   }
 }
 
-function normalizeSubmit(outcome: SubmitOutcome): { ok: boolean; detail?: string } {
+function normalizeOutcome(outcome: ActionOutcome): { ok: boolean; detail?: string } {
   if (outcome === false) return { ok: false };
   if (outcome && typeof outcome === 'object') return { ok: outcome.ok, detail: outcome.detail };
   return { ok: true };
@@ -352,9 +338,6 @@ export function directiveFromToolArgs(args: unknown): unknown | null {
     case 'apply':
       if (!target) return null;
       return { kind, target, values: a?.values ?? {} };
-    case 'submit':
-      if (!target) return null;
-      return { kind, target };
     case 'highlight':
       if (!target) return null;
       return { kind, target, ...(typeof a?.field === 'string' && { field: a.field }) };

@@ -11,7 +11,7 @@ import {
   testOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdTestPostMutation,
   updateOutboundScimEndpointApiV1AdminOutboundScimEndpointsEndpointIdPatchMutation,
 } from '@/api/generated/@tanstack/react-query.gen';
-import type { SubmitOutcome } from '@nannos/embed-sdk';
+import type { ActionOutcome } from '@nannos/embed-sdk';
 import { getErrorMessage } from '@/lib/utils';
 import type { OutboundScimEndpoint, OutboundScimEndpointUpdate } from '@/api/generated/types.gen';
 import { Pagination } from '@/components/admin/Pagination';
@@ -160,7 +160,7 @@ export function OutboundScimPage() {
   };
 
   // The mutations' onError toasts; create/update only report the outcome to the assistant.
-  const create = async (): Promise<SubmitOutcome> => {
+  const create = async (): Promise<ActionOutcome> => {
     // The same fields the Add Endpoint button requires; the bearer token is typed by the user only.
     if (!name.trim() || !endpointUrl.trim()) return { ok: false, detail: 'Name and endpoint URL are required' };
     if (!bearerToken.trim()) return { ok: false, detail: 'The user must enter the bearer token first' };
@@ -196,7 +196,7 @@ export function OutboundScimPage() {
     setEditDialog({ open: true, endpoint });
   };
 
-  const update = async (): Promise<SubmitOutcome> => {
+  const update = async (): Promise<ActionOutcome> => {
     if (!editDialog.endpoint) return { ok: false, detail: 'No endpoint is being edited' };
     if (!editName.trim() || !editEndpointUrl.trim()) return { ok: false, detail: 'Name and endpoint URL are required' };
     const body: OutboundScimEndpointUpdate = {
@@ -391,7 +391,7 @@ export function OutboundScimPage() {
               pushGroups: [pushGroups, setPushGroups],
               isMcpGateway: [isMcpGateway, setIsMcpGateway],
             }}
-            submit={create}
+            save={create}
           />
           <DialogHeader>
             <DialogTitle>Add Outbound SCIM Endpoint</DialogTitle>
@@ -480,7 +480,7 @@ export function OutboundScimPage() {
               isMcpGateway: [editIsMcpGateway, setEditIsMcpGateway],
               enabled: [editEnabled, setEditEnabled],
             }}
-            submit={update}
+            save={update}
           />
           <DialogHeader>
             <DialogTitle>Edit Endpoint</DialogTitle>

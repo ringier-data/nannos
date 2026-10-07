@@ -55,7 +55,7 @@ import { totalCountFrom } from '@/api/total-count';
 import { useDebouncedValue } from '@/hooks/use-debounced-value';
 import { NannosForm } from '@/components/nannos/NannosForm';
 import { NannosActions } from '@/components/nannos/NannosActions';
-import type { SubmitOutcome } from '@nannos/embed-sdk';
+import type { ActionOutcome } from '@nannos/embed-sdk';
 import { getErrorMessage } from '@/lib/utils';
 
 const VERSION_PAGE_SIZE = 20;
@@ -216,7 +216,7 @@ export function VersionSidebar({
     },
   });
 
-  const submitVersionForApproval = async (): Promise<SubmitOutcome> => {
+  const submitVersionForApproval = async (): Promise<ActionOutcome> => {
     if (submitVersion === null) return { ok: false, detail: 'No version selected' };
     if (!submitChangeSummary.trim()) return { ok: false, detail: 'A change summary is required' };
     try {
@@ -699,7 +699,7 @@ export function VersionSidebar({
             type="SubAgentApprovalRequest"
             id={subAgent.id}
             fields={{ change_summary: [submitChangeSummary, setSubmitChangeSummary] }}
-            submit={submitVersionForApproval}
+            save={submitVersionForApproval}
           />
           <DialogHeader>
             <DialogTitle>Submit Version {submitVersion} for Approval</DialogTitle>

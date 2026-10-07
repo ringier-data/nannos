@@ -91,7 +91,7 @@ import { toast } from 'sonner';
 import { DeliveryChannelOptions, DeliveryReachabilityNote } from '@/components/scheduler/DeliveryChannelOptions';
 import { NannosForm } from '@/components/nannos/NannosForm';
 import { AssistantChangesBar } from '@/components/nannos/AssistantChangesBar';
-import { useObjectStateAdapter, type ObjectAction, type SubmitOutcome } from '@nannos/embed-sdk';
+import { useObjectStateAdapter, type ObjectAction, type ActionOutcome } from '@nannos/embed-sdk';
 
 /** The fields the create form shows a server-side refusal under. */
 const FORM_ERROR_FIELDS = new Set([
@@ -530,7 +530,7 @@ function CreateJobDialog({
   // ── Submission ────────────────────────────────────────────────────────────
   const [submitting, setSubmitting] = useState(false);
 
-  // Also the assistant's `submit`: it reports what the form shows when nothing was created.
+  // Also the assistant's `save`: it reports what the form shows when nothing was created.
   // "Run check" for the assistant: the watch section's own call (see WatchFields).
   const runCheckRef = useRef<(() => Promise<CheckOutcome>) | undefined>(undefined);
   const runCheckAction: ObjectAction = {
@@ -541,7 +541,7 @@ function CreateJobDialog({
     run: () => runCheckRef.current?.() ?? { ok: false, detail: 'The check section is not on screen.' },
   };
 
-  async function handleSubmit(): Promise<SubmitOutcome> {
+  async function handleSubmit(): Promise<ActionOutcome> {
     // Schedule and name errors are per-field too, so nothing about what to fix is
     // left to a single sentence above the footer.
     const scheduleErrors: Record<string, string> = {};
@@ -705,7 +705,7 @@ function CreateJobDialog({
           type="ScheduledJob"
           id={undefined}
           form={nannosForm}
-          submit={handleSubmit}
+          save={handleSubmit}
           actions={form.job_type === 'watch' ? { run_check: runCheckAction } : undefined}
         />
         <DialogHeader>

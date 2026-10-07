@@ -118,7 +118,7 @@ import type { SubAgentStatus } from '@/components/subagents/types';
 import { client } from '@/api/generated/client.gen';
 import { Markdown } from '@/components/ui/markdown';
 import { NannosChatScope } from '@nannos/embed-sdk/panel';
-import type { ObjectAction, SubmitOutcome } from '@nannos/embed-sdk';
+import type { ObjectAction, ActionOutcome } from '@nannos/embed-sdk';
 import { PlaygroundChatPanel } from '@/components/subagents/PlaygroundChatPanel';
 import { SkillEditorModal } from '@/components/skills/SkillEditorModal';
 import { SkillRegistryBrowseDialog } from '@/components/skills/SkillRegistryBrowseDialog';
@@ -883,7 +883,7 @@ export function SubAgentDetailPage() {
   };
 
   // The assistant's save: the same as the Save button, which only opens the summary dialog.
-  const openSaveDialog = (): SubmitOutcome => {
+  const openSaveDialog = (): ActionOutcome => {
     setShowChangeSummaryDialog(true);
     return {
       ok: true,
@@ -891,7 +891,7 @@ export function SubAgentDetailPage() {
     };
   };
 
-  const handleSaveWithSummary = async (summary: string): Promise<SubmitOutcome> => {
+  const handleSaveWithSummary = async (summary: string): Promise<ActionOutcome> => {
     if (!subAgent || !id) return { ok: false, detail: 'Sub-agent not loaded' };
 
     let typeSpecificConfig: any = {};
@@ -1243,7 +1243,7 @@ export function SubAgentDetailPage() {
     });
   };
 
-  const handleSubmitForApproval = async (): Promise<SubmitOutcome> => {
+  const handleSubmitForApproval = async (): Promise<ActionOutcome> => {
     if (!id) return { ok: false, detail: 'Sub-agent not loaded' };
     if (!submitChangeSummary.trim()) return { ok: false, detail: 'A change summary is required' };
     const submitting = submitMutation.mutateAsync({
@@ -1698,7 +1698,7 @@ export function SubAgentDetailPage() {
                     id={subAgent.id}
                     fields={nannosEditFields}
                     dirty={hasUnsavedChanges}
-                    submit={openSaveDialog}
+                    save={openSaveDialog}
                     actions={pageActions}
                   />
                 ) : (
@@ -3056,7 +3056,7 @@ export function SubAgentDetailPage() {
             type="SubAgentApprovalRequest"
             id={subAgent.id}
             fields={{ change_summary: [submitChangeSummary, setSubmitChangeSummary] }}
-            submit={handleSubmitForApproval}
+            save={handleSubmitForApproval}
           />
           <DialogHeader>
             <DialogTitle>Submit for Approval</DialogTitle>
@@ -3107,7 +3107,7 @@ export function SubAgentDetailPage() {
             type="SubAgentSaveSummary"
             id={subAgent.id}
             fields={{ change_summary: [changeSummary, setChangeSummary] }}
-            submit={() => handleSaveWithSummary(changeSummary)}
+            save={() => handleSaveWithSummary(changeSummary)}
           />
           <DialogHeader>
             <DialogTitle>Save Configuration Changes</DialogTitle>

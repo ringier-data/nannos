@@ -50,9 +50,10 @@ def test_deterministic_fallback_still_scores_destructive_high():
 @pytest.mark.asyncio
 async def test_client_action_submit_gates_but_form_fills_do_not():
     """client_action is the ONLY HITL for on-screen actions (no SDK card). It's
-    scored deterministically by kind — never via LLM/cache — so `submit` (saves the
-    form) always interrupts, while `apply` (writes into the unsaved form, marked as
-    changed) and `highlight`/`navigate` never do. Scored even with cache=None."""
+    scored deterministically by kind — never via LLM/cache. No kind saves by itself (a
+    save is an invoke the host marked requiresApproval, lifted to a card by the HITL
+    layer), so `apply`, `highlight`, `navigate` and `invoke` never interrupt here, while
+    an unknown kind — `submit` is gone — gates, fail safe. Scored even with cache=None."""
     THRESHOLD = 0.80
     for kind in ("submit", "refresh", "invalidate"):
         score, entry = await score_tool_risk("client_action", {"kind": kind}, cache=None)

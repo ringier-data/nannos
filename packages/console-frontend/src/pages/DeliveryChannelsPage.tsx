@@ -43,7 +43,7 @@ import {
   type DeliveryChannelUpdate,
 } from '@/api/scheduler';
 import { NannosForm } from '@/components/nannos/NannosForm';
-import type { SubmitOutcome } from '@nannos/embed-sdk';
+import type { ActionOutcome } from '@nannos/embed-sdk';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -88,7 +88,7 @@ function EditDialog({ channel, onClose }: EditDialogProps) {
     onError: (e: unknown) => setError(e instanceof Error ? e.message : String(e)),
   });
 
-  async function save(): Promise<SubmitOutcome> {
+  async function save(): Promise<ActionOutcome> {
     setError(null);
 
     const patch: DeliveryChannelUpdate = {
@@ -123,7 +123,7 @@ function EditDialog({ channel, onClose }: EditDialogProps) {
             description: [description, setDescription],
             webhookUrl: [webhookUrl, setWebhookUrl],
           }}
-          submit={save}
+          save={save}
         />
         <DialogHeader>
           <DialogTitle>Edit delivery channel</DialogTitle>

@@ -24,7 +24,7 @@ import { ExtendedThinkingConfig } from '@/components/settings/ExtendedThinkingCo
 import { PhoneVerificationDialog } from '@/components/settings/PhoneVerificationDialog';
 import { ToolBypassRulesList } from '@/components/settings/ToolBypassRulesList';
 import { NannosForm } from '@/components/nannos/NannosForm';
-import type { ObjectAction, SubmitOutcome } from '@nannos/embed-sdk';
+import type { ObjectAction, ActionOutcome } from '@nannos/embed-sdk';
 import { getErrorMessage } from '@/lib/utils';
 import { useAvailableModels, modelSupportsThinking, getAvailableThinkingLevels, modelSelectOptions, getModelLabel } from '@/config/models';
 
@@ -260,7 +260,7 @@ export function SettingsPage() {
     }
   }, []);
 
-  const save = async (): Promise<SubmitOutcome> => {
+  const save = async (): Promise<ActionOutcome> => {
     // When preferred_model is null (default), also send thinking settings as null to use agent defaults
     const shouldUseDefaults = preferredModel === null;
 
@@ -362,7 +362,7 @@ export function SettingsPage() {
                 }
               : { mcpTools: [mcpTools, handleMcpToolsChange] }
           }
-          submit={save}
+          save={save}
         />
       )}
 

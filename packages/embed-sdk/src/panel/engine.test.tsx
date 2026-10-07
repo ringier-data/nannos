@@ -303,7 +303,7 @@ describe('client-action round trip (awaited apply)', () => {
 
 describe('client_action approval: the risk-gated directive', () => {
   // A form fill (`apply`) is scored LOW by the agent and never raises a gate;
-  // the consequential kind (`submit`) does. The panel does not judge kinds: any
+  // an action that saves (`invoke` of one marked requiresApproval) does. The panel does not judge kinds: any
   // gated `client_action` renders the normal approval card, and approving it
   // runs the directive right then so ONE resume carries the result.
   /** A registry the agent can write into, plus a mounted chat surface. */

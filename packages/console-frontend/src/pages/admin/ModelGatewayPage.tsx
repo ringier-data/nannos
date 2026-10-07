@@ -16,7 +16,7 @@ import {
   AlertTriangle,
 } from 'lucide-react';
 import { toast } from 'sonner';
-import { useObjectStateAdapter, type SubmitOutcome } from '@nannos/embed-sdk';
+import { useObjectStateAdapter, type ActionOutcome } from '@nannos/embed-sdk';
 
 import {
   getBedrockRegions,
@@ -920,7 +920,7 @@ export function ModelGatewayPage() {
   };
 
   // The run window reports the outcome to the user; the resolved value reports it to the assistant.
-  const submit = async (): Promise<SubmitOutcome> => {
+  const submit = async (): Promise<ActionOutcome> => {
     setRegionError(null); // a retry re-answers the question; don't leave the last verdict up
     if (!form.model_name || !form.litellm_model) {
       toast.error('Alias and gateway model id are required');
@@ -1214,7 +1214,7 @@ export function ModelGatewayPage() {
 
       <Dialog open={dialogOpen} onOpenChange={(o) => (o ? setDialogOpen(true) : closeDialog())}>
         <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
-          <NannosForm type="GatewayModel" id={editingId ?? undefined} form={nannosForm} submit={submit} />
+          <NannosForm type="GatewayModel" id={editingId ?? undefined} form={nannosForm} save={submit} />
           <DialogHeader>
             <DialogTitle>{editingId ? 'Edit model' : 'Register model'}</DialogTitle>
             <DialogDescription>
