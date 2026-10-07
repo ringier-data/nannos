@@ -27,7 +27,7 @@ import contextlib
 import inspect
 import logging
 import re
-from collections.abc import Awaitable, Callable, Iterable, Iterator
+from collections.abc import Awaitable, Callable, Generator, Iterable
 from contextvars import ContextVar
 from pathlib import PurePosixPath
 
@@ -78,7 +78,7 @@ _status_suppressed: ContextVar[bool] = ContextVar("tool_status_suppressed", defa
 
 
 @contextlib.contextmanager
-def tool_status_suppressed(active: bool = True) -> Iterator[None]:
+def tool_status_suppressed(active: bool = True) -> Generator[None, None, None]:
     """Silence :class:`ToolStatusMiddleware` for the tool calls made inside the block."""
     token = _status_suppressed.set(active)
     try:
