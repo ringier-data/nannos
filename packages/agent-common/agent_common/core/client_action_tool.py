@@ -49,6 +49,68 @@ logger = logging.getLogger(__name__)
 CLIENT_ACTION_TOOL_NAME = "client_action"
 
 
+class FieldValue(BaseModel):
+    """One field an ``apply`` writes."""
+
+    field: str = Field(description="The field's name, exactly as the object's `fields` list it.")
+    value: str = Field(
+        description=(
+            'The new value as JSON: text in quotes ("de", "Europe/Zurich"), a number (42), true/false, '
+            'null, or a list (["a", "b"]). Unquoted text is taken as text.'
+        )
+    )
+
+
+class ActionArg(BaseModel):
+    """One argument an ``invoke`` passes to the action."""
+
+    name: str = Field(description="The parameter's name, exactly as the action's `params` list it.")
+    value: str = Field(
+        description='The value as JSON: text in quotes ("+41791234567"), a number, true/false or null.'
+    )
+
+
+def _json_value(value: Any) -> Any:
+    """A pair's value: its JSON when it parses, the text itself when it does not."""
+    if not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value)
+    except ValueError:
+        return value
+
+
+def pairs_to_object(pairs: Any, key: str) -> dict[str, Any] | None:
+    """``[{key, value}, …]`` as the object the browser expects; an object passes through.
+
+    The model sends ``values``/``args`` as typed pairs: an open object (``dict[str, Any]``)
+    has no named properties, and Gemini sent it empty (``{}``) on every call — the same loss
+    the risk scorer measured and fixed with the same list shape (``tool_risk_scorer``).
+    """
+    if pairs is None or isinstance(pairs, Mapping):
+        return dict(pairs) if pairs is not None else None
+    out: dict[str, Any] = {}
+    for pair in pairs if isinstance(pairs, list) else []:
+        item = pair.model_dump() if isinstance(pair, BaseModel) else pair
+        if isinstance(item, Mapping) and isinstance(item.get(key), str):
+            out[item[key]] = _json_value(item.get("value"))
+    return out
+
+
+def wire_args(args: Mapping[str, Any]) -> dict[str, Any]:
+    """A ``client_action`` call's arguments with ``values``/``args`` as objects.
+
+    For everything that reads the raw call rather than the tool: the approval card and the
+    browser, which builds the directive from it on Approve (``directiveFromToolArgs``).
+    """
+    out = dict(args)
+    if "values" in out:
+        out["values"] = pairs_to_object(out["values"], "field")
+    if "args" in out:
+        out["args"] = pairs_to_object(out["args"], "name")
+    return out
+
+
 class ClientActionInput(BaseModel):
     """Arguments for a client-action directive."""
 
@@ -78,9 +140,11 @@ class ClientActionInput(BaseModel):
     target_id: Optional[str] = Field(
         default=None, description="Instance id of the target object (from the client objects manifest)."
     )
-    values: Optional[dict[str, Any]] = Field(
+    values: Optional[list[FieldValue]] = Field(
         default=None,
-        description="apply only: field values to write. Keys must match the object's fields.",
+        description=(
+            'apply only: the fields to write, one entry each, e.g. [{"field": "language", "value": "\\"de\\""}].'
+        ),
     )
     field: Optional[str] = Field(default=None, description="highlight only: specific field to highlight.")
     to: Optional[str] = Field(default=None, description="navigate only: the path/route to open.")
@@ -94,8 +158,9 @@ class ClientActionInput(BaseModel):
     action: str | None = Field(
         default=None, description="invoke only: the action name, exactly as the object's `actions` list it."
     )
-    args: dict[str, Any] | None = Field(
-        default=None, description="invoke only: arguments for the action, matching its declared params."
+    args: list[ActionArg] | None = Field(
+        default=None,
+        description="invoke only: arguments for the action, one entry per declared param.",
     )
     confirm: bool = Field(
         default=True,
@@ -283,13 +348,13 @@ async def _client_action_handler(
     kind: str,
     target_type: str | None = None,
     target_id: str | None = None,
-    values: dict[str, Any] | None = None,
+    values: list[Any] | dict[str, Any] | None = None,
     field: str | None = None,
     to: str | None = None,
     confirm: bool = True,
     discard_changes: bool = False,
     action: str | None = None,
-    args: dict[str, Any] | None = None,
+    args: list[Any] | dict[str, Any] | None = None,
     tool_call_id: str = "",
 ) -> str | tuple[str, dict[str, Any] | None]:
     directive: dict[str, Any] = {"kind": kind}
@@ -297,12 +362,14 @@ async def _client_action_handler(
         if not target_type or not target_id:
             return "Error: apply/highlight/invoke require target_type and target_id from the client objects manifest."
         directive["target"] = {"type": target_type, "id": target_id}
+    values = pairs_to_object(values, "field")
+    args = pairs_to_object(args, "name")
     if kind == "apply":
         if not values:
             return (
-                "Error: apply needs `values`: an object mapping each field to its new value, e.g. "
-                '{"language": "de", "timezone": "Europe/Zurich"}. It arrived empty; send the same '
-                "call again only with the fields filled in."
+                "Error: apply needs `values`: one entry per field to write, e.g. "
+                '[{"field": "language", "value": "\\"de\\""}, {"field": "timezone", "value": '
+                '"\\"Europe/Zurich\\""}]. It arrived empty.'
             )
         directive["values"] = values
         directive["confirm"] = confirm

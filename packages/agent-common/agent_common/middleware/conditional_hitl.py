@@ -52,6 +52,7 @@ from agent_common.core.client_action_tool import (
     CLIENT_ACTION_TOOL_NAME,
     client_action_artifact,
     render_client_action_result,
+    wire_args,
 )
 from agent_common.core.hitl_resume import REFUSAL_LEADS, decisions_from_resume, decisions_from_resume_sync
 from agent_common.core.tool_risk_cache import ToolRiskCache, ToolRiskEntry
@@ -740,7 +741,9 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
             # interrupted call — static or risk-scored) the client echoes so the resume
             # path aligns decisions by id (see executor._build_interrupt_resume_map).
             enriched_args: dict[str, Any] = {
-                **args,
+                # A client_action's values/args travel as typed pairs; the card and the
+                # browser (which builds the directive from these on Approve) read objects.
+                **(wire_args(args) if tool_name == CLIENT_ACTION_TOOL_NAME else args),
                 "_call_id": tool_call["id"],
                 # Only the Approve click runs it: typed words never do (see hitl_resume).
                 **({"_requires_click": True} if requires_click else {}),

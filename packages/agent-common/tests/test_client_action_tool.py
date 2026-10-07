@@ -393,11 +393,66 @@ class TestDescribeClientObjects:
         assert "secret-token" not in line
 
 
+class TestTypedPairs:
+    """`values`/`args` travel as typed pairs: Gemini sent an open object as `{}` on every call."""
+
+    def test_the_schema_names_every_property(self):
+        from agent_common.core.client_action_tool import ClientActionInput
+
+        schema = ClientActionInput.model_json_schema()
+        for name in ("FieldValue", "ActionArg"):
+            definition = schema["$defs"][name]
+            assert definition["properties"] and "additionalProperties" not in definition
+        assert "additionalProperties" not in json.dumps(schema["properties"]["values"])
+        assert "additionalProperties" not in json.dumps(schema["properties"]["args"])
+
+    def test_values_read_as_json_and_bare_text(self):
+        from agent_common.core.client_action_tool import pairs_to_object
+
+        pairs = [
+            {"field": "language", "value": '"de"'},
+            {"field": "timezone", "value": "Europe/Zurich"},
+            {"field": "count", "value": "42"},
+            {"field": "enabled", "value": "true"},
+            {"field": "tags", "value": '["a", "b"]'},
+            {"field": "note", "value": "null"},
+        ]
+        assert pairs_to_object(pairs, "field") == {
+            "language": "de",
+            "timezone": "Europe/Zurich",
+            "count": 42,
+            "enabled": True,
+            "tags": ["a", "b"],
+            "note": None,
+        }
+
+    @pytest.mark.asyncio
+    async def test_an_apply_with_pairs_sends_an_object(self):
+        with patch(
+            f"{MODULE}.interrupt", return_value={"ok": True, "applied": ["language"], "rejected": []}
+        ) as fake_interrupt:
+            await _client_action_tool(
+                kind="apply",
+                target_type="Settings",
+                target_id="me",
+                values=[{"field": "language", "value": '"de"'}],
+                tool_call_id="c1",
+            )
+        directive = fake_interrupt.call_args.args[0]["client_action_request"]["directive"]
+        assert directive["values"] == {"language": "de"}
+
+    def test_the_approval_card_reads_objects(self):
+        from agent_common.core.client_action_tool import wire_args
+
+        out = wire_args({"kind": "invoke", "action": "set_default", "args": [{"name": "role", "value": '"chat"'}]})
+        assert out["args"] == {"role": "chat"}
+
+
 class TestEmptyValues:
-    """Gemini sent `values` as `{}`: the error says what a fill needs."""
+    """An empty fill says what a fill needs."""
 
     @pytest.mark.asyncio
     async def test_empty_values_say_what_to_send(self):
-        out, _ = await _client_action_tool(kind="apply", target_type="Settings", target_id="me", values={})
+        out, _ = await _client_action_tool(kind="apply", target_type="Settings", target_id="me", values=[])
         assert out.startswith("Error: apply needs `values`")
-        assert '"language": "de"' in out
+        assert '"field": "language"' in out

@@ -679,6 +679,7 @@ class TestActionsThatRequireApproval:
         bypass_rules: dict | None = None,
         objects: list | None = None,
         prior: list | None = None,
+        extra: dict | None = None,
     ):
         captured: dict = {}
 
@@ -694,6 +695,7 @@ class TestActionsThatRequireApproval:
         mw = ConditionalHumanInTheLoopMiddleware(interrupt_on={}, risk_scorer=scorer, default_risk_threshold=0.8)
         monkeypatch.setattr(mw, "_get_server_slug", lambda *_: "embed")
         args = {"kind": "invoke", "target_type": "GatewayModel", "target_id": "claude-haiku-4-5", "action": action}
+        args.update(extra or {})
         ai = AIMessage(
             content="",
             tool_calls=[{"name": "client_action", "args": args, "id": "tc-1", "type": "tool_call"}],
@@ -765,6 +767,12 @@ class TestActionsThatRequireApproval:
         )
         prior = [navigate, landed, HumanMessage(content="now on another page")]
         assert await self._run(monkeypatch, "set_tier_default", objects=[], prior=prior) is None
+
+    async def test_the_card_shows_pairs_as_an_object(self, monkeypatch):
+        """``args`` travel as typed pairs; the card and the browser's directive read objects."""
+        pairs = {"args": [{"name": "role", "value": '"chat"'}]}
+        request = await self._run(monkeypatch, "set_tier_default", extra=pairs)
+        assert request["action_requests"][0]["args"]["args"] == {"role": "chat"}
 
     async def test_a_bypass_rule_never_skips_the_click(self, monkeypatch):
         """The browser refuses a marked action without the click, so a standing bypass
