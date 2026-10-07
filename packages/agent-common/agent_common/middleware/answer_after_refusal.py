@@ -79,7 +79,7 @@ def stop_reason(messages: Sequence[BaseMessage]) -> str | None:
     if last_ai is None or any(_users(m) for m in messages[last_ai + 1 :]):
         return None
     results = [_text(m.content) for m in messages[last_ai + 1 :] if isinstance(m, ToolMessage)]
-    if any(text.startswith(REFUSAL_STOP_LEADS) for text in results):
+    if any(_bare_refusal(text) for text in results):
         return "refused"
     if any(text.startswith(BLOCKED_LEAD) for text in results):
         turn_start = next((i for i in range(last_ai, -1, -1) if _users(messages[i])), -1)
@@ -90,6 +90,14 @@ def stop_reason(messages: Sequence[BaseMessage]) -> str | None:
         ]
         return "blocked" if earlier else None
     return None
+
+
+def _bare_refusal(text: str) -> bool:
+    """A refusal that leaves nothing else to do. A decline that carries the user's words
+    ("They said: no, search Slack instead") may name what to do instead, so it stays open."""
+    if text.startswith(DECLINED_AUTH_LEAD):
+        return " They said: " not in text
+    return text.startswith(REFUSAL_STOP_LEADS)
 
 
 def must_answer(messages: Sequence[BaseMessage]) -> bool:

@@ -42,11 +42,18 @@ from typing import Annotated, Any, Literal, Optional
 from langchain_core.tools import InjectedToolCallId, StructuredTool
 from langgraph.config import get_stream_writer
 from langgraph.types import interrupt
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 logger = logging.getLogger(__name__)
 
 CLIENT_ACTION_TOOL_NAME = "client_action"
+
+
+def _as_json_text(value: Any) -> Any:
+    """A native JSON value (42, true, a list) sent where the schema says string, as its text:
+    the schema stays a typed string (Gemini fills that), and models that send the value
+    natively are not turned away by validation."""
+    return value if isinstance(value, str) else json.dumps(value)
 
 
 class FieldValue(BaseModel):
@@ -55,10 +62,12 @@ class FieldValue(BaseModel):
     field: str = Field(description="The field's name, exactly as the object's `fields` list it.")
     value: str = Field(
         description=(
-            'The new value as JSON: text in quotes ("de", "Europe/Zurich"), a number (42), true/false, '
-            'null, or a list (["a", "b"]). Unquoted text is taken as text.'
+            'The new value as JSON: text in quotes ("de", "8001"), a number (42), true/false, null, or a '
+            'list (["a", "b"]). Unquoted text that reads as a number, true/false or null is taken as that.'
         )
     )
+
+    _json_text = field_validator("value", mode="before")(lambda v: _as_json_text(v))
 
 
 class ActionArg(BaseModel):
@@ -69,13 +78,16 @@ class ActionArg(BaseModel):
         description='The value as JSON: text in quotes ("+41791234567"), a number, true/false or null.'
     )
 
+    _json_text = field_validator("value", mode="before")(lambda v: _as_json_text(v))
+
 
 def _json_value(value: Any) -> Any:
     """A pair's value: its JSON when it parses, the text itself when it does not."""
     if not isinstance(value, str):
         return value
     try:
-        return json.loads(value)
+        # NaN/Infinity stay text: they parse to non-finite floats the browser cannot read.
+        return json.loads(value, parse_constant=lambda _constant: value)
     except ValueError:
         return value
 

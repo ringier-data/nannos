@@ -448,6 +448,31 @@ class TestTypedPairs:
         assert out["args"] == {"role": "chat"}
 
 
+class TestPairValues:
+    def test_native_json_values_are_accepted(self):
+        from agent_common.core.client_action_tool import ClientActionInput, pairs_to_object
+
+        sent = ClientActionInput(
+            kind="apply",
+            values=[
+                {"field": "budget", "value": 42},
+                {"field": "tags", "value": ["a"]},
+                {"field": "note", "value": None},
+            ],
+            args=[{"name": "enabled", "value": True}],
+        )
+        assert pairs_to_object(sent.values, "field") == {"budget": 42, "tags": ["a"], "note": None}
+        assert pairs_to_object(sent.args, "name") == {"enabled": True}
+
+    def test_non_finite_numbers_stay_text(self):
+        from agent_common.core.client_action_tool import pairs_to_object
+
+        assert pairs_to_object([{"field": "x", "value": "NaN"}, {"field": "y", "value": "Infinity"}], "field") == {
+            "x": "NaN",
+            "y": "Infinity",
+        }
+
+
 class TestEmptyValues:
     """An empty fill says what a fill needs."""
 

@@ -83,6 +83,18 @@ class TestWhenTheStepMustBeTheAnswer:
         assert stop_reason(_turn(_SKIPPED_AUTH_MESSAGE)) == "refused"
         assert stop_reason(_turn(declined.content)) == "refused"
 
+    def test_a_decline_that_names_an_alternative_stays_open(self):
+        from agent_common.middleware.auth_error_middleware import AuthErrorDetectionMiddleware
+
+        declined = AuthErrorDetectionMiddleware._refusal_message(
+            AuthErrorDetectionMiddleware.__new__(AuthErrorDetectionMiddleware),
+            SimpleNamespace(tool_call={"id": "c0"}),
+            "gdrive_search",
+            "no, search Slack instead",
+            None,
+        )
+        assert not must_answer(_turn(declined.content))
+
     def test_a_loop_block_the_second_time_this_turn(self):
         assert stop_reason(_turn(BLOCK, BLOCK)) == "blocked"
 
