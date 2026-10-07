@@ -173,6 +173,7 @@ describe('saving and changed-field marks', () => {
     r.register({
       ...target,
       scope: 'update',
+      includeValues: true,
       getState: () => ({ ...state }),
       apply: (v: Record<string, unknown>) => {
         Object.assign(state, v);
@@ -207,12 +208,29 @@ describe('saving and changed-field marks', () => {
     expect(changes.get(target)).toHaveLength(0);
   });
 
+  it('keeps the overwritten values from the agent when the host shares no values', async () => {
+    const r = new ObjectRegistry();
+    r.register({
+      ...target,
+      scope: 'update',
+      getState: () => ({ language: 'en' }),
+      apply: (v: Record<string, unknown>) => ({ applied: Object.keys(v), rejected: [] }),
+    });
+    const result = await executeClientAction(
+      { kind: 'apply', target, values: { language: 'de' } },
+      { registry: r, changes: new ChangeStore() },
+    );
+    expect(result.ok).toBe(true);
+    expect(result).not.toHaveProperty('previous');
+  });
+
   it('a fill back to the original value dismisses the mark (the agent undoing itself)', async () => {
     const state: Record<string, unknown> = { timezone: 'UTC' };
     const r = new ObjectRegistry();
     r.register({
       ...target,
       scope: 'update',
+      includeValues: true,
       getState: () => ({ ...state }),
       apply: (v: Record<string, unknown>) => {
         Object.assign(state, v);

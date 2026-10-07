@@ -161,7 +161,9 @@ export async function executeClientAction(
           ok: true,
           applied: result.applied,
           rejected: result.rejected,
-          ...(Object.keys(before).length ? { previous: before } : {}),
+          // The values it overwrote are form content: only for a host that shares its
+          // values with the agent (`includeValues`), like the manifest.
+          ...(handle.includeValues && Object.keys(before).length ? { previous: before } : {}),
         };
       }
       return { ok: true };

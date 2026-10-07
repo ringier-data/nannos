@@ -226,6 +226,23 @@ describe('marking the control, not its wrapper', () => {
     document.documentElement.classList.remove('dark');
   });
 
+  it('a width variable written on <html> (the dock resizing) does not repaint', async () => {
+    document.head.innerHTML = '';
+    document.body.innerHTML = `<div id="page" style="background-color: rgb(255, 255, 255)"><input id="ctl" name="name" /></div>`;
+    const store = new ChangeStore();
+    const target = { type: 'Job', id: 'new' };
+    const handlers = createClientActionHandlers();
+    const ctl = document.getElementById('ctl')!;
+    ctl.scrollIntoView = vi.fn();
+    handlers.markChanged(target, store.record(target, { name: 'x' }, ['name'], async (v) => Object.keys(v)), {});
+
+    document.getElementById('page')!.style.backgroundColor = 'rgb(10, 10, 20)';
+    document.documentElement.style.setProperty('--nannos-panel-width', '420px');
+    await new Promise((r) => setTimeout(r, 0));
+    expect(ctl.style.getPropertyValue('--nannos-fill')).toContain('rgb(255, 255, 255)');
+    document.documentElement.style.removeProperty('--nannos-panel-width');
+  });
+
   it('a wrapper with several controls stays the field', () => {
     document.body.innerHTML = `<div data-nannos-field="mcp_tools" id="wrap"><input name="search" /><input type="checkbox" /><input type="checkbox" /></div>`;
     const store = new ChangeStore();

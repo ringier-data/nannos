@@ -370,3 +370,24 @@ class TestLandedObjectsArtifact:
         assert client_action_artifact({"ok": True}) is None
         assert client_action_artifact({"ok": True, "content": "not json"}) is None
         assert client_action_artifact(None) is None
+
+
+class TestDescribeClientObjects:
+    """The manifest in a log line: which objects, never their form values."""
+
+    def test_shape_only(self):
+        from agent_common.core.client_action_tool import describe_client_objects
+
+        objects = [
+            {
+                "type": "DeliveryChannel",
+                "id": "3",
+                "scope": "update",
+                "unsaved": True,
+                "values": {"webhook_url": "https://hooks.example/secret-token"},
+            },
+            {"type": "Page", "id": "/app/settings", "scope": "view"},
+        ]
+        line = describe_client_objects(objects)
+        assert line == "2 object(s): DeliveryChannel:3(update unsaved), Page:/app/settings(view)"
+        assert "secret-token" not in line

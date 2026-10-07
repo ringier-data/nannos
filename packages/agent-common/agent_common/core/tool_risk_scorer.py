@@ -173,8 +173,9 @@ async def score_tool_risk(
     """
     # Embedded Nannos: the client_action tool is the SINGLE HITL path for on-screen
     # actions (the SDK no longer has its own approval card). Score it deterministically
-    # by `kind` — never via the LLM/cache — so an ``apply`` (writes into the user's form)
-    # always interrupts for approval while ``highlight``/``navigate`` (benign) never do.
+    # by `kind` — never via the LLM/cache. No kind saves by itself (an ``apply`` only
+    # fills the on-screen form); an ``invoke`` of an action the host marked
+    # ``requiresApproval`` is lifted to a click-only card by conditional_hitl.
     # notify_user only writes one sentence onto the user's own screen: it touches no
     # backend, returns no data to the model, and cannot be made risky by its args.
     # Score it deterministically at 0 so an approval card can never appear in front of

@@ -82,7 +82,8 @@ export class ChangeStore {
         undo: async () => {
           if (gone) return false;
           const applied = await write({ [field]: previous[field] }).catch(() => null);
-          if (applied && !applied.includes(field)) return false;
+          // No result (the write threw, or the form is gone) is a failed undo, not a done one.
+          if (!applied || !applied.includes(field)) return false;
           dismiss();
           return true;
         },

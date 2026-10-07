@@ -184,6 +184,19 @@ class LoopDetectionState(AgentState):
     """
 
 
+def _history_key(tool_call: ToolCall) -> str:
+    """The name a call's repeats are counted under.
+
+    ``client_action`` multiplexes: its ``kind`` is the real tool (fill a form, open a page,
+    read it). Counted per kind, ten fills in one turn still hit the same-tool cap, while
+    reading the page between fills does not add to it.
+    """
+    name = tool_call["name"]
+    if name == "client_action":
+        return f"{name}[{(tool_call.get('args') or {}).get('kind')}]"
+    return name
+
+
 class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
     """Middleware for detecting and preventing infinite tool call loops.
 
@@ -524,12 +537,11 @@ class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
         blocked_calls: list[dict[str, Any]] = []
 
         for tool_call in last_ai_message.tool_calls:
-            tool_name = tool_call["name"]
-
             # Skip if doesn't match filter
             if not self._matches_tool_filter(tool_call):
                 continue
 
+            tool_name = _history_key(tool_call)
             verdict = self.evaluate(tool_name, tool_call.get("args", {}), history.get(tool_name, []))
             if verdict.blocked:
                 blocked_calls.append(

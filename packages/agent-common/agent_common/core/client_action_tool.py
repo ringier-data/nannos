@@ -99,7 +99,7 @@ class ClientActionInput(BaseModel):
     )
     confirm: bool = Field(
         default=True,
-        description="apply only: ask the user to confirm before writing (keep true unless trivially safe).",
+        description="apply only: unused, kept for older clients (an apply only fills the form, never saves).",
     )
     tool_call_id: Annotated[str, InjectedToolCallId] = Field(default="")
 
@@ -120,6 +120,24 @@ def describe_directive(directive: Mapping[str, Any]) -> str:
         if isinstance(content, Mapping):
             out[f"{key}_fields"] = sorted(str(k) for k in content)
     return str(out)
+
+
+def describe_client_objects(objects: Any) -> str:
+    """A page's client objects for a log line: ``type:id(scope)``, never their values.
+
+    Every console form registers with its values, so the raw manifest carries webhook
+    URLs, system prompts and secret descriptions.
+    """
+    if not isinstance(objects, list):
+        return f"<{type(objects).__name__}>"
+    out = []
+    for obj in objects:
+        if not isinstance(obj, Mapping):
+            out.append(f"<{type(obj).__name__}>")
+            continue
+        flags = "".join(f" {flag}" for flag in ("unsaved",) if obj.get(flag) is True)
+        out.append(f"{obj.get('type')}:{obj.get('id')}({obj.get('scope')}{flags})")
+    return f"{len(out)} object(s): {', '.join(out)}"
 
 
 def describe_result(result: Any) -> str:

@@ -790,3 +790,48 @@ def test_evaluate_program_call_skips_only_the_same_tool_cap():
     verdict = mw.evaluate("get", {"id": 1}, history, program_call=True)
     assert verdict.blocked and verdict.loop_type == "same_args"
     assert mw.blocked_message("get", verdict).startswith("BLOCKED: 'get' — Tool 'get' called 2 times with identical")
+
+
+class TestClientActionPerKind:
+    """``client_action`` is counted per ``kind``: fills are capped, page reads apart."""
+
+    @pytest.mark.asyncio
+    async def test_fills_with_changing_values_hit_the_same_tool_cap(self):
+        from langchain_core.messages import AIMessage
+
+        middleware = RepeatedToolCallMiddleware(max_repeats=3, max_tool_repeats=4, window_size=20)
+        history: dict[str, list[str]] = {}
+        blocked = None
+        for i in range(6):
+            call = {
+                "name": "client_action",
+                "args": {"kind": "apply", "target_type": "F", "target_id": "1", "values": {"n": i}},
+                "id": f"tc-{i}",
+            }
+            result = await middleware.aafter_model(
+                {"messages": [AIMessage(content="", tool_calls=[call])], "tool_call_history": history},
+                MagicMock(),
+            )
+            history = result.get("tool_call_history", history)
+            if result.get("messages"):
+                blocked = i
+                break
+        assert blocked == 4, "the fifth distinct fill exceeds max_tool_repeats=4"
+        assert "client_action[apply]" in history
+
+    @pytest.mark.asyncio
+    async def test_page_reads_do_not_count_toward_fills(self):
+        from langchain_core.messages import AIMessage
+
+        middleware = RepeatedToolCallMiddleware(max_repeats=3, max_tool_repeats=4, window_size=20)
+        apply_hashes = [middleware._hash_args({"kind": "apply", "values": {"n": i}}) for i in range(3)]
+        call = {"name": "client_action", "args": {"kind": "read_current_page"}, "id": "tc-r"}
+        result = await middleware.aafter_model(
+            {
+                "messages": [AIMessage(content="", tool_calls=[call])],
+                "tool_call_history": {"client_action[apply]": apply_hashes},
+            },
+            MagicMock(),
+        )
+        assert not result.get("messages")
+        assert result["tool_call_history"]["client_action[read_current_page]"]

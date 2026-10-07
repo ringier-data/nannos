@@ -207,18 +207,37 @@ export function createClientActionHandlers({
 
   // The fill is measured, so it is stale once the theme changes under a mark: a field
   // marked in light mode kept a white fill in dark mode, hiding its light text.
-  let watchingTheme = false;
+  // `style` is watched for a host that sets `color-scheme` inline, but only a change of
+  // the computed scheme repaints: the dock's resize writes a width variable on <html>
+  // per pointermove. The watch ends with the last mark.
+  let stopWatchingTheme: (() => void) | null = null;
   const watchTheme = () => {
-    if (watchingTheme || typeof window === 'undefined') return;
-    watchingTheme = true;
+    if (stopWatchingTheme || typeof window === 'undefined') return;
+    const root = document.documentElement;
+    const scheme = () => getComputedStyle(root).colorScheme;
+    let lastScheme = scheme();
     const repaint = () => {
+      if (![...marks.values()].some((els) => els.size)) {
+        stopWatchingTheme?.();
+        return;
+      }
       for (const els of marks.values()) for (const el of els.keys()) paintFill(el);
     };
-    window.matchMedia?.('(prefers-color-scheme: dark)').addEventListener?.('change', repaint);
-    new MutationObserver(repaint).observe(document.documentElement, {
-      attributes: true,
-      attributeFilter: ['class', 'style', 'data-theme'],
+    const media = window.matchMedia?.('(prefers-color-scheme: dark)');
+    media?.addEventListener?.('change', repaint);
+    const observer = new MutationObserver((mutations) => {
+      const themed = mutations.some((m) => m.attributeName !== 'style');
+      const current = scheme();
+      if (!themed && current === lastScheme) return;
+      lastScheme = current;
+      repaint();
     });
+    observer.observe(root, { attributes: true, attributeFilter: ['class', 'style', 'data-theme'] });
+    stopWatchingTheme = () => {
+      observer.disconnect();
+      media?.removeEventListener?.('change', repaint);
+      stopWatchingTheme = null;
+    };
   };
 
   const mark = (key: string, el: HTMLElement, change: AppliedChange, wasText: string | undefined) => {

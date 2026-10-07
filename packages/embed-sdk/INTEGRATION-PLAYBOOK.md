@@ -123,7 +123,7 @@ STEP 1 — INVENTORY (do this once, cite files):
    Enumerate the operations the agent would need (method, path, purpose, key
    params) and flag which SHOULD be exposed as MCP tools — the subset in this
    assistant's scope, NOT the whole API. Built-in client-actions exist regardless:
-   apply (write form values, human-approved), highlight (point at a field),
+   apply (fill form values, marked as changed, never saved), invoke (press an action the page offers; one marked `requiresApproval`, like a form's `save`, runs only after the user clicks Approve), highlight (point at a field),
    navigate (go to a route).
 4. Domain rules: validation, required-together fields, status transitions,
    units/formats, uniqueness — from schemas, form validation, and backend models.

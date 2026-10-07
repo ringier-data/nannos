@@ -1870,10 +1870,9 @@ def build_common_middleware_stack(
         # multi-step PTC agent gets blocked mid-task and force-stopped, ending
         # with no structured response). They remain subject to ``max_repeats``
         # (identical-args) detection, which still catches true loops.
-        # ``client_action`` likewise multiplexes: its ``kind`` and target are the
-        # real tool (read the page, fill a form, save it), so only its arguments say
-        # whether it loops — polling a page that never loads is identical args.
-        dispatch_tools={"task", PTC_CODE_INTERPRETER_TOOL_NAME, CLIENT_ACTION_TOOL_NAME},
+        # ``client_action`` is not exempt: it is counted per ``kind`` instead (see
+        # ``_history_key``), so a run of fills is capped while page reads are not.
+        dispatch_tools={"task", PTC_CODE_INTERPRETER_TOOL_NAME},
     )
     if not exclude_deep_agents_middlewares:
         summarization_defaults = compute_summarization_defaults(model)

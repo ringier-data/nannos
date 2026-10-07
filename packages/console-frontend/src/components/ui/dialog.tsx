@@ -8,13 +8,21 @@ import { cn } from "@/lib/utils"
 // While the docked assistant is open, dialogs are non-modal: a modal traps focus
 // and blocks the page, so the user could not type a request into the assistant
 // about the form the dialog holds. DialogContent keeps the dialog open when a
-// click or focus lands in the assistant.
+// click or focus lands in the assistant, and still covers the page beside the
+// dock: without an overlay a click behind a delete confirm reached the page.
+const DialogModalContext = React.createContext(true)
+
 function Dialog({
   modal,
   ...props
 }: React.ComponentProps<typeof DialogPrimitive.Root>) {
   const { isOpen: assistantOpen } = useAssistant()
-  return <DialogPrimitive.Root data-slot="dialog" modal={modal ?? !assistantOpen} {...props} />
+  const effective = modal ?? !assistantOpen
+  return (
+    <DialogModalContext.Provider value={effective}>
+      <DialogPrimitive.Root data-slot="dialog" modal={effective} {...props} />
+    </DialogModalContext.Provider>
+  )
 }
 
 function DialogTrigger({
@@ -61,9 +69,19 @@ function DialogContent({
 }: React.ComponentProps<typeof DialogPrimitive.Content> & {
   showCloseButton?: boolean
 }) {
+  const modal = React.useContext(DialogModalContext)
   return (
     <DialogPortal data-slot="dialog-portal">
       <DialogOverlay />
+      {/* Radix draws no overlay for a non-modal dialog: this one covers the page up to
+          the dock, so the page behind takes no clicks (one dismisses, as a modal's would). */}
+      {!modal && (
+        <div
+          data-slot="dialog-overlay"
+          aria-hidden
+          className="fixed inset-y-0 left-0 z-50 bg-black/50 right-[var(--console-dock-width,0px)]"
+        />
+      )}
       <DialogPrimitive.Content
         data-slot="dialog-content"
         className={cn(

@@ -26,6 +26,7 @@ from agent_common.a2a.base import LocalA2ARunnable
 from agent_common.a2a.client_runnable import A2AClientRunnable
 from agent_common.a2a.threads import local_sub_agent_thread_id
 from agent_common.a2a.models import LocalLangGraphSubAgentConfig
+from agent_common.core.client_action_tool import describe_client_objects
 from agent_common.core.hitl_resume import (
     KIND_AUTH,
     NOT_APPROVED_CLAUSE,
@@ -92,6 +93,16 @@ from .steering_state import (
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def _metadata_keys(metadata: Any) -> list[str] | None:
+    """A request's metadata for a log line: its keys, never the values (form content)."""
+    if metadata is None:
+        return None
+    try:
+        return sorted(str(k) for k in metadata.keys())  # noqa: SIM118 — a protobuf Struct, not only a dict
+    except AttributeError:
+        return [f"<{type(metadata).__name__}>"]
 
 # An authorization answer whose verdict this build cannot read, delivered where a
 # tool APPROVAL was the pending question. Neither yes nor no, so the call must not
@@ -755,8 +766,11 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             logger.info(f"[REGISTRY] Retrieved user from registry: database_id={user.id}, sub={user.sub}")
 
         # Extract metadata from both message-level and params-level (message takes priority)
-        logger.info(f"[EXECUTOR] Params-level metadata: {context.metadata}")
-        logger.info(f"[EXECUTOR] Message-level metadata: {context.message.metadata if context.message else None}")
+        # Keys only: the metadata carries the page's client objects with their form values.
+        logger.info(f"[EXECUTOR] Params-level metadata keys: {_metadata_keys(context.metadata)}")
+        logger.info(
+            f"[EXECUTOR] Message-level metadata keys: {_metadata_keys(context.message.metadata if context.message else None)}"
+        )
         message_metadata = context.message.metadata if context.message and context.message.metadata else {}
         params_metadata = context.metadata or {}
 
@@ -780,7 +794,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             elif isinstance(raw_client_objects, list) and raw_client_objects:
                 client_objects = raw_client_objects
         if client_objects:
-            logger.info(f"[CLIENT-OBJECTS] Manifest received: {client_objects}")
+            logger.info(f"[CLIENT-OBJECTS] Manifest received: {describe_client_objects(client_objects)}")
 
         # Embedded Nannos: the page the user is CURRENTLY on ({key, label?,
         # description?, data?}), published by the host on navigation and sent
@@ -797,7 +811,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             elif isinstance(raw_page_context, dict) and raw_page_context:
                 page_context = raw_page_context
         if page_context:
-            logger.info(f"[PAGE-CONTEXT] Current page received: {page_context}")
+            logger.info(f"[PAGE-CONTEXT] Current page received: {page_context.get('key')!r}")
 
         # Embedded Nannos (execute-only, ADR-0004): the console-backend maps the
         # embedding app-id → a scoped domain sub-agent and passes its id here. When

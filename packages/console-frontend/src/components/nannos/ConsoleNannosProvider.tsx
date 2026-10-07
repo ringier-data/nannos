@@ -42,7 +42,7 @@ import { consoleObjectTypes } from './consoleObjects';
  * (same-origin console-backend) cover the rest.
  */
 export function ConsoleNannosProvider({ children }: { children: ReactNode }) {
-  const { isAdmin, isImpersonating, adminMode } = useAuth();
+  const { isAdmin, isImpersonating, adminMode, isGroupManager } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const locationRef = useRef(location);
@@ -120,16 +120,23 @@ export function ConsoleNannosProvider({ children }: { children: ReactNode }) {
         // Refused here, not bounced by the route guard: told admin_mode was off, the agent
         // still opened an admin page and the user landed on Settings, away from their page.
         navigate: (to) => {
-          if (/^\/app\/admin(\/|$|\?|#)/.test(to) && !(isAdmin && adminMode)) {
+          // Case-insensitive, like react-router's matching.
+          if (/^\/app\/admin(\/|$|\?|#)/i.test(to) && !(isAdmin && adminMode)) {
             return isAdmin
               ? 'Admin pages need Admin Mode on: ask the user to switch Admin Mode on in the sidebar, then try again.'
               : 'Admin pages are only for administrators; this user cannot open them.';
+          }
+          // Same rule as GroupManagerRoute, which bounces anyone else to /app.
+          if (/^\/app\/groups(\/|$|\?|#)/i.test(to) && !(isGroupManager || (isAdmin && adminMode))) {
+            return isAdmin
+              ? 'Group pages need Admin Mode on for an administrator who manages no group: ask the user to switch Admin Mode on, then try again.'
+              : 'Group pages are only for group managers; this user manages no group.';
           }
           navigate(to);
         },
         resolveFieldLabel: (type, field) => resolveHighlightLabel(consoleObjectTypes, type, field),
       }),
-    [navigate, isAdmin, adminMode]
+    [navigate, isAdmin, adminMode, isGroupManager]
   );
 
   return (

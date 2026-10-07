@@ -53,3 +53,14 @@ describe('change marks across a re-registration', () => {
     expect(c.changes.pending()).toEqual([]);
   });
 });
+
+describe('undo', () => {
+  it('reports a write that throws as a failed undo and keeps the mark', async () => {
+    const c = core();
+    const [change] = c.changes.record({ type: 'Job', id: 'new' }, { name: '' }, ['name'], async () => {
+      throw new Error('bridge write failed');
+    });
+    expect(await change.undo()).toBe(false);
+    expect(c.changes.pending()).toHaveLength(1);
+  });
+});

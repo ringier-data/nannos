@@ -19,7 +19,8 @@ export interface AssistantDockProps extends AssistantPanelProps {
  * The panel docked at the right edge of the viewport — the container every
  * single-page host otherwise writes itself (the cockpit's `NannosPanel`).
  *
- * Renders only while the assistant is available and open. Pinned, it is flush
+ * Renders once the assistant is available and has been opened; closed, it stays
+ * mounted but hidden (its chat keeps its connection). Pinned, it is flush
  * with the page: the provider already publishes `--nannos-panel-width` on
  * `<html>`, so the host gives its content `padding-right:
  * var(--nannos-panel-width, 0px)` and the page yields the same width. Unpinned,
@@ -42,7 +43,13 @@ export function AssistantDock({ zIndex = 40, top = 0, className, style, ...panel
     liveWidth.current = panelWidth;
   }, [panelWidth]);
 
-  if (!isAvailable || !isOpen) return null;
+  // Mounted on the first open, then only hidden: unmounting the panel tore down its
+  // chat scope and socket, so every reopen reconnected, re-bound and reloaded the
+  // conversation, and a reply still streaming when the user closed the dock was lost.
+  const [opened, setOpened] = useState(isOpen);
+  if (isOpen && !opened) setOpened(true);
+
+  if (!isAvailable || !opened) return null;
 
   const onPointerDown = (event: PointerEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -71,6 +78,8 @@ export function AssistantDock({ zIndex = 40, top = 0, className, style, ...panel
       className={className}
       data-nannos-ignore
       {...{ [ASSISTANT_ATTRIBUTE]: '' }}
+      hidden={!isOpen}
+      inert={!isOpen}
       style={{
         position: 'fixed',
         top,
@@ -82,6 +91,7 @@ export function AssistantDock({ zIndex = 40, top = 0, className, style, ...panel
         flexDirection: 'column',
         boxShadow: isPinned ? 'none' : '0 10px 38px rgba(0, 0, 0, 0.25)',
         ...style,
+        ...(isOpen ? {} : { display: 'none' }),
       }}
     >
       <div
