@@ -36,7 +36,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMe
 
 from agent_common.a2a.structured_response import REFUSED_REPLY, STOPPED_REPLY
 from agent_common.core.hitl_resume import SKIPPED_AUTH_LEAD
-from agent_common.core.turn_stops import BLOCKED_LEAD, REFUSED_AGAIN_LEAD
+from agent_common.core.turn_stops import BLOCKED_LEAD, DECLINED_AUTH_LEAD, REFUSED_AGAIN_LEAD
 from agent_common.middleware.utils import VOLATILE_CONTEXT_KEY, append_to_system_message
 
 logger = logging.getLogger(__name__)
@@ -58,7 +58,7 @@ def _text(content: Any) -> str:
 #: Results that leave nothing to do but answer: the user already refused this exact call,
 #: or skipped the authorization it needs. A clicked Reject or a typed "no, do X instead" is
 #: NOT here: it invites the agent to do something else, and narrowing would forbid it.
-REFUSAL_STOP_LEADS: tuple[str, ...] = (REFUSED_AGAIN_LEAD, SKIPPED_AUTH_LEAD)
+REFUSAL_STOP_LEADS: tuple[str, ...] = (REFUSED_AGAIN_LEAD, SKIPPED_AUTH_LEAD, DECLINED_AUTH_LEAD)
 
 
 def _users(message: BaseMessage) -> bool:
@@ -142,13 +142,31 @@ def _answer(request: ModelRequest, text: str) -> ModelResponse:
 
 
 def _off_list_calls(response: ModelResponse, allowed: set[str]) -> list[str]:
-    return [
-        call.get("name", "")
-        for message in response.result
-        if isinstance(message, AIMessage)
-        for call in message.tool_calls
-        if call.get("name") not in allowed
-    ]
+    """The calls to tools that were not offered — none when the answer is there as well:
+    a valid answer next to a stray call is kept (the stray call is dropped in ``_kept``)."""
+    calls = [call for message in response.result if isinstance(message, AIMessage) for call in message.tool_calls]
+    if any(call.get("name") in allowed for call in calls):
+        return []
+    return [call.get("name", "") for call in calls]
+
+
+def _kept(response: ModelResponse, allowed: set[str]) -> ModelResponse:
+    """The response without calls to tools that were not offered, when it also answers."""
+    result = []
+    for message in response.result:
+        if isinstance(message, AIMessage) and any(c.get("name") not in allowed for c in message.tool_calls):
+            calls = [c for c in message.tool_calls if c.get("name") in allowed]
+            content = message.content
+            if isinstance(content, list):
+                names = {c.get("id") for c in calls}
+                content = [
+                    b
+                    for b in content
+                    if not (isinstance(b, dict) and b.get("type") == "tool_use" and b.get("id") not in names)
+                ]
+            message = message.model_copy(update={"tool_calls": calls, "content": content})
+        result.append(message)
+    return ModelResponse(result=result, structured_response=response.structured_response)
 
 
 class AnswerAfterRefusalMiddleware(AgentMiddleware):
@@ -185,7 +203,7 @@ class AnswerAfterRefusalMiddleware(AgentMiddleware):
             logger.warning("Still calling a tool it was not offered after a refusal; answering for it")
             reply = STOPPED_REPLY if stop_reason(request.messages) == "blocked" else REFUSED_REPLY
             response = _answer(request, reply)
-        return response
+        return _kept(response, allowed)
 
     async def awrap_model_call(
         self,
@@ -204,4 +222,4 @@ class AnswerAfterRefusalMiddleware(AgentMiddleware):
             logger.warning("Still calling a tool it was not offered after a refusal; answering for it")
             reply = STOPPED_REPLY if stop_reason(request.messages) == "blocked" else REFUSED_REPLY
             response = _answer(request, reply)
-        return response
+        return _kept(response, allowed)

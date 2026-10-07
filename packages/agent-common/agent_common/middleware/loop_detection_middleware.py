@@ -43,7 +43,7 @@ from langgraph.runtime import Runtime
 from langgraph.typing import ContextT
 from typing_extensions import NotRequired
 
-from agent_common.core.turn_stops import BLOCKED_LEAD
+from agent_common.core.turn_stops import BLOCKED_LEAD, STOPPED_SIBLING_LEAD
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +59,7 @@ RESPONSE_TOOLS: frozenset[str] = frozenset({"FinalResponseSchema", "SubAgentResp
 #: Result given to a call that never ran because the run was force-stopped over a
 #: *different* looping call on the same turn.
 _STOPPED_BEFORE_EXECUTION = (
-    "BLOCKED: the run was stopped because another tool call on this turn was looping. This call was not executed."
+    f"{STOPPED_SIBLING_LEAD} because another tool call on this turn was looping. This call was not executed."
 )
 
 

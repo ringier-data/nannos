@@ -68,10 +68,20 @@ def _offered(messages: list, tools: list) -> list:
 
 
 class TestWhenTheStepMustBeTheAnswer:
-    def test_a_refused_retry_or_a_skipped_authorization(self):
+    def test_a_refused_retry_or_a_skipped_or_declined_authorization(self):
         # The producers' own texts, not copies: rewording them must not switch this off.
+        from agent_common.middleware.auth_error_middleware import AuthErrorDetectionMiddleware
+
+        declined = AuthErrorDetectionMiddleware._refusal_message(
+            AuthErrorDetectionMiddleware.__new__(AuthErrorDetectionMiddleware),
+            SimpleNamespace(tool_call={"id": "c0"}),
+            "gdrive_search",
+            "",
+            None,
+        )
         assert stop_reason(_turn(_REFUSED_AGAIN)) == "refused"
         assert stop_reason(_turn(_SKIPPED_AUTH_MESSAGE)) == "refused"
+        assert stop_reason(_turn(declined.content)) == "refused"
 
     def test_a_loop_block_the_second_time_this_turn(self):
         assert stop_reason(_turn(BLOCK, BLOCK)) == "blocked"
@@ -149,6 +159,13 @@ class TestTheNarrowedStep:
         )
         assert len(calls) == 2
         assert out.result[0].tool_calls[0]["name"] == "SubAgentResponseSchema"
+
+    def test_a_valid_answer_next_to_a_stray_call_is_kept(self):
+        out = AnswerAfterRefusalMiddleware().wrap_model_call(
+            _request(_turn(_REFUSED_AGAIN), [_tool("SubAgentResponseSchema")]),
+            lambda request: _response("client_action", "SubAgentResponseSchema"),
+        )
+        assert [c["name"] for c in out.result[0].tool_calls] == ["SubAgentResponseSchema"]
 
     def test_a_model_that_keeps_calling_it_gets_its_answer_written(self):
         out = AnswerAfterRefusalMiddleware().wrap_model_call(

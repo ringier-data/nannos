@@ -98,7 +98,12 @@ def unanswered_turn_reply(turn_messages: list[Any], response_tool: str) -> str |
     - anything else is reported as it is.
     """
     from agent_common.core.hitl_resume import REFUSAL_LEADS, SKIPPED_AUTH_LEAD
-    from agent_common.core.turn_stops import BLOCKED_LEAD, REFUSED_AGAIN_LEAD
+    from agent_common.core.turn_stops import (
+        BLOCKED_LEAD,
+        DECLINED_AUTH_LEAD,
+        REFUSED_AGAIN_LEAD,
+        STOPPED_SIBLING_LEAD,
+    )
 
     last = turn_messages[-1] if turn_messages else None
     if not isinstance(last, ToolMessage) or last.name == response_tool:
@@ -107,7 +112,9 @@ def unanswered_turn_reply(turn_messages: list[Any], response_tool: str) -> str |
     if content.startswith(BLOCKED_LEAD):
         step = content[len(BLOCKED_LEAD) :].split("'", 1)[0]
         return f"{STOPPED_REPLY} (The step that kept repeating: {step}.)" if step else STOPPED_REPLY
-    if content.startswith((*REFUSAL_LEADS, REFUSED_AGAIN_LEAD, SKIPPED_AUTH_LEAD)):
+    if content.startswith(STOPPED_SIBLING_LEAD):
+        return STOPPED_REPLY
+    if content.startswith((*REFUSAL_LEADS, REFUSED_AGAIN_LEAD, SKIPPED_AUTH_LEAD, DECLINED_AUTH_LEAD)):
         return REFUSED_REPLY
     return content
 

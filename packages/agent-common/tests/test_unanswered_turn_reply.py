@@ -37,3 +37,10 @@ def test_an_answered_turn_has_no_such_reply():
     assert unanswered_turn_reply(_turn(answered), "SubAgentResponseSchema") is None
     assert unanswered_turn_reply([HumanMessage(content="hi"), AIMessage(content="Hello")], "X") is None
     assert unanswered_turn_reply([], "X") is None
+
+
+def test_a_call_stopped_with_its_looping_sibling_reads_as_the_stop():
+    from agent_common.middleware.loop_detection_middleware import _STOPPED_BEFORE_EXECUTION
+
+    sibling = ToolMessage(content=_STOPPED_BEFORE_EXECUTION, tool_call_id="c", name="console_get_job")
+    assert unanswered_turn_reply(_turn(sibling), "SubAgentResponseSchema") == STOPPED_REPLY
