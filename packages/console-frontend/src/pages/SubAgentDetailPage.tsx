@@ -148,7 +148,15 @@ type SkillDiffInfo = {
     | { type: 'activation'; activationId: number };
 };
 
+// Keyed by the route id: moving from one sub-agent to another (back/forward, a link,
+// the assistant's navigate) must not carry the first agent's edit state into the second,
+// where Save would write it onto the wrong agent.
 export function SubAgentDetailPage() {
+  const { id } = useParams<{ id: string }>();
+  return <SubAgentDetail key={id} />;
+}
+
+function SubAgentDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();

@@ -1,3 +1,5 @@
+import json
+
 """The client_action tool's two delivery modes.
 
 ``apply`` is a ROUND TRIP: the directive rides the interrupt value (never the
@@ -13,7 +15,8 @@ import pytest
 
 from agent_common.core.client_action_tool import (
     ClientActionInput,
-    _client_action_handler,
+    _client_action_tool,
+    client_action_artifact,
     render_client_action_result,
 )
 
@@ -31,7 +34,7 @@ class TestApplyRoundTrip:
                 return_value={"ok": True, "applied": ["budget", "name"], "rejected": []},
             ) as fake_interrupt,
         ):
-            out = await _client_action_handler(
+            out, _ = await _client_action_tool(
                 kind="apply",
                 target_type="Campaign",
                 target_id="7",
@@ -67,7 +70,7 @@ class TestApplyRoundTrip:
                 "rejected": [{"field": "campaignType", "reason": "not one of the allowed values"}],
             },
         ):
-            out = await _client_action_handler(
+            out, _ = await _client_action_tool(
                 kind="apply", target_type="Campaign", target_id="7", values={"x": 1}, tool_call_id="c"
             )
         assert "REJECTED" in out
@@ -85,7 +88,7 @@ class TestApplyRoundTrip:
                 "previous": {"timezone": "", "name": "Boss Email Alert"},
             },
         ):
-            out = await _client_action_handler(
+            out, _ = await _client_action_tool(
                 kind="apply",
                 target_type="Settings",
                 target_id="me",
@@ -100,7 +103,7 @@ class TestApplyRoundTrip:
     @pytest.mark.asyncio
     async def test_apply_without_result_is_reported_honestly(self):
         with patch(f"{MODULE}.interrupt", return_value={"ok": False, "reason": "no-result"}):
-            out = await _client_action_handler(
+            out, _ = await _client_action_tool(
                 kind="apply", target_type="Campaign", target_id="7", values={"x": 1}, tool_call_id="c"
             )
         assert "Do NOT assume the action happened" in out
@@ -108,7 +111,7 @@ class TestApplyRoundTrip:
     @pytest.mark.asyncio
     async def test_apply_unknown_target_tells_the_agent_to_recheck_the_page(self):
         with patch(f"{MODULE}.interrupt", return_value={"ok": False, "reason": "unknown-target"}):
-            out = await _client_action_handler(
+            out, _ = await _client_action_tool(
                 kind="apply", target_type="Campaign", target_id="7", values={"x": 1}, tool_call_id="c"
             )
         assert "no longer on the user's screen" in out
@@ -121,7 +124,7 @@ class TestReadCurrentPageRoundTrip:
             f"{MODULE}.interrupt",
             return_value={"ok": True, "content": '{"page": {"key": "/campaigns/7"}, "rows": ["a"]}'},
         ) as fake_interrupt:
-            out = await _client_action_handler(kind="read_current_page", tool_call_id="c2")
+            out, _ = await _client_action_tool(kind="read_current_page", tool_call_id="c2")
         fake_interrupt.assert_called_once_with(
             {"client_action_request": {"id": "c2", "directive": {"kind": "read_current_page"}}}
         )
@@ -131,7 +134,7 @@ class TestReadCurrentPageRoundTrip:
     @pytest.mark.asyncio
     async def test_unsupported_host_is_reported_as_failure(self):
         with patch(f"{MODULE}.interrupt", return_value={"ok": False, "reason": "unsupported"}):
-            out = await _client_action_handler(kind="read_current_page", tool_call_id="c2")
+            out, _ = await _client_action_tool(kind="read_current_page", tool_call_id="c2")
         assert "FAILED" in out
 
 
@@ -144,7 +147,7 @@ class TestNavigateRoundTrip:
             patch(f"{MODULE}.get_stream_writer", return_value=writer),
             patch(f"{MODULE}.interrupt", return_value={"ok": True, "content": landed}) as fake_interrupt,
         ):
-            out = await _client_action_handler(kind="navigate", to="/app", tool_call_id="nav-1")
+            out, _ = await _client_action_tool(kind="navigate", to="/app", tool_call_id="nav-1")
         fake_interrupt.assert_called_once_with(
             {"client_action_request": {"id": "nav-1", "directive": {"kind": "navigate", "to": "/app"}}}
         )
@@ -155,7 +158,7 @@ class TestNavigateRoundTrip:
     @pytest.mark.asyncio
     async def test_discard_changes_rides_the_directive_only_when_set(self):
         with patch(f"{MODULE}.interrupt", return_value={"ok": True}) as fake_interrupt:
-            await _client_action_handler(kind="navigate", to="/b", discard_changes=True, tool_call_id="nav-2")
+            await _client_action_tool(kind="navigate", to="/b", discard_changes=True, tool_call_id="nav-2")
         fake_interrupt.assert_called_once_with(
             {
                 "client_action_request": {
@@ -181,7 +184,7 @@ class TestNavigateRoundTrip:
             patch(f"{MODULE}.get_stream_writer", return_value=writer),
             patch(f"{MODULE}.interrupt") as fake_interrupt,
         ):
-            out = await _client_action_handler(kind="highlight", target_type="S", target_id="1", field="x")
+            out, _ = await _client_action_tool(kind="highlight", target_type="S", target_id="1", field="x")
         fake_interrupt.assert_not_called()
         writer.assert_called_once()
         assert out == "Directive sent to the client."
@@ -209,7 +212,7 @@ class TestSave:
             "agent_common.core.client_action_tool.interrupt",
             return_value={"ok": True, "saved": True, "content": "{}"},
         ) as fake_interrupt:
-            out = await _client_action_handler(
+            out, _ = await _client_action_tool(
                 kind="invoke", target_type="Settings", target_id="me", action="save", tool_call_id="call-2"
             )
         directive = fake_interrupt.call_args.args[0]["client_action_request"]["directive"]
@@ -252,7 +255,7 @@ class TestInvoke:
                 f"{MODULE}.interrupt", return_value={"ok": True, "detail": "Edit mode on", "content": landed}
             ) as fake_interrupt,
         ):
-            out = await _client_action_handler(
+            out, _ = await _client_action_tool(
                 kind="invoke",
                 target_type="Watch",
                 target_id="w1",
@@ -282,7 +285,7 @@ class TestInvoke:
     @pytest.mark.asyncio
     async def test_invoke_without_args_omits_them(self):
         with patch(f"{MODULE}.interrupt", return_value={"ok": True}) as fake_interrupt:
-            out = await _client_action_handler(
+            out, _ = await _client_action_tool(
                 kind="invoke", target_type="Watch", target_id="w1", action="run_check", tool_call_id="inv-2"
             )
         directive = fake_interrupt.call_args.args[0]["client_action_request"]["directive"]
@@ -292,8 +295,8 @@ class TestInvoke:
     @pytest.mark.asyncio
     async def test_invoke_requires_target_and_action(self):
         with patch(f"{MODULE}.interrupt") as fake_interrupt:
-            assert (await _client_action_handler(kind="invoke", action="edit")).startswith("Error:")
-            assert (await _client_action_handler(kind="invoke", target_type="W", target_id="1")).startswith("Error:")
+            assert (await _client_action_tool(kind="invoke", action="edit"))[0].startswith("Error:")
+            assert (await _client_action_tool(kind="invoke", target_type="W", target_id="1"))[0].startswith("Error:")
         fake_interrupt.assert_not_called()
 
     def test_unknown_action_points_at_the_manifest(self):
@@ -351,3 +354,19 @@ class TestLogRedaction:
         assert "+41796" not in out
         assert "'applied': ['phone']" in out and "'rejected': ['x']" in out and "'previous_fields': ['phone']" in out
         assert "'content_chars': 21" in out
+
+
+class TestLandedObjectsArtifact:
+    """The approval layer reads the landed page's objects from the result's artifact."""
+
+    def test_objects_of_the_landed_page(self):
+        objects = [
+            {"type": "ExistingScheduledJob", "id": "7", "actions": [{"name": "run_now", "requiresApproval": True}]}
+        ]
+        content = json.dumps({"page": {"path": "/app/scheduler/7"}, "objects": objects})
+        assert client_action_artifact({"ok": True, "content": content}) == {"objects": objects}
+
+    def test_nothing_without_a_landed_page(self):
+        assert client_action_artifact({"ok": True}) is None
+        assert client_action_artifact({"ok": True, "content": "not json"}) is None
+        assert client_action_artifact(None) is None

@@ -63,7 +63,7 @@ class ClientActionInput(BaseModel):
             "invoke: run a named action a registered object offers — only one its manifest entry lists "
             "under `actions` (e.g. `edit` to put a detail page in edit mode before apply, open a create "
             "dialog that has no route, run a watch's check, save a form with its `save`). An action marked "
-            "`requires approval` (a form's `save`, \"run now\", \"set as default\") changes something for "
+            '`requires approval` (a form\'s `save`, "run now", "set as default") changes something for '
             "real: the user approves it with a click, so use it only when they want that done, and send "
             "it alone after the results of your fills; the result "
             "carries the page after it ran, including any form it opened; "
@@ -273,14 +273,11 @@ async def _client_action_handler(
     action: str | None = None,
     args: dict[str, Any] | None = None,
     tool_call_id: str = "",
-) -> str:
+) -> str | tuple[str, dict[str, Any] | None]:
     directive: dict[str, Any] = {"kind": kind}
     if kind in ("apply", "highlight", "invoke"):
         if not target_type or not target_id:
-            return (
-                "Error: apply/highlight/invoke require target_type and target_id from the client "
-                "objects manifest."
-            )
+            return "Error: apply/highlight/invoke require target_type and target_id from the client objects manifest."
         directive["target"] = {"type": target_type, "id": target_id}
     if kind == "apply":
         if not values:
@@ -317,7 +314,7 @@ async def _client_action_handler(
         logger.info(f"[CLIENT-ACTION] Awaiting result for directive: {describe_directive(directive)}")
         result = interrupt({"client_action_request": {"id": tool_call_id, "directive": directive}})
         logger.info(f"[CLIENT-ACTION] Result received: {describe_result(result)}")
-        return render_client_action_result(kind, result)
+        return render_client_action_result(kind, result), client_action_artifact(result)
 
     try:
         writer = get_stream_writer()
@@ -333,10 +330,35 @@ async def _client_action_handler(
     return "Directive sent to the client."
 
 
+def client_action_artifact(result: Any) -> dict[str, Any] | None:
+    """The objects of the page a navigate/invoke landed on, as the ToolMessage's artifact.
+
+    The browser reports the landed page (``{"page", "objects"}``) with every navigate and
+    invoke. The model reads it as prose; the approval layer reads it here, so an action
+    marked ``requiresApproval`` on a page opened mid-turn still gets its card — the
+    per-turn object list only knows the page the turn started on.
+    """
+    content = result.get("content") if isinstance(result, dict) else None
+    if not isinstance(content, str):
+        return None
+    try:
+        objects = json.loads(content).get("objects")
+    except (ValueError, AttributeError):
+        return None
+    return {"objects": objects} if isinstance(objects, list) else None
+
+
+async def _client_action_tool(**kwargs: Any) -> tuple[str, dict[str, Any] | None]:
+    """``content_and_artifact`` shape: every early refusal is plain text, no artifact."""
+    answer = await _client_action_handler(**kwargs)
+    return answer if isinstance(answer, tuple) else (answer, None)
+
+
 def create_client_action_tool() -> StructuredTool:
     """Create the per-turn client-action tool (only when a manifest is present)."""
     return StructuredTool.from_function(
-        coroutine=_client_action_handler,
+        coroutine=_client_action_tool,
+        response_format="content_and_artifact",
         name=CLIENT_ACTION_TOOL_NAME,
         description=(
             "Act on the user's application. Use kind='apply' to fill/update a registered "

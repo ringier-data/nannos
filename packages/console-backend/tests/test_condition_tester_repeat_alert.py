@@ -29,7 +29,7 @@ async def test_a_presence_check_on_identified_items_is_flagged_with_the_list_pat
     [note] = _repeat(await _notes("size(result.threads) > 0", THREADS))
     assert note.startswith("If nothing changes before the next run, this fires again")
     assert "the same 2 item(s)" in note
-    assert "result.threads.filter(t, prev == null || !has(prev.threads)" in note
+    assert "result.threads.filter(t, !(prev == null || !has(prev.threads) ? [] : prev.threads)" in note
 
 
 @pytest.mark.asyncio
@@ -54,3 +54,38 @@ async def test_a_lasting_state_is_left_alone():
 @pytest.mark.asyncio
 async def test_a_gate_that_is_not_met_says_nothing_about_repeats():
     assert _repeat(await _notes("size(result.threads) > 5", THREADS)) == []
+
+
+async def _suggested_expression_works(note: str, result: object) -> str:
+    """The hint's own expression: valid CEL that de-duplicates against prev."""
+    import re
+    from datetime import datetime, timezone
+
+    from console_backend.services.cel_condition import evaluate_cel
+
+    suggested = re.search(r"e\.g\. `([^`]+)`", note).group(1)
+    now = datetime.now(timezone.utc)
+    first = await evaluate_cel(suggested, result=result, now=now, prev=None)
+    again = await evaluate_cel(suggested, result=result, now=now, prev=result)
+    assert first.gate and not again.gate, suggested
+    return suggested
+
+
+@pytest.mark.asyncio
+async def test_a_value_that_is_the_list_still_names_where_the_list_lives():
+    # The expression's value supplies the count; the hint must still point at result.threads.
+    [note] = _repeat(await _notes("result.threads.filter(t, true)", THREADS))
+    assert (await _suggested_expression_works(note, THREADS)).startswith("result.threads.filter(")
+
+
+@pytest.mark.asyncio
+async def test_a_top_level_list_gets_a_hint_that_evaluates():
+    items = THREADS["threads"]
+    [note] = _repeat(await _notes("size(result) > 0", items))
+    assert (await _suggested_expression_works(note, items)).startswith("result.filter(")
+
+
+@pytest.mark.asyncio
+async def test_the_nested_hint_evaluates_too():
+    [note] = _repeat(await _notes("size(result.threads) > 0", THREADS))
+    await _suggested_expression_works(note, THREADS)

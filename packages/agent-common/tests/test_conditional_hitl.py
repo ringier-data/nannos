@@ -2,7 +2,7 @@
 
 import types
 
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from agent_common.middleware.conditional_hitl import ConditionalHumanInTheLoopMiddleware
 from agent_common.middleware.ptc_guard import PTC_CODE_INTERPRETER_TOOL_NAME
@@ -672,7 +672,14 @@ class TestActionsThatRequireApproval:
         }
     ]
 
-    async def _run(self, monkeypatch, action: str):
+    async def _run(
+        self,
+        monkeypatch,
+        action: str,
+        bypass_rules: dict | None = None,
+        objects: list | None = None,
+        prior: list | None = None,
+    ):
         captured: dict = {}
 
         def fake_interrupt(request):
@@ -685,6 +692,7 @@ class TestActionsThatRequireApproval:
             return 0.1, None  # invoke's deterministic base score
 
         mw = ConditionalHumanInTheLoopMiddleware(interrupt_on={}, risk_scorer=scorer, default_risk_threshold=0.8)
+        monkeypatch.setattr(mw, "_get_server_slug", lambda *_: "embed")
         args = {"kind": "invoke", "target_type": "GatewayModel", "target_id": "claude-haiku-4-5", "action": action}
         ai = AIMessage(
             content="",
@@ -692,10 +700,13 @@ class TestActionsThatRequireApproval:
         )
         runtime = types.SimpleNamespace(
             context=types.SimpleNamespace(
-                tool_bypass_rules={}, tool_risk_cache=None, _pending_bypass_rules=[], client_objects=self.OBJECTS
+                tool_bypass_rules=bypass_rules or {},
+                tool_risk_cache=None,
+                _pending_bypass_rules=[],
+                client_objects=self.OBJECTS if objects is None else objects,
             )
         )
-        await mw.aafter_model({"messages": [ai]}, runtime)
+        await mw.aafter_model({"messages": [*(prior or []), ai]}, runtime)
         return captured.get("request")
 
     async def test_a_marked_action_is_asked_and_needs_a_click(self, monkeypatch):
@@ -709,3 +720,42 @@ class TestActionsThatRequireApproval:
 
     async def test_an_unmarked_action_runs_without_a_card(self, monkeypatch):
         assert await self._run(monkeypatch, "test") is None
+
+    async def test_a_marked_action_on_a_page_opened_this_turn_is_asked(self, monkeypatch):
+        """The turn started elsewhere; a navigate landed on the page offering the action.
+        Its flag comes from that navigate's result, not the turn-start object list."""
+        navigate = AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "client_action", "args": {"kind": "navigate", "to": "/m"}, "id": "nav", "type": "tool_call"}
+            ],
+        )
+        landed = ToolMessage(
+            content="Navigation done.", name="client_action", tool_call_id="nav", artifact={"objects": self.OBJECTS}
+        )
+        prior = [HumanMessage(content="set haiku as the low default"), navigate, landed]
+        request = await self._run(monkeypatch, "set_tier_default", objects=[], prior=prior)
+        assert request is not None, "the marked action must raise a card"
+        assert request["action_requests"][0]["args"]["_requires_click"] is True
+
+    async def test_a_page_landed_on_in_an_earlier_turn_is_not_read(self, monkeypatch):
+        navigate = AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "client_action", "args": {"kind": "navigate", "to": "/m"}, "id": "nav", "type": "tool_call"}
+            ],
+        )
+        landed = ToolMessage(
+            content="Navigation done.", name="client_action", tool_call_id="nav", artifact={"objects": self.OBJECTS}
+        )
+        prior = [navigate, landed, HumanMessage(content="now on another page")]
+        assert await self._run(monkeypatch, "set_tier_default", objects=[], prior=prior) is None
+
+    async def test_a_bypass_rule_never_skips_the_click(self, monkeypatch):
+        """The browser refuses a marked action without the click, so a standing bypass
+        for ``client_action`` must not drop its card (it would fail on every try)."""
+        rules = {"client_action::embed": {"bypass_all": True}}
+        request = await self._run(monkeypatch, "set_tier_default", bypass_rules=rules)
+        assert request is not None
+        assert request["action_requests"][0]["args"]["_requires_click"] is True
+        assert await self._run(monkeypatch, "test", bypass_rules=rules) is None

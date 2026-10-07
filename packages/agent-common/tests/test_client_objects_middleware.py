@@ -90,9 +90,7 @@ class TestAppendVolatileContextMessage:
 
 class TestClientObjectsMiddleware:
     def test_injects_manifest_as_trailing_message(self):
-        request = _make_request(
-            [HumanMessage(content="do it")], system_message=SystemMessage(content="sys")
-        )
+        request = _make_request([HumanMessage(content="do it")], system_message=SystemMessage(content="sys"))
         mw = ClientObjectsMiddleware()
         with patch(
             "agent_common.middleware.client_objects_middleware._client_objects_from_config",
@@ -343,6 +341,27 @@ class TestWhereItShows:
             result = await ClientObjectsMiddleware().awrap_tool_call(request, handler)
         assert result.content.startswith(self.JOB)
         assert "[Shown on /app/scheduler/1" in result.content
+
+    async def test_an_mcp_result_in_content_blocks_gets_it_too(self):
+        # MCP tools answer with ``[{"type": "text", "text": "<json>"}]``; serializing the
+        # list escaped the inner quotes, so the path never matched.
+        from types import SimpleNamespace
+
+        from agent_common.middleware.client_objects_middleware import ClientObjectsMiddleware
+
+        request = SimpleNamespace(tool_call={"name": "scheduler_pause_job", "args": {}, "id": "t1"})
+        blocks = [{"type": "text", "text": self.JOB}]
+
+        async def handler(_request):
+            return ToolMessage(content=blocks, tool_call_id="t1", name="scheduler_pause_job")
+
+        with patch(
+            "agent_common.middleware.client_objects_middleware._page_context_from_config",
+            return_value={"key": "/app/subagents"},
+        ):
+            result = await ClientObjectsMiddleware().awrap_tool_call(request, handler)
+        assert result.content[0] == blocks[0]
+        assert "[Shown on /app/scheduler/1" in result.content[-1]["text"]
 
     async def test_a_code_interpreter_command_result_gets_it_too(self):
         # ``eval`` answers with a Command carrying its ToolMessage; the note went missing

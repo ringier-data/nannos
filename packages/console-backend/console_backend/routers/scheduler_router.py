@@ -1109,10 +1109,10 @@ async def _repeat_alert_note(data: ValidateConditionRequest, cel: Any) -> str | 
     """
     if not cel.gate or not data.cel_expr:
         return None
-    count = _identified_items(cel.value)
-    list_key: str | None = None
-    if not count:
-        list_key, count = _items_in(data.result)
+    # Where the items live comes from the response even when the expression's value
+    # supplies the count (`result.threads.filter(...)`): the hint names that list.
+    list_key, listed = _items_in(data.result)
+    count = _identified_items(cel.value) or listed
     if not count:
         return None
     try:
@@ -1123,8 +1123,9 @@ async def _repeat_alert_note(data: ValidateConditionRequest, cel: Any) -> str | 
         return None
     reads_prev = _READS_PREV.search(re.sub(r"'[^']*'|\"[^\"]*\"", "", data.cel_expr)) is not None
     items = f"result.{list_key}" if list_key else "result"
-    prev_items = f"prev.{list_key}" if list_key else "prev"
-    guard = f"has({prev_items})" if list_key else f"{prev_items} != null"
+    # Guarded with a conditional, not `prev == null ||`: the evaluator runs a macro on a
+    # null `prev` even behind `||`. A nested list may also be missing from `prev`.
+    seen = f"(prev == null || !has(prev.{list_key}) ? [] : prev.{list_key})" if list_key else "(prev == null ? [] : prev)"
     lead = (
         "It reads prev but still fires when the response has not changed, so it does not de-duplicate"
         if reads_prev
@@ -1133,8 +1134,8 @@ async def _repeat_alert_note(data: ValidateConditionRequest, cel: Any) -> str | 
     return (
         f"{lead}: on a repeating schedule the same {count} item(s) are alerted on every run "
         "(checked by evaluating it with prev = this response). To alert once per new item, "
-        f"keep only items prev did not have, e.g. `{items}.filter(t, prev == null || !{guard} || "
-        f"!{prev_items}.exists(p, p.id == t.id))` (use the items' own id key). If re-alerting "
+        f"keep only items prev did not have, e.g. `{items}.filter(t, !{seen}.exists(p, p.id == t.id))` "
+        "(use the items' own id key). If re-alerting "
         "while they are there is intended, ignore this."
     )
 

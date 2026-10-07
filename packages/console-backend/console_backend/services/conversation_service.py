@@ -58,7 +58,14 @@ class ConversationService:
             return None
 
     async def get_conversations_by_user_id(
-        self, user_id: str, limit: int = 20, search: str | None = None
+        self,
+        user_id: str,
+        limit: int = 20,
+        search: str | None = None,
+        *,
+        sub_agent_config_hash: str | None = None,
+        exclude_playground: bool = False,
+        embedded_sub_agent_id: str | None = None,
     ) -> list[Conversation]:
         """Retrieve conversations for a user.
 
@@ -66,6 +73,12 @@ class ConversationService:
             user_id: The user ID
             limit: Maximum number of conversations to return (default: 20)
             search: Optional case-insensitive substring to filter conversations by title
+            sub_agent_config_hash: Only one playground version's conversations
+            exclude_playground: Leave out playground conversations (config hash set)
+            embedded_sub_agent_id: Only one embedded application's conversations
+
+        Every filter is applied before the LIMIT: filtered afterwards, a user whose newest
+        conversations are elsewhere (main chat, Slack) got an empty or short list.
 
         Returns:
             List of ACTIVE conversations ordered by last_message_at (newest first).
@@ -81,6 +94,14 @@ class ConversationService:
             if search and search.strip():
                 conditions.append(like_clause("title"))
                 params["search"] = like_contains(search.strip())
+            if sub_agent_config_hash is not None:
+                conditions.append("sub_agent_config_hash = :sub_agent_config_hash")
+                params["sub_agent_config_hash"] = sub_agent_config_hash
+            elif exclude_playground:
+                conditions.append("sub_agent_config_hash IS NULL")
+            if embedded_sub_agent_id is not None:
+                conditions.append("metadata->>'embedded_sub_agent_id' = :embedded_sub_agent_id")
+                params["embedded_sub_agent_id"] = embedded_sub_agent_id
 
             query = (
                 "SELECT * FROM conversations "

@@ -83,19 +83,6 @@ async def get_conversations_by_user(
         if not config.is_local() and str(user_id) != user.id:
             raise HTTPException(status_code=403, detail="Insufficient permissions for requested user_id")
 
-        conversations = await request.app.state.conversation_service.get_conversations_by_user_id(
-            user_id=str(user_id),
-            limit=limit,
-            search=search,
-        )
-
-        # Filter by sub_agent_config_hash if provided
-        if sub_agent_config_hash is not None:
-            conversations = [c for c in conversations if c.sub_agent_config_hash == sub_agent_config_hash]
-        elif exclude_playground:
-            # Exclude playground conversations (those with sub_agent_config_hash set)
-            conversations = [c for c in conversations if c.sub_agent_config_hash is None]
-
         # Embedded hosts (ADR-0006): the scope comes from the bearer token's azp (or, for a
         # token the broker minted for a host, its aud) when that client id is bound to a
         # sub-agent, never from the query string alone.
@@ -104,7 +91,18 @@ async def get_conversations_by_user(
             bound = await embed_service.sub_agent_id_for_token_claims(await get_token_claims_from_request(request))
             if bound is not None:
                 embedded_sub_agent_id = str(bound)
-        # Scope to one embedded application's conversations (see docstring).
+
+        # Filtered in the query, before its LIMIT (see the service).
+        conversations = await request.app.state.conversation_service.get_conversations_by_user_id(
+            user_id=str(user_id),
+            limit=limit,
+            search=search,
+            sub_agent_config_hash=sub_agent_config_hash,
+            exclude_playground=exclude_playground,
+            embedded_sub_agent_id=embedded_sub_agent_id,
+        )
+        # The embed scope again on what came back: a host page must never receive another
+        # application's (or the console's) conversation titles, whatever the store did.
         if embedded_sub_agent_id is not None:
             conversations = [
                 c for c in conversations if c.metadata.get("embedded_sub_agent_id") == embedded_sub_agent_id

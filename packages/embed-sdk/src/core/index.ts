@@ -93,8 +93,19 @@ export class NannosCore {
   readonly config: NannosConfig;
 
   constructor(rawConfig: NannosConfig, ioFactory?: IoFactory) {
-    // A form that leaves the screen takes its unsaved-change entries along.
-    this.registry.onChange(() => this.changes.prune((t) => !!this.registry.get(t.type, t.id)));
+    // A form that leaves the screen takes its unsaved-change entries along. Checked a
+    // microtask later: a host re-registering a form (its React effect re-running when its
+    // actions or schema change, e.g. after the assistant's own fill) disposes and registers
+    // it again in one commit, and must keep its marks and undo.
+    let pruneQueued = false;
+    this.registry.onChange(() => {
+      if (pruneQueued) return;
+      pruneQueued = true;
+      queueMicrotask(() => {
+        pruneQueued = false;
+        this.changes.prune((t) => !!this.registry.get(t.type, t.id));
+      });
+    });
     // Auth resolution: `getToken` (host-token) and `auth` (self-login) are
     // mutually exclusive. If both are given, the host-token path wins (it's the
     // recommended zero-login path) and `auth` is ignored with a warning.

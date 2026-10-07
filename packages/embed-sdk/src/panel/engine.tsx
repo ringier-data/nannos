@@ -237,7 +237,10 @@ function ChatScopeInner({
         enableThinking: settingsRef.current.enableThinking,
       }),
       ...(settingsRef.current.thinkingLevel && { thinkingLevel: settingsRef.current.thinkingLevel }),
-      ...(core.manifest().length > 0 && { clientObjects: core.manifest() }),
+      // The page's objects go with an embedded scope only — a host's own chat, or the
+      // console's dock. The console's main chat and playground talk to other agents: they
+      // were handed `client_action` and the objects prompt on every turn.
+      ...(embedded && core.manifest().length > 0 && { clientObjects: core.manifest() }),
       ...(pageContextRef.current && { pageContext: pageContextRef.current }),
       ...(playground && {
         subAgentConfigHash: playground.subAgentConfigHash,

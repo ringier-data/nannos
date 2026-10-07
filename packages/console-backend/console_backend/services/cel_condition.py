@@ -521,6 +521,13 @@ def _evaluate_sync(expr: str, result: Any, now: datetime, prev: Any) -> CelEvalu
         raw = program.evaluate(activation)
     except CELEvalError as exc:
         raise CelEvaluationError(str(exc)) from exc
+    except TypeError as exc:
+        # celpy runs a macro (`exists`, `filter`, `map`) on null as Python iteration,
+        # even behind `prev == null ||`: report it like any failed evaluation.
+        raise CelEvaluationError(
+            f"{exc} — a macro (exists/filter/map/all) ran on a null value; "
+            "use (x == null ? [] : x).exists(...) to guard it."
+        ) from exc
 
     if isinstance(raw, celtypes.BoolType):
         return CelEvaluation(value=bool(raw), gate=bool(raw), is_boolean=True)

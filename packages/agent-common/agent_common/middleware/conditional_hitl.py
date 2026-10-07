@@ -48,7 +48,11 @@ from langchain_quickjs._prompt import to_camel_case
 from langgraph.runtime import Runtime
 from langgraph.types import interrupt
 
-from agent_common.core.client_action_tool import CLIENT_ACTION_TOOL_NAME, render_client_action_result
+from agent_common.core.client_action_tool import (
+    CLIENT_ACTION_TOOL_NAME,
+    client_action_artifact,
+    render_client_action_result,
+)
 from agent_common.core.hitl_resume import REFUSAL_LEADS, decisions_from_resume, decisions_from_resume_sync
 from agent_common.core.tool_risk_cache import ToolRiskCache, ToolRiskEntry
 from agent_common.middleware.ptc_guard import PTC_CODE_INTERPRETER_TOOL_NAME
@@ -114,6 +118,7 @@ def _client_action_tool_message(decision: dict[str, Any], tool_call: ToolCall) -
     kind = str((tool_call.get("args") or {}).get("kind") or "")
     return ToolMessage(
         content=render_client_action_result(kind, result),
+        artifact=client_action_artifact(result),
         name=tool_call["name"],
         tool_call_id=tool_call["id"],
         status="success" if result.get("ok") else "error",
@@ -142,19 +147,38 @@ def _answered(last_ai_msg: AIMessage, tool_messages: list[ToolMessage]) -> dict[
 _SAVE_SCORE = 0.9
 
 
-def _invoke_requires_approval(args: dict[str, Any], context: Any) -> bool:
+def _invoke_requires_approval(args: dict[str, Any], context: Any, messages: list[BaseMessage] | None = None) -> bool:
     """Whether a ``client_action`` invoke targets an action the host marked ``requiresApproval``.
 
     An action never saves by default, so ``invoke`` runs without a card. A host marks the
     ones that do save (a "set as default" button, "run now") and they get the save's card.
-    Read from the per-turn object list the page sent — the orchestrator's runtime context
-    or, for an embedded sub-agent, the run's config metadata.
+    Read from the object list the page sent with the turn — the orchestrator's runtime
+    context or, for an embedded sub-agent, the run's config metadata — and from the page a
+    navigate/invoke of this turn landed on (its ToolMessage artifact): an action on a page
+    opened mid-turn is in no turn-start list. Marked in either is marked.
     """
     if args.get("kind") != "invoke":
         return False
     from agent_common.middleware.client_objects_middleware import _client_objects_from_config
 
-    objects = getattr(context, "client_objects", None) or _client_objects_from_config() or []
+    turn_start = getattr(context, "client_objects", None) or _client_objects_from_config() or []
+    sources = [turn_start, _landed_objects(messages or [])]
+    return any(_marked(objects, args) for objects in sources)
+
+
+def _landed_objects(messages: list[BaseMessage]) -> list[Any]:
+    """The objects of the newest page a ``client_action`` of this user turn landed on."""
+    for message in reversed(messages):
+        if isinstance(message, HumanMessage):
+            break
+        if isinstance(message, ToolMessage) and message.name == CLIENT_ACTION_TOOL_NAME:
+            artifact = message.artifact
+            if isinstance(artifact, dict) and isinstance(artifact.get("objects"), list):
+                return artifact["objects"]
+    return []
+
+
+def _marked(objects: Any, args: dict[str, Any]) -> bool:
     for obj in objects if isinstance(objects, list) else []:
         if not isinstance(obj, dict) or obj.get("type") != args.get("target_type"):
             continue
@@ -536,7 +560,7 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
                 for tc in last_ai_msg.tool_calls
                 if tc["name"] == CLIENT_ACTION_TOOL_NAME
                 and (tc.get("args") or {}).get("kind") == "invoke"
-                and not _invoke_requires_approval(tc.get("args") or {}, step_context)
+                and not _invoke_requires_approval(tc.get("args") or {}, step_context, messages)
             ),
             None,
         )
@@ -601,11 +625,7 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
             #     ``apply`` then fills), so every OTHER ``client_action`` of its step
             #     could reach the browser before the screen it was written for exists.
             #     The invoke runs; the others are answered and resent next step.
-            if (
-                step_invoke is not None
-                and tool_name == CLIENT_ACTION_TOOL_NAME
-                and tool_call is not step_invoke
-            ):
+            if step_invoke is not None and tool_name == CLIENT_ACTION_TOOL_NAME and tool_call is not step_invoke:
                 kind = args.get("kind")
                 action = (step_invoke.get("args") or {}).get("action")
                 corrective_messages[idx] = ToolMessage(
@@ -621,7 +641,7 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
             if (
                 tool_name == CLIENT_ACTION_TOOL_NAME
                 and len(last_ai_msg.tool_calls) > 1
-                and _invoke_requires_approval(args, step_context)
+                and _invoke_requires_approval(args, step_context, messages)
             ):
                 action = args.get("action")
                 corrective_messages[idx] = ToolMessage(
@@ -657,13 +677,15 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
 
             # Check bypass rules from runtime context
             context: Any = getattr(runtime, "context", None)
-            requires_click = tool_name == CLIENT_ACTION_TOOL_NAME and _invoke_requires_approval(args, context)
+            requires_click = tool_name == CLIENT_ACTION_TOOL_NAME and _invoke_requires_approval(args, context, messages)
             bypass_rules: dict[str, BypassRule] | None = (
                 getattr(context, "tool_bypass_rules", None) if context else None
             )
             server_slug: str = self._get_server_slug(tool_name, context)
 
-            if bypass_rules and self._is_bypassed(tool_name, server_slug, args, bypass_rules):
+            # A standing bypass never covers a click-only action: the browser refuses it
+            # without the click, so skipping the card would only make it fail every time.
+            if not requires_click and bypass_rules and self._is_bypassed(tool_name, server_slug, args, bypass_rules):
                 continue
 
             # Get tool instance and cache from context

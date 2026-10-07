@@ -197,10 +197,8 @@ def render_current_page_block(page_context: Any) -> str | None:
         "<current_page>\n"
         "The user is currently on this page in the application. It updates as they "
         "navigate, so earlier messages in the conversation may have been sent from "
-        "other pages. Resolve references like \"this page\", \"here\", \"this "
-        "campaign\", or \"the second one\" against it.\n"
-        + "\n".join(lines)
-        + "\n</current_page>"
+        'other pages. Resolve references like "this page", "here", "this '
+        'campaign", or "the second one" against it.\n' + "\n".join(lines) + "\n</current_page>"
     )
 
 
@@ -286,7 +284,9 @@ def where_it_shows_note(content: str, page_context: Any, client_objects: Any = N
 
 def _command_fields(command: Command) -> dict[str, Any]:
     """A Command's constructor fields, to rebuild it with a changed update."""
-    return {k: getattr(command, k) for k in ("graph", "update", "resume", "goto") if getattr(command, k, None) is not None}
+    return {
+        k: getattr(command, k) for k in ("graph", "update", "resume", "goto") if getattr(command, k, None) is not None
+    }
 
 
 class ClientObjectsMiddleware(AgentMiddleware):
@@ -313,8 +313,19 @@ class ClientObjectsMiddleware(AgentMiddleware):
 
     @staticmethod
     def _with_note(message: ToolMessage, page_context: Any, client_objects: Any = None) -> ToolMessage:
+        if not page_context:
+            return message  # no page (not an embedded turn): nothing to compare against
         content = message.content
-        text = content if isinstance(content, str) else json.dumps(content, default=str)
+        # MCP results arrive as content blocks; their JSON is in the text, unescaped.
+        text = (
+            content
+            if isinstance(content, str)
+            else "\n".join(
+                b if isinstance(b, str) else str(b.get("text") or "")
+                for b in content
+                if isinstance(b, str) or isinstance(b, dict)
+            )
+        )
         note = where_it_shows_note(text, page_context, client_objects)
         if not note:
             return message

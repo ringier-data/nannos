@@ -48,9 +48,9 @@ const ADAPTER: NannosHostAdapter = {
   api: { getUserSettings: async () => null },
 };
 
-function mountScope() {
+function mountScope(config: Parameters<typeof createNannos>[0] = {}) {
   const sockets: FakeSocket[] = [];
-  const core = createNannos({}, () => {
+  const core = createNannos(config, () => {
     const socket = new FakeSocket();
     sockets.push(socket);
     return socket as unknown as Socket;
@@ -185,6 +185,28 @@ describe('NannosChatScope lifecycle', () => {
       key: '/campaigns/7',
       title: 'Campaign 7',
     });
+  });
+
+  it("sends the page's objects only from an embedded scope", async () => {
+    // A host's own chat drives its page; the console's main chat (cookie session, its
+    // own agents) must not get `client_action` and the objects prompt on every turn.
+    const sentObjects = async (config: Parameters<typeof createNannos>[0]) => {
+      const scope = mountScope(config);
+      const socket = scope.socket();
+      await handshake(socket);
+      scope.core.register({ type: 'Page', id: '/a', scope: 'view', getState: () => ({}), apply: () => {} });
+      await scope.engine().transport.sendMessages({
+        trigger: 'submit-message',
+        chatId: 'conv-1',
+        messageId: undefined,
+        messages: [USER_MESSAGE],
+        abortSignal: undefined,
+      });
+      const [, payload] = socket.emitted.find(([e]) => e === 'send_message')! as [string, { metadata?: Record<string, unknown> }];
+      return payload.metadata?.clientObjects;
+    };
+    expect(await sentObjects({})).toBeUndefined();
+    expect(await sentObjects({ getToken: async () => 't' })).toHaveLength(1);
   });
 
   it('handshakes a socket that connects AFTER the scope asked to initialize', async () => {

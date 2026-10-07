@@ -438,12 +438,9 @@ _DESTRUCTIVE_FLOOR_SCORE = 0.9
 # form's ``save``), which conditional_hitl raises to a card from the page's object list
 # — it is the action, not the kind, that saves. ``apply`` only writes into the on-screen form — validated per field,
 # marked as changed, saved by nobody — so it runs without a card, like typing would.
-# Unknown/new kinds default to gating (fail safe). ``refresh``/``invalidate`` are
-# listed ahead of that kind landing.
+# Unknown/new kinds default to gating (fail safe).
 _CLIENT_ACTION_KIND_SCORES: dict[str | None, float] = {
     "apply": 0.1,
-    "refresh": 0.9,
-    "invalidate": 0.9,
     "highlight": 0.1,
     # Also with ``discard_changes``: it drops only the unsaved values the ASSISTANT
     # typed (never a saved record), and the tool contract lets the model set it only
