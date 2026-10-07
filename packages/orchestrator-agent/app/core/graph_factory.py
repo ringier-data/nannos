@@ -42,6 +42,7 @@ from agent_common.core.model_factory import (
 from agent_common.core.notify_user_tool import create_notify_user_tool
 from agent_common.core.step_budget import recursion_limit_for
 from agent_common.core.tool_risk_scorer import score_tool_risk
+from agent_common.middleware.answer_after_refusal import AnswerAfterRefusalMiddleware
 from agent_common.middleware.conditional_hitl import ConditionalHumanInTheLoopMiddleware
 from agent_common.middleware.continue_on_truncation import ContinueOnTruncationMiddleware
 from agent_common.middleware.premature_final_response import PrematureFinalResponseMiddleware
@@ -799,6 +800,9 @@ class GraphFactory:
             # the checkpointer see the cleaned message (prevents the model from
             # imitating its own text+tool-call pattern on later turns).
             FinalResponseTextStripMiddleware(),
+            # After a refused or blocked call, only FinalResponseSchema is offered on the
+            # next step. Innermost, so the registry tools injected above are filtered too.
+            AnswerAfterRefusalMiddleware(),
         ]
         return middleware_stack
 

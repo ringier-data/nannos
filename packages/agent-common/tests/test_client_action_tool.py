@@ -391,3 +391,40 @@ class TestDescribeClientObjects:
         line = describe_client_objects(objects)
         assert line == "2 object(s): DeliveryChannel:3(update unsaved), Page:/app/settings(view)"
         assert "secret-token" not in line
+
+
+class TestObjectArgsAsJsonStrings:
+    """Gemini sent `values` as `{}` (an open object loses its keys); the JSON-string form works."""
+
+    @pytest.mark.asyncio
+    async def test_values_as_a_json_string_are_applied(self):
+        with patch(
+            "agent_common.core.client_action_tool.interrupt",
+            return_value={"ok": True, "applied": ["language"], "rejected": []},
+        ) as fake_interrupt:
+            out, _ = await _client_action_tool(
+                kind="apply", target_type="Settings", target_id="me", values='{"language": "de"}', tool_call_id="c1"
+            )
+        directive = fake_interrupt.call_args.args[0]["client_action_request"]["directive"]
+        assert directive["values"] == {"language": "de"}
+        assert "language" in out
+
+    @pytest.mark.asyncio
+    async def test_empty_values_say_what_to_send(self):
+        out, _ = await _client_action_tool(kind="apply", target_type="Settings", target_id="me", values={})
+        assert out.startswith("Error: apply needs `values`")
+        assert "JSON string" in out
+
+    @pytest.mark.asyncio
+    async def test_invoke_args_as_a_json_string(self):
+        with patch("agent_common.core.client_action_tool.interrupt", return_value={"ok": True}) as fake_interrupt:
+            await _client_action_tool(
+                kind="invoke",
+                target_type="Settings",
+                target_id="me",
+                action="change_phone",
+                args='{"phone": "+41791234567"}',
+                tool_call_id="c2",
+            )
+        directive = fake_interrupt.call_args.args[0]["client_action_request"]["directive"]
+        assert directive["args"] == {"phone": "+41791234567"}

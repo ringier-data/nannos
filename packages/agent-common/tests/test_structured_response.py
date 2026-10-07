@@ -171,7 +171,10 @@ def test_a_turn_that_ended_on_a_blocked_call_never_replays_the_previous_answer()
         ),
     ]
     out = _Translator()._translate_agent_result({"structured_response": previous, "messages": messages}, None, None)
-    assert out == ("success", "BLOCKED: client_action called 6 times with identical arguments")
+    # Reported in plain words: the block text is an instruction to the model, not a reply.
+    from agent_common.a2a.structured_response import STOPPED_REPLY
+
+    assert out == ("success", STOPPED_REPLY)
 
 
 def test_this_turns_structured_response_is_still_used():

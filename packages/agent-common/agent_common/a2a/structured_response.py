@@ -74,6 +74,30 @@ Do not leave the task state ambiguous.
 """
 
 
+#: The reply when a run was force-stopped by loop detection: the model never answered, and
+#: the block text ("BLOCKED: 'client_action[apply]' — …") is an instruction to the model.
+STOPPED_REPLY = (
+    "I stopped working on this because I kept repeating the same step without getting anywhere, "
+    "so it was not finished. Tell me how you would like to continue."
+)
+
+
+def unanswered_turn_reply(turn_messages: list[Any], response_tool: str) -> str | None:
+    """The reply for a turn that ended on a tool result the model never reacted to, or None.
+
+    ``turn_messages`` are this turn's messages only. A turn that ends on a tool result
+    other than the response tool has no answer: a loop force-stop (reported in plain
+    words), or a result the model never saw (reported as it is). Either way the previous
+    turn's answer, still in the persisted ``structured_response`` channel, must not be
+    replayed as this turn's.
+    """
+    last = turn_messages[-1] if turn_messages else None
+    if not isinstance(last, ToolMessage) or last.name == response_tool:
+        return None
+    content = last.content if isinstance(last.content, str) else str(last.content)
+    return STOPPED_REPLY if content.startswith("BLOCKED: ") else content
+
+
 def select_response_format(
     model_type: Optional[str],
     schema: type,
@@ -226,15 +250,13 @@ class StructuredResponseMixin:
         # there — and a thread's earlier response tool calls are still in the history.
         turn_start = max((i for i, m in enumerate(all_messages) if isinstance(m, HumanMessage)), default=-1) + 1
         messages = all_messages[turn_start:]
-        last = messages[-1] if messages else None
-        if isinstance(last, ToolMessage) and last.name != SubAgentResponseSchema.__name__:
-            # The run ended on a tool result the model never got to react to — a loop
-            # block, a force-stop. There is no answer for this turn; the result that is
-            # there explains why, and is the only honest thing to report. Replaying the
-            # previous turn's answer as if it were new is not.
+        # The run ended on a tool result the model never got to react to — a loop block,
+        # a force-stop. There is no answer for this turn: report why, never the previous
+        # turn's answer as if it were new.
+        stopped = unanswered_turn_reply(messages, SubAgentResponseSchema.__name__)
+        if stopped is not None:
             logger.warning(f"Run of '{agent_name}' ended on an unanswered tool result; reporting it as the reply")
-            content = last.content if isinstance(last.content, str) else str(last.content)
-            return self._build_success_response(content, context_id=context_id, task_id=task_id)  # type: ignore[attr-defined]
+            return self._build_success_response(stopped, context_id=context_id, task_id=task_id)  # type: ignore[attr-defined]
 
         # Check for structured_response (AutoStrategy for OpenAI)
         structured_response = result.get("structured_response")

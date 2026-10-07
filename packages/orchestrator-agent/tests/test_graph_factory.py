@@ -115,7 +115,7 @@ class TestMiddlewareStack:
         # cache, user prefs after steering, playbook after prefs, then the code
         # interpreter (_PTCToleranceCodeInterpreterMiddleware, which exposes the
         # eval REPL + PTC bridge and hides PTC-exposed tools from the model itself).
-        assert len(stack) == 19
+        assert len(stack) == 20
         # stack[0] = ContinueOnTruncationMiddleware — outermost model-call wrapper; re-runs a
         # turn cut off mid-generation with a nudge + raised max_tokens. Only implements
         # wrap_model_call, so the context gate remains the outermost *tool-shaping* middleware.
@@ -151,6 +151,8 @@ class TestMiddlewareStack:
         # Innermost: strips duplicate plain-text content from AIMessages that
         # carry a FinalResponseSchema tool call.
         assert stack[18].__class__.__name__ == "FinalResponseTextStripMiddleware"
+        # Innermost: after a refused or blocked call only FinalResponseSchema is offered.
+        assert stack[19].__class__.__name__ == "AnswerAfterRefusalMiddleware"
 
     @patch("app.core.graph_factory._has_aws_credentials", return_value=True)
     @patch("langgraph.store.postgres.aio.AsyncPostgresStore")
@@ -196,7 +198,7 @@ class TestMiddlewareStack:
         # LiteLLM caching is present even for non-Bedrock models...
         assert any(isinstance(m, LiteLLMPromptCachingMiddleware) for m in stack)
         # ...and the stack matches the Bedrock case (no provider-conditional branch).
-        assert len(stack) == 19
+        assert len(stack) == 20
 
     @patch("app.core.graph_factory._has_aws_credentials", return_value=True)
     @patch("langgraph.store.postgres.aio.AsyncPostgresStore")

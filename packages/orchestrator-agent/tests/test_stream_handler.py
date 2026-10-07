@@ -112,6 +112,26 @@ class TestParseAgentResponse:
         assert response.state == TaskState.TASK_STATE_COMPLETED
         assert response.content == "Hi! How can I help?"
 
+    def test_a_force_stopped_turn_never_replays_the_previous_answer(self):
+        """``structured_response`` is persisted: after a loop force-stop it still holds the
+        previous turn's answer, which must not be reported as this turn's."""
+        call = {"name": "console_create_bug_report", "args": {}, "id": "c1", "type": "tool_call"}
+        final_state = {
+            "messages": [
+                HumanMessage(content="first"),
+                AIMessage(content="", tool_calls=[{"name": "FinalResponseSchema", "args": {}, "id": "f", "type": "tool_call"}]),
+                HumanMessage(content="second"),
+                AIMessage(content="", tool_calls=[call]),
+                ToolMessage(content="BLOCKED: 'console_create_bug_report' — looped", tool_call_id="c1"),
+            ],
+            "structured_response": {"task_state": "completed", "message": "The PREVIOUS turn's answer"},
+        }
+
+        response = StreamHandler.parse_agent_response(final_state)
+
+        assert "PREVIOUS" not in response.content
+        assert response.content.startswith("I stopped working on this")
+
     def test_parse_agent_response_with_empty_messages(self):
         """Test parsing with no messages."""
         final_state = {"messages": []}

@@ -8,6 +8,7 @@ import logging
 from typing import Any, Dict, Optional
 
 from a2a.types import TaskState
+from agent_common.a2a.structured_response import unanswered_turn_reply
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from ringier_a2a_sdk.utils.streaming import extract_text_from_content
 
@@ -345,6 +346,16 @@ class StreamHandler:
                                 break
                         if structured_response:
                             break
+
+        # A turn that ended on a tool result the model never answered (a loop force-stop)
+        # has no answer: say so, rather than fall back to ``structured_response`` below —
+        # a persisted channel still holding the PREVIOUS turn's answer.
+        if not structured_response and isinstance(final_state, dict):
+            turn = current_turn_messages(final_state.get("messages") or [])
+            stopped = unanswered_turn_reply(turn, "FinalResponseSchema")
+            if stopped is not None:
+                logger.warning("[STREAM HANDLER] Turn ended on an unanswered tool result; reporting it as the reply")
+                return AgentStreamResponse(state=TaskState.TASK_STATE_COMPLETED, content=stopped)
 
         # FALLBACK: Check structured_response from final_state (may be set by AutoStrategy for OpenAI)
         # Only use if we didn't find a tool call in the current turn

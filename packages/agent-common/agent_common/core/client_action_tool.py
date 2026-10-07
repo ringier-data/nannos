@@ -78,9 +78,13 @@ class ClientActionInput(BaseModel):
     target_id: Optional[str] = Field(
         default=None, description="Instance id of the target object (from the client objects manifest)."
     )
-    values: Optional[dict[str, Any]] = Field(
+    # Also a JSON string: some models (Gemini) send an open object as `{}`, losing every key.
+    values: Optional[dict[str, Any] | str] = Field(
         default=None,
-        description="apply only: field values to write. Keys must match the object's fields.",
+        description=(
+            "apply only: field values to write, an object whose keys are the object's fields "
+            '(e.g. {"language": "de"}); the same object as a JSON string is accepted too.'
+        ),
     )
     field: Optional[str] = Field(default=None, description="highlight only: specific field to highlight.")
     to: Optional[str] = Field(default=None, description="navigate only: the path/route to open.")
@@ -94,8 +98,12 @@ class ClientActionInput(BaseModel):
     action: str | None = Field(
         default=None, description="invoke only: the action name, exactly as the object's `actions` list it."
     )
-    args: dict[str, Any] | None = Field(
-        default=None, description="invoke only: arguments for the action, matching its declared params."
+    args: dict[str, Any] | str | None = Field(
+        default=None,
+        description=(
+            "invoke only: arguments for the action, matching its declared params (an object, or the "
+            "same object as a JSON string)."
+        ),
     )
     confirm: bool = Field(
         default=True,
@@ -279,17 +287,27 @@ def render_client_action_result(kind: str, result: Any) -> str:
     return f"The client executed '{kind}' successfully."
 
 
+def _object_arg(value: Any) -> dict[str, Any] | None:
+    """An object argument, also when it was sent as a JSON string."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return None
+    return value if isinstance(value, dict) else None
+
+
 async def _client_action_handler(
     kind: str,
     target_type: str | None = None,
     target_id: str | None = None,
-    values: dict[str, Any] | None = None,
+    values: dict[str, Any] | str | None = None,
     field: str | None = None,
     to: str | None = None,
     confirm: bool = True,
     discard_changes: bool = False,
     action: str | None = None,
-    args: dict[str, Any] | None = None,
+    args: dict[str, Any] | str | None = None,
     tool_call_id: str = "",
 ) -> str | tuple[str, dict[str, Any] | None]:
     directive: dict[str, Any] = {"kind": kind}
@@ -298,8 +316,14 @@ async def _client_action_handler(
             return "Error: apply/highlight/invoke require target_type and target_id from the client objects manifest."
         directive["target"] = {"type": target_type, "id": target_id}
     if kind == "apply":
+        values = _object_arg(values)
         if not values:
-            return "Error: apply requires non-empty values."
+            return (
+                "Error: apply needs `values`: an object mapping each field to its new value, e.g. "
+                '{"language": "de", "timezone": "Europe/Zurich"}. It arrived empty — if your object '
+                'came through without its keys, send the same object as a JSON string: '
+                '"{\\"language\\": \\"de\\"}".'
+            )
         directive["values"] = values
         directive["confirm"] = confirm
     if kind == "highlight" and field:
@@ -316,6 +340,7 @@ async def _client_action_handler(
         if not action:
             return "Error: invoke requires 'action' — a name from the object's `actions` in the manifest."
         directive["action"] = action
+        args = _object_arg(args)
         if args:
             directive["args"] = args
 
