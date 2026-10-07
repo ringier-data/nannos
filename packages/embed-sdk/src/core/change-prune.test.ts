@@ -88,3 +88,19 @@ describe('dispose', () => {
     expect(c.registry.get('Job', 'new')?.scope).toBe('view');
   });
 });
+
+describe('one key, page and dialog', () => {
+  it("brings the page's view back when the dialog's form, registered over it, disposes", () => {
+    // Edit dialog closing: the form leaves `X:5`, the page's view registers `X:new`,
+    // the form's effect re-runs onto `X:new`, then the exit animation unmounts it.
+    const c = core();
+    const edit = c.register({ type: 'Job', id: '5', scope: 'update', getState: () => ({}), apply: () => {} });
+    edit.dispose();
+    c.register({ type: 'Job', id: 'new', scope: 'view', getState: () => ({}), apply: () => {} });
+    const closing = c.register({ type: 'Job', id: 'new', scope: 'create', getState: () => ({}), apply: () => {} });
+    expect(c.registry.get('Job', 'new')?.scope).toBe('create');
+    closing.dispose();
+    expect(c.registry.get('Job', 'new')?.scope).toBe('view');
+    expect(c.registry.keys()).toEqual(['Job:new']);
+  });
+});

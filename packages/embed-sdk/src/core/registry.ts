@@ -6,20 +6,32 @@ import type { ManifestEntry, ObjectHandle, RegisterInput } from './types';
  * client-action (the widget can never touch anything not in this map).
  */
 export class ObjectRegistry {
-  private readonly objects = new Map<string, RegisterInput>();
+  // Registrations per key, newest last. A page and its dialog can hold one key at once
+  // (a view's `create` under `X:new`, the create form opening over it), and a closing
+  // dialog disposes after its exit animation, in either order relative to the page's
+  // re-registration: the newest live entry is the object, and disposing it brings back
+  // the one beneath.
+  private readonly stacks = new Map<string, RegisterInput[]>();
   private readonly listeners = new Set<() => void>();
+
+  /** The current registration per key. */
+  private get objects(): Map<string, RegisterInput> {
+    return new Map([...this.stacks].map(([key, stack]) => [key, stack[stack.length - 1]]));
+  }
 
   register<TState>(input: RegisterInput<TState>): ObjectHandle {
     const key = `${input.type}:${input.id}`;
-    this.objects.set(key, input as RegisterInput);
+    const entry = input as RegisterInput;
+    this.stacks.set(key, [...(this.stacks.get(key) ?? []), entry]);
     this.emit();
     return {
       key,
-      // Only its own entry: a dialog's form disposes after its exit animation, by
-      // which time the page may have registered a view under the same key.
       dispose: () => {
-        if (this.objects.get(key) !== input) return;
-        this.objects.delete(key);
+        const stack = this.stacks.get(key);
+        if (!stack?.includes(entry)) return;
+        const rest = stack.filter((e) => e !== entry);
+        if (rest.length) this.stacks.set(key, rest);
+        else this.stacks.delete(key);
         this.emit();
       },
     };

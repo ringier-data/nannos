@@ -961,9 +961,10 @@ function SubAgentDetail() {
     });
 
     setShowChangeSummaryDialog(false);
-    setChangeSummary('');
     try {
       const saved = await saving;
+      // Cleared only once saved: a retry through open_save_dialog keeps what was written.
+      setChangeSummary('');
       // Why the version stayed a draft, measured by the backend — so the assistant
       // repeats the real reason instead of guessing one.
       const blockers = saved?.approval_blockers;
