@@ -1810,7 +1810,14 @@ function RunHistoryTable({ runs, filtered }: { runs: ScheduledJobRun[]; filtered
 
 const RUNS_PAGE_SIZE = 50;
 
+// Keyed by the route id, like the sub-agent and group pages: going from one job to
+// another must not carry the first job's form into the second, where Save writes it.
 export function SchedulerJobDetailPage() {
+  const { id } = useParams<{ id: string }>();
+  return <SchedulerJobDetail key={id} />;
+}
+
+function SchedulerJobDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const qc = useQueryClient();

@@ -15,7 +15,10 @@ export class ObjectRegistry {
     this.emit();
     return {
       key,
+      // Only its own entry: a dialog's form disposes after its exit animation, by
+      // which time the page may have registered a view under the same key.
       dispose: () => {
+        if (this.objects.get(key) !== input) return;
         this.objects.delete(key);
         this.emit();
       },

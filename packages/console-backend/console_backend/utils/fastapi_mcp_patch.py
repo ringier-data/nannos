@@ -81,12 +81,16 @@ def _takes_null(schema: Dict[str, Any]) -> bool:
 
 
 def nullable_properties_accept_null(tools: Any) -> Any:
-    """Drop the injected top-level ``type`` from every property whose union includes null."""
+    """Nullable properties: no injected top-level ``type``, and ``null`` not shown as the default."""
     for tool in tools:
         properties = (getattr(tool, "inputSchema", None) or {}).get("properties") or {}
         for prop in properties.values():
-            if isinstance(prop, dict) and "type" in prop and _takes_null(prop):
-                del prop["type"]
+            if isinstance(prop, dict) and _takes_null(prop):
+                prop.pop("type", None)
+                # Not advertised as the default: a model copying the default into every
+                # unused optional would clear those fields on a PATCH route.
+                if "default" in prop and prop["default"] is None:
+                    del prop["default"]
     return tools
 
 

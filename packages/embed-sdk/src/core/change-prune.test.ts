@@ -76,3 +76,15 @@ describe('undo', () => {
     expect(c.changes.pending()).toHaveLength(1);
   });
 });
+
+describe('dispose', () => {
+  it("removes only its own registration, not a newer one under the same key", () => {
+    // A dialog's form disposes after its exit animation; the page has registered its
+    // create action under the same key by then.
+    const c = core();
+    const dialogForm = form(c);
+    c.register({ type: 'Job', id: 'new', scope: 'view', getState: () => ({}), apply: () => {} });
+    dialogForm.dispose();
+    expect(c.registry.get('Job', 'new')?.scope).toBe('view');
+  });
+});

@@ -37,3 +37,12 @@ async def test_a_null_query_parameter_is_left_out_of_the_request(monkeypatch):
         None, None, "post", "/x", {"description": "d", "task_id": None}, {}, None
     )
     assert seen["query"] == {"description": "d"}
+
+
+def test_null_is_not_advertised_as_the_default():
+    # A model copying `default: null` into every unused optional would clear those
+    # fields on a PATCH route, on a call the user read as a rename.
+    props = _tool("scheduler_update_job").inputSchema["properties"]
+    nullable = [p for p in props.values() if any(a.get("type") == "null" for a in p.get("anyOf", []))]
+    assert nullable
+    assert all("default" not in p or p["default"] is not None for p in nullable)

@@ -215,7 +215,9 @@ def _refused_this_turn(messages: list[BaseMessage]) -> set[str]:
     one user turn an identical call is that retry; a new message from the user (who
     may well ask for it after all) starts over.
     """
-    start = next((i for i in range(len(messages) - 1, -1, -1) if _starts_user_turn(messages[i])), -1)
+    # Any user message counts here, a steering one too: "actually yes, save it" sent
+    # mid-run after a Reject is the user asking again, not the agent retrying.
+    start = next((i for i in range(len(messages) - 1, -1, -1) if isinstance(messages[i], HumanMessage)), -1)
     turn = messages[start + 1 :]
     calls = {call["id"]: call for m in turn if isinstance(m, AIMessage) for call in m.tool_calls}
     return {

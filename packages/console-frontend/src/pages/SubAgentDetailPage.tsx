@@ -971,8 +971,12 @@ function SubAgentDetail() {
         ? { ok: true, detail: `Saved as a draft that needs approval: ${blockers.join('; ')}.` }
         : true;
     } catch (err) {
-      // onError already toasted.
-      return { ok: false, detail: getErrorMessage(err) };
+      // onError already toasted. The dialog is closed by now, and the form has no
+      // `save` of its own: say how to try again.
+      return {
+        ok: false,
+        detail: `${getErrorMessage(err)} The save dialog has closed; to try again, invoke \`open_save_dialog\`.`,
+      };
     }
   };
 

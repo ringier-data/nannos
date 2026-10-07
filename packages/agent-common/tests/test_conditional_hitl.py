@@ -774,3 +774,20 @@ class TestActionsThatRequireApproval:
         assert request is not None
         assert request["action_requests"][0]["args"]["_requires_click"] is True
         assert await self._run(monkeypatch, "test", bypass_rules=rules) is None
+
+
+def test_a_steering_message_after_a_reject_lets_the_user_ask_again():
+    """'Actually yes, save it' sent mid-run after a Reject is the user asking: the
+    identical call is not answered NOT RUN."""
+    from agent_common.core.hitl_resume import CLICKED_REJECT_LEAD
+    from agent_common.middleware.conditional_hitl import _refused_this_turn
+
+    call = {"name": "client_action", "args": {"kind": "invoke", "action": "save"}, "id": "c1", "type": "tool_call"}
+    messages = [
+        HumanMessage(content="save it"),
+        AIMessage(content="", tool_calls=[call]),
+        ToolMessage(content=f"{CLICKED_REJECT_LEAD} no", tool_call_id="c1", status="error"),
+    ]
+    assert _refused_this_turn(messages)
+    steer = HumanMessage(content="actually yes, save it", additional_kwargs={"steering": True})
+    assert not _refused_this_turn([*messages, steer])
