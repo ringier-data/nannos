@@ -890,7 +890,7 @@ function SubAgentDetail() {
     setShowChangeSummaryDialog(true);
   };
 
-  // The assistant's save: the same as the Save button, which only opens the summary dialog.
+  // The assistant's "Save…": the same as the Save button, which only opens the summary dialog.
   const openSaveDialog = (): ActionOutcome => {
     setShowChangeSummaryDialog(true);
     return {
@@ -1706,8 +1706,19 @@ function SubAgentDetail() {
                     id={subAgent.id}
                     fields={nannosEditFields}
                     dirty={hasUnsavedChanges}
-                    save={openSaveDialog}
-                    actions={pageActions}
+                    // No `save` here: this one only opens the change-summary dialog, so
+                    // as an approval-gated save it reported "saved" (and cleared the
+                    // marks) for nothing persisted. The dialog's own `save` saves.
+                    actions={{
+                      ...pageActions,
+                      open_save_dialog: {
+                        label: 'Save…',
+                        description:
+                          'Open the "Save Configuration Changes" dialog, as the Save button does. Nothing is ' +
+                          'saved until that dialog is filled and its own save is invoked.',
+                        run: openSaveDialog,
+                      },
+                    }}
                   />
                 ) : (
                   canEdit && (

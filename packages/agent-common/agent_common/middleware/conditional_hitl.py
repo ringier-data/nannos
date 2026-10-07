@@ -169,13 +169,18 @@ def _invoke_requires_approval(args: dict[str, Any], context: Any, messages: list
 def _landed_objects(messages: list[BaseMessage]) -> list[Any]:
     """The objects of the newest page a ``client_action`` of this user turn landed on."""
     for message in reversed(messages):
-        if isinstance(message, HumanMessage):
+        if _starts_user_turn(message):
             break
         if isinstance(message, ToolMessage) and message.name == CLIENT_ACTION_TOOL_NAME:
             artifact = message.artifact
             if isinstance(artifact, dict) and isinstance(artifact.get("objects"), list):
                 return artifact["objects"]
     return []
+
+
+def _starts_user_turn(message: BaseMessage) -> bool:
+    """A user's message — not a steering message injected into the running turn."""
+    return isinstance(message, HumanMessage) and not message.additional_kwargs.get("steering")
 
 
 def _marked(objects: Any, args: dict[str, Any]) -> bool:
@@ -210,7 +215,7 @@ def _refused_this_turn(messages: list[BaseMessage]) -> set[str]:
     one user turn an identical call is that retry; a new message from the user (who
     may well ask for it after all) starts over.
     """
-    start = next((i for i in range(len(messages) - 1, -1, -1) if isinstance(messages[i], HumanMessage)), -1)
+    start = next((i for i in range(len(messages) - 1, -1, -1) if _starts_user_turn(messages[i])), -1)
     turn = messages[start + 1 :]
     calls = {call["id"]: call for m in turn if isinstance(m, AIMessage) for call in m.tool_calls}
     return {

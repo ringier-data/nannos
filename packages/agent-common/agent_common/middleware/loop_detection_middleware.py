@@ -472,7 +472,8 @@ class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
                 continue
             for tool_call in message.tool_calls:
                 if tool_call.get("id") in blocked_ids and self.applies_to(tool_call["name"]):
-                    carried[tool_call["name"]] = [self._hash_args(tool_call.get("args", {}))] * self.max_repeats
+                    # Under the key ``aafter_model`` reads (per kind for ``client_action``).
+                    carried[_history_key(tool_call)] = [self._hash_args(tool_call.get("args", {}))] * self.max_repeats
         if carried == history:
             return None
         return {"tool_call_history": carried}

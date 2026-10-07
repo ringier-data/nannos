@@ -835,3 +835,30 @@ class TestClientActionPerKind:
         )
         assert not result.get("messages")
         assert result["tool_call_history"]["client_action[read_current_page]"]
+
+    @pytest.mark.asyncio
+    async def test_a_blocked_fill_is_refused_again_in_the_next_turn(self):
+        """The carry-over into the next turn uses the per-kind key the check reads."""
+        from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+        middleware = RepeatedToolCallMiddleware(max_repeats=3, max_tool_repeats=10, window_size=20)
+        args = {"kind": "apply", "target_type": "F", "target_id": "1", "values": {"n": 1}}
+        blocked_call = {"name": "client_action", "args": args, "id": "tc-b"}
+        previous_turn = [
+            HumanMessage(content="fill it"),
+            AIMessage(content="", tool_calls=[blocked_call]),
+            ToolMessage(content="BLOCKED: 'client_action[apply]' — looped", tool_call_id="tc-b"),
+            HumanMessage(content="try again"),
+        ]
+        last_turn = {"client_action[apply]": [middleware._hash_args(args)] * 4}
+        carried = await middleware.abefore_agent(
+            {"messages": previous_turn, "tool_call_history": last_turn}, MagicMock()
+        )
+        history = carried["tool_call_history"]
+        assert "client_action[apply]" in history
+
+        retry = {"name": "client_action", "args": args, "id": "tc-r"}
+        result = await middleware.aafter_model(
+            {"messages": [AIMessage(content="", tool_calls=[retry])], "tool_call_history": history}, MagicMock()
+        )
+        assert result.get("messages") or result.get("jump_to"), "the same fill is refused again"

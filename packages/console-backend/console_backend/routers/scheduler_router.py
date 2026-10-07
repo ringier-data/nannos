@@ -1088,15 +1088,21 @@ def _identified_items(value: Any) -> int:
     return sum(1 for item in value if isinstance(item, dict) and any(k in item for k in _ITEM_ID_KEYS))
 
 
-def _items_in(result: Any) -> tuple[str | None, int]:
-    """The response's list of identified items, at the top or one level down (`result.threads`)."""
+def _items_in(result: Any, expr: str = "") -> tuple[str | None, int]:
+    """The response's list of identified items, at the top or one level down (`result.threads`).
+
+    With several such lists, the one the expression reads (`result.<key>`) is it; the first
+    otherwise — a hint naming another list would de-duplicate the wrong one.
+    """
     if _identified_items(result):
         return None, _identified_items(result)
-    if isinstance(result, dict):
-        for key, value in result.items():
-            if _identified_items(value):
-                return str(key), _identified_items(value)
-    return None, 0
+    if not isinstance(result, dict):
+        return None, 0
+    lists = {str(key): _identified_items(value) for key, value in result.items() if _identified_items(value)}
+    for key, count in lists.items():
+        if re.search(rf"\bresult\.{re.escape(key)}\b", expr):
+            return key, count
+    return next(iter(lists.items()), (None, 0))
 
 
 async def _repeat_alert_note(data: ValidateConditionRequest, cel: Any) -> str | None:
@@ -1111,7 +1117,7 @@ async def _repeat_alert_note(data: ValidateConditionRequest, cel: Any) -> str | 
         return None
     # Where the items live comes from the response even when the expression's value
     # supplies the count (`result.threads.filter(...)`): the hint names that list.
-    list_key, listed = _items_in(data.result)
+    list_key, listed = _items_in(data.result, data.cel_expr)
     count = _identified_items(cel.value) or listed
     if not count:
         return None

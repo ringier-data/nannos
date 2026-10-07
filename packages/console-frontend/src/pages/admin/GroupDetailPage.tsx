@@ -67,7 +67,14 @@ import {
 const USER_PAGE_SIZE = 20;
 const ACCESSIBLE_PAGE_SIZE = 20;
 
+// Keyed by the route id, like the sub-agent page: moving from one group to another must
+// not carry the first group's edit state (or open dialogs) into the second.
 export function GroupDetailPage() {
+  const { id } = useParams<{ id: string }>();
+  return <GroupDetail key={id} />;
+}
+
+function GroupDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();

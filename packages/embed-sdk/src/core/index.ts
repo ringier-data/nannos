@@ -103,7 +103,12 @@ export class NannosCore {
       pruneQueued = true;
       queueMicrotask(() => {
         pruneQueued = false;
-        this.changes.prune((t) => !!this.registry.get(t.type, t.id));
+        // A view registration under the same key (edit mode left: cancel, the user's own
+        // Save, a dialog closed) holds no form, so its marks go too.
+        this.changes.prune((t) => {
+          const handle = this.registry.get(t.type, t.id);
+          return !!handle && handle.scope !== 'view';
+        });
       });
     });
     // Auth resolution: `getToken` (host-token) and `auth` (self-login) are

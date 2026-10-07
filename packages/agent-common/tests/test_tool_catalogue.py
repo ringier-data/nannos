@@ -221,38 +221,6 @@ class TestLazyMcpTool:
         assert seen["kwargs"]["server_name"] == "srv"
         assert tool._get_delegate() is tool._get_delegate(), "delegate is built once per tool"
 
-    @pytest.mark.asyncio
-    async def test_a_null_for_an_optional_parameter_is_not_sent(self):
-        """FastAPI-generated tools publish ``task_id: str | None`` as a bare string: a null
-        failed the server's validation after the user approved the call, and the retry
-        asked for approval again. A property that takes null keeps it."""
-        schema = {
-            "type": "object",
-            "properties": {
-                "description": {"type": "string"},
-                # FastAPI's ``str | None``: the bare type next to the union refuses null.
-                "task_id": {"anyOf": [{"type": "string"}, {"type": "null"}], "type": "string"},
-                "label": {"type": "string"},
-                "note": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-                "owner": {"type": "string"},
-            },
-            "required": ["description", "owner"],
-        }
-        entry = make_catalogue_tool(server_name="srv", name="t", description="d", input_schema=schema)
-        (tool,) = build_lazy_tools(build_server_catalogue("srv", [entry], source="stateless"), connection={})
-        seen: dict = {}
-
-        async def fake_coroutine(runtime=None, **arguments):
-            seen["args"] = arguments
-            return ("ok", None)
-
-        delegate = Mock()
-        delegate.coroutine = fake_coroutine
-        with patch("langchain_mcp_adapters.tools.convert_mcp_tool_to_langchain_tool", return_value=delegate):
-            await tool.ainvoke({"description": "x", "task_id": None, "label": None, "note": None, "owner": None})
-
-        assert seen["args"] == {"description": "x", "note": None, "owner": None}
-
 
 # --------------------------------------------------------------------------------------
 # Stateless tools/list ingest

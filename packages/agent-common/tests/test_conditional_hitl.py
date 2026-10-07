@@ -738,6 +738,21 @@ class TestActionsThatRequireApproval:
         assert request is not None, "the marked action must raise a card"
         assert request["action_requests"][0]["args"]["_requires_click"] is True
 
+    async def test_a_steering_message_does_not_hide_the_landed_page(self, monkeypatch):
+        """A message the user sends mid-turn is injected as a steering HumanMessage: it does
+        not start a new turn, so the page landed on before it still counts."""
+        navigate = AIMessage(
+            content="",
+            tool_calls=[{"name": "client_action", "args": {"kind": "navigate", "to": "/m"}, "id": "nav", "type": "tool_call"}],
+        )
+        landed = ToolMessage(
+            content="Navigation done.", name="client_action", tool_call_id="nav", artifact={"objects": self.OBJECTS}
+        )
+        steer = HumanMessage(content="use haiku", additional_kwargs={"steering": True})
+        prior = [HumanMessage(content="set the low default"), navigate, landed, steer]
+        request = await self._run(monkeypatch, "set_tier_default", objects=[], prior=prior)
+        assert request is not None, "the marked action must raise a card"
+
     async def test_a_page_landed_on_in_an_earlier_turn_is_not_read(self, monkeypatch):
         navigate = AIMessage(
             content="",

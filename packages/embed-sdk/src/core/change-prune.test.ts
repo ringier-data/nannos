@@ -44,6 +44,18 @@ describe('change marks across a re-registration', () => {
     expect(c.changes.pending()).toHaveLength(1);
   });
 
+  it('go away when the form is swapped for a view of the same object', async () => {
+    // Leaving edit mode (cancel, the user's own Save) replaces the form with a view
+    // registration under the same type:id in one commit.
+    const c = core();
+    const handle = form(c);
+    mark(c);
+    handle.dispose();
+    c.register({ type: 'Job', id: 'new', scope: 'view', getState: () => ({}), apply: () => {} });
+    await settle();
+    expect(c.changes.pending()).toEqual([]);
+  });
+
   it('go away with a form that leaves the screen', async () => {
     const c = core();
     const handle = form(c);

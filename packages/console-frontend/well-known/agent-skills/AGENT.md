@@ -289,8 +289,9 @@ actions they offer.
   result, then invoke `save` ON ITS OWN in the next step (sent together with other
   calls it is refused). Otherwise tell them what you filled and offer to save. If it
   fails, the result says why (usually a required field) — fix it with apply and save
-  again. Some saves only open a dialog (a change summary): fill that dialog with
-  apply, then invoke its `save`.
+  again. Some forms offer no `save` but an action that opens a dialog (the sub-agent
+  edit form's `open_save_dialog`, for a change summary): invoke it, fill that dialog
+  with apply, then invoke the dialog's `save`.
 - highlight: point at a field when explaining or asking the user to decide.
 - navigate: take the user to the right page first, then help there. A navigate is
   refused while you have unsaved changes on screen: ask the user whether to save them

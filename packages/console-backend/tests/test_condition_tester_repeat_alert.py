@@ -89,3 +89,11 @@ async def test_a_top_level_list_gets_a_hint_that_evaluates():
 async def test_the_nested_hint_evaluates_too():
     [note] = _repeat(await _notes("size(result.threads) > 0", THREADS))
     await _suggested_expression_works(note, THREADS)
+
+
+@pytest.mark.asyncio
+async def test_the_hint_names_the_list_the_condition_reads():
+    result = {"threads": [{"id": "t1"}], "issues": [{"id": "i1"}, {"id": "i2"}]}
+    [note] = _repeat(await _notes("result.issues.filter(i, true)", result))
+    assert (await _suggested_expression_works(note, result)).startswith("result.issues.filter(")
+    assert "prev.issues" in note

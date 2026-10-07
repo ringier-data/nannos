@@ -355,52 +355,7 @@ class LazyMcpTool(BaseTool):
         # attribution interceptor uses ContextVars; the progress callback only logs).
         if delegate.coroutine is None:  # pragma: no cover — the adapter always sets a coroutine
             raise RuntimeError(f"MCP tool '{self.name}' has no async implementation")
-        schema = self.args_schema
-        return await delegate.coroutine(runtime=None, **_without_null_optionals(kwargs, schema))
-
-
-def _allows_null(prop: Any) -> bool:
-    """Whether a JSON-schema property accepts ``null``: every constraint on it must.
-
-    FastAPI-generated tools publish ``str | None`` as ``anyOf: [string, null]`` next to a
-    top-level ``"type": "string"`` — both apply, so ``null`` is refused. Unknown shapes
-    (a ``$ref``, no type at all) count as accepting it, and the value is sent.
-    """
-    if not isinstance(prop, Mapping):
-        return True
-    kind = prop.get("type")
-    if kind is not None and kind != "null" and not (isinstance(kind, list) and "null" in kind):
-        return False
-    if "enum" in prop and None not in (prop.get("enum") or []):
-        return False
-    if "const" in prop and prop["const"] is not None:
-        return False
-    for key in ("anyOf", "oneOf"):
-        alternatives = prop.get(key)
-        if alternatives and not any(_allows_null(alt) for alt in alternatives):
-            return False
-    return all(_allows_null(part) for part in prop.get("allOf") or [])
-
-
-def _without_null_optionals(kwargs: dict[str, Any], schema: Any) -> dict[str, Any]:
-    """Drop a ``None`` passed for an optional parameter whose schema does not take ``null``.
-
-    Servers publish an optional parameter as its bare type: FastAPI-generated tools turn
-    ``task_id: str | None = None`` into ``{"type": "string"}``. A model (or a program in
-    ``eval``) writing ``task_id: null`` then failed the server's input validation — after
-    the user had approved the call, so its retry asked for approval a second time. ``null``
-    for an optional parameter means "not given"; a property that does accept ``null`` (a
-    PATCH clearing a value) keeps it, and so does a required one (the server reports it).
-    """
-    if not isinstance(schema, Mapping):
-        return kwargs
-    properties = schema.get("properties") or {}
-    required = set(schema.get("required") or [])
-    return {
-        key: value
-        for key, value in kwargs.items()
-        if value is not None or key in required or key not in properties or _allows_null(properties[key])
-    }
+        return await delegate.coroutine(runtime=None, **kwargs)
 
 
 def build_lazy_tools(
