@@ -207,6 +207,8 @@ export class ThinkingStepsStreamer {
   // multiple channels — live artifact-append chunks plus the authoritative
   // terminal status message — doesn't double the body.
   private answerText = '';
+  /** A trailing partial user id ("@U2P") held back until the next chunk completes it. */
+  private mentionTail = '';
 
   // ---- degraded-mode (no streaming) state ----
   private fallbackTs: string | undefined;
@@ -479,11 +481,26 @@ export class ThinkingStepsStreamer {
       await this.streamAppend({ chunks: completion });
     }
     this.answerText += delta;
+    const { ready, held } = linkBareMentions(this.mentionTail + delta);
+    this.mentionTail = held;
+    if (!ready) return;
     if (this.degraded) {
-      this.fallbackAnswer += delta;
+      this.fallbackAnswer += ready;
       return;
     }
-    await this.appendToAnswerStream(delta);
+    await this.appendToAnswerStream(ready);
+  }
+
+  /** Emit what was held back at the end of the answer — a complete id there is linked too. */
+  private async flushMentionTail(): Promise<void> {
+    const tail = linkAllBareMentions(this.mentionTail);
+    if (!tail) return;
+    this.mentionTail = '';
+    if (this.degraded) {
+      this.fallbackAnswer += tail;
+      return;
+    }
+    await this.appendToAnswerStream(tail);
   }
 
   /**
@@ -532,6 +549,7 @@ export class ThinkingStepsStreamer {
    */
   async finish(opts?: { trailingMarkdown?: string; blocks?: AnyBlock[]; planTitle?: string }): Promise<void> {
     if (this.finished) return;
+    await this.flushMentionTail();
     // Build the "flip remaining in-progress steps → complete" chunks BEFORE
     // marking finished (so they ride along in the stop() call below — flushChunks
     // no-ops once finished is set).
@@ -785,4 +803,30 @@ export class ThinkingStepsStreamer {
       this.fallbackTs
     );
   }
+}
+
+
+/** A Slack user id written as plain "@U…": the model dropped the brackets of `<@U…>`. */
+const BARE_MENTION_RE = /(^|[^<\w@])@(U[A-Z0-9]{8,11})(?![A-Za-z0-9])/g;
+/** A chunk ending in what may become a user id once the next chunk arrives. */
+const PARTIAL_MENTION_RE = /(^|[^<\w@])(@U?[A-Z0-9]{0,11})$/;
+
+/**
+ * Turn bare "@U2PCN6T8W" into the `<@U2PCN6T8W>` Slack renders as a mention (Opus
+ * wrote the id without brackets and users read the raw id). The answer streams in
+ * chunks, so a trailing id that may still be growing is `held` for the next chunk;
+ * everything before it is `ready` to send.
+ */
+export function linkBareMentions(text: string): { ready: string; held: string } {
+  const partial = PARTIAL_MENTION_RE.exec(text);
+  const cut = partial ? partial.index + partial[1].length : text.length;
+  return {
+    ready: text.slice(0, cut).replace(BARE_MENTION_RE, '$1<@$2>'),
+    held: text.slice(cut),
+  };
+}
+
+/** {@link linkBareMentions} for a whole message: nothing is still growing. */
+export function linkAllBareMentions(text: string): string {
+  return text.replace(BARE_MENTION_RE, '$1<@$2>');
 }

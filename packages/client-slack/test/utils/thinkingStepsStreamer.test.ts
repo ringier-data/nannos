@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach, jest } from '@jest/globals';
 import { WebClient } from '@slack/web-api';
-import { ThinkingStepsStreamer, WorkPlanTodo } from '../../src/utils/thinkingStepsStreamer.js';
+import { ThinkingStepsStreamer, WorkPlanTodo, linkBareMentions } from '../../src/utils/thinkingStepsStreamer.js';
 
 // ---------------------------------------------------------------------------
 // Mock WebClient with a recording chatStream
@@ -379,5 +379,48 @@ describe('ThinkingStepsStreamer', () => {
     const update = (client.chat.update as jest.Mock).mock.calls.length;
     const post = (client.chat.postMessage as jest.Mock).mock.calls.length;
     expect(update + post).toBeGreaterThan(0);
+  });
+});
+
+describe('bare user ids become Slack mentions', () => {
+  function answerText(appendCalls: { markdown_text?: string }[]): string {
+    return appendCalls.map((c) => c.markdown_text ?? '').join('');
+  }
+
+  test('linkBareMentions wraps a bare id and leaves real mentions, emails and words alone', () => {
+    expect(linkBareMentions('@U2PCN6T8W do you want it?').ready).toBe('<@U2PCN6T8W> do you want it?');
+    expect(linkBareMentions('<@U2PCN6T8W> hi').ready).toBe('<@U2PCN6T8W> hi');
+    expect(linkBareMentions('mail bob@U2PCN6T8WX.com').ready).toBe('mail bob@U2PCN6T8WX.com');
+    expect(linkBareMentions('ping @Unknown').ready).toBe('ping @Unknown');
+  });
+
+  test('a trailing id that may still grow is held for the next chunk', () => {
+    expect(linkBareMentions('Done. @U2PC')).toEqual({ ready: 'Done. ', held: '@U2PC' });
+  });
+
+  test('an id split across streamed chunks is still linked', async () => {
+    const m = mockClient();
+    const s = new ThinkingStepsStreamer(m.client, baseOpts);
+    await s.appendAnswer('Draft created. @U2P');
+    await s.appendAnswer('CN6T8W, do you want another?');
+    await s.finish();
+    expect(answerText(m.appendCalls)).toBe('Draft created. <@U2PCN6T8W>, do you want another?');
+  });
+
+  test('an id at the very end of the answer is linked on finish', async () => {
+    const m = mockClient();
+    const s = new ThinkingStepsStreamer(m.client, baseOpts);
+    await s.appendAnswer('All done, @U2PCN6T8W');
+    await s.finish();
+    expect(answerText(m.appendCalls)).toBe('All done, <@U2PCN6T8W>');
+  });
+
+  test('the terminal snapshot still dedupes against what was streamed', async () => {
+    const m = mockClient();
+    const s = new ThinkingStepsStreamer(m.client, baseOpts);
+    await s.appendAnswer('Hi @U2PCN6T8W, done.', true);
+    await s.appendAnswer('Hi @U2PCN6T8W, done.', true);
+    await s.finish();
+    expect(answerText(m.appendCalls)).toBe('Hi <@U2PCN6T8W>, done.');
   });
 });
