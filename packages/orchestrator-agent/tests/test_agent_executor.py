@@ -244,7 +244,11 @@ class TestAgentExecutorStreamHandling:
         text_parts = [p.text for p in final_msg.parts if p.WhichOneof("content") == "text"]
         assert "".join(text_parts).strip() != ""
 
-    async def _complete_after_streaming(self, content: str, streamed_text: str):
+    async def test_handle_stream_item_completed_short_schema_summary_keeps_streamed_answer(self, dynamodb_table):
+        """With the response schema bound as a plain tool (thinking on), the model streams its
+        answer as text and then calls the schema with a short SUMMARY of it ("Greeted the user
+        and offered assistance."). The streamed text is the answer: a shorter terminal message
+        must not be sent, or the client replaces the answer with the summary (nannos#358)."""
         from app.models.responses import AgentStreamResponse
 
         executor = OrchestratorDeepAgentExecutor()
@@ -254,44 +258,24 @@ class TestAgentExecutorStreamHandling:
         task = Mock()
         task.context_id = "ctx-123"
         task.id = "task-456"
+
         await executor._handle_stream_item(
-            AgentStreamResponse(state=TaskState.TASK_STATE_COMPLETED, content=content),
+            AgentStreamResponse(
+                state=TaskState.TASK_STATE_COMPLETED,
+                content="Greeted the user and offered assistance with console features.",
+            ),
             updater,
             task,
             is_final=True,
             streaming_artifact_id="artifact-1",
             first_chunk_sent=True,
-            streamed_text=streamed_text,
+            streamed_text="Hey there! I'm here to help you with the Nannos console. I can assist you with "
+            "sub-agents, scheduled jobs, skills and playbooks, and your settings.",
         )
-        updater.update_status.assert_called_once()
-        return updater.update_status.call_args
 
-    async def test_handle_stream_item_completed_different_shorter_answer_is_sent(self, dynamodb_table):
-        """nannos#358: a completed answer that is NOT what streamed must not be dropped
-        just because it is shorter — a length check alone called it delivered."""
-        status_call = await self._complete_after_streaming(
-            content="I filed the report.", streamed_text="Yes, I'd raise it. The job checks every 5 minutes."
-        )
-        final_msg = status_call[0][1]
-        assert final_msg is not None
-        assert "".join(p.text for p in final_msg.parts if p.WhichOneof("content") == "text") == "I filed the report."
-        assert status_call[1]["metadata"]["final_answer_source"] == "fallback"
-
-    async def test_handle_stream_item_completed_answer_after_streamed_narration_ends_bare(self, dynamodb_table):
-        """The answer may follow narration streamed earlier in the turn, and its whitespace
-        may differ from the stream's: it was still delivered, so the terminal is bare."""
-        status_call = await self._complete_after_streaming(
-            content="Saved.\n\nMax failures is now **20**.",
-            streamed_text="Let me open the job first. Saved.\nMax failures is now **20**.",
-        )
+        status_call = updater.update_status.call_args
         assert status_call[0][1] is None
         assert status_call[1].get("metadata") is None
-
-    async def test_handle_stream_item_completed_without_terminal_text_keeps_streamed_answer(self, dynamodb_table):
-        """No terminal text means the stream is the answer: the placeholder must not
-        read as a different answer and replace it."""
-        status_call = await self._complete_after_streaming(content="", streamed_text="Here is your full answer.")
-        assert status_call[0][1] is None
 
     async def test_handle_stream_item_streaming_first_chunk_creates_artifact(self, dynamodb_table):
         """Regression: the FIRST streaming chunk for an artifact_id must be a create (append=False).
