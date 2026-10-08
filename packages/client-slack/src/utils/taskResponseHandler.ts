@@ -2,7 +2,7 @@ import { WebClient } from '@slack/web-api';
 import { Logger } from './logger.js';
 import _ from 'lodash';
 import { Artifact, DataPart, FileWithBytes, FileWithUri, Task } from '@a2a-js/sdk';
-import type { ThinkingStepsStreamer } from './thinkingStepsStreamer.js';
+import { linkAllBareMentions, type ThinkingStepsStreamer } from './thinkingStepsStreamer.js';
 
 const logger = Logger.getLogger('taskResponseHandler');
 
@@ -151,7 +151,7 @@ export async function postMessage(
   threadTs: string,
   text: string
 ): Promise<string | undefined> {
-  return postOrUpdateMessage(slackClient, channelId, threadTs, text, undefined);
+  return postOrUpdateMessage(slackClient, channelId, threadTs, linkAllBareMentions(text), undefined);
 }
 /**
  * Post or update a status message.
@@ -396,9 +396,11 @@ export async function finalizeStreamedTask(params: {
   const fileLinks = parts.filesWithUri.map((f) => `• <${f.uri}|${f.name || 'file'}>`);
   const trailingMarkdown = fileLinks.length > 0 ? `\n\n*Attached files:*\n${fileLinks.join('\n')}` : undefined;
 
-  // Settle the (collapsed) plan disclosure to a finished label on success —
-  // otherwise it stays "Working" after completion.
-  const planTitle = isTerminatedState(task.status.state) ? 'Thinking' : undefined;
+  // Settle the (collapsed) plan disclosure to a finished label — otherwise it stays
+  // "Working". That includes a turn that ends asking the user something
+  // (input-required): the turn is over. An approval or sign-in card never gets here
+  // (it pauses the stream with its own label instead).
+  const planTitle = 'Thinking';
   await streamer.finish({ trailingMarkdown, planTitle });
 
   // File (byte) artifacts upload as separate Slack files, as before.
