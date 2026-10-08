@@ -1237,3 +1237,13 @@ class TestNoInternalTextReachesTheUser:
 
         assert response.state == TaskState.TASK_STATE_INPUT_REQUIRED
         assert response.content == answer
+
+    def test_a_failed_override_still_says_it_failed(self):
+        """Every agent failed but the model claims success: the reply must not read as one."""
+        from app.handlers.stream_handler import StreamHandler as SH
+
+        response = SH._build_blocked_agent_response(
+            "JiraAgent", {"state": "TaskState.TASK_STATE_FAILED"}, [], answer="Done, I created the ticket."
+        )
+        assert response.state == TaskState.TASK_STATE_FAILED
+        assert response.content == "JiraAgent failed: Done, I created the ticket."

@@ -253,9 +253,11 @@ class StreamHandler:
 
         if is_failed:
             if answer:
+                # Keep the failure explicit: the model may still claim success here,
+                # which is exactly when this override fires.
                 return AgentStreamResponse(
                     state=TaskState.TASK_STATE_FAILED,
-                    content=answer,
+                    content=f"{agent_name} failed: {answer}",
                     metadata={"agent_name": agent_name, "tracking_data": tracking_data},
                 )
             # Extract failure message from the last tool message
