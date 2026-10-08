@@ -6,6 +6,16 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from app.handlers import StreamHandler, current_turn_messages
 
 
+def _final_response_call(schema):
+    """The turn's answer as the orchestrator records it: a FinalResponseSchema tool call."""
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {"name": "FinalResponseSchema", "args": schema.model_dump(mode="json"), "id": "final", "type": "tool_call"}
+        ],
+    )
+
+
 class TestBuildAuthResponse:
     """Test build_auth_response static method."""
 
@@ -119,7 +129,9 @@ class TestParseAgentResponse:
         final_state = {
             "messages": [
                 HumanMessage(content="first"),
-                AIMessage(content="", tool_calls=[{"name": "FinalResponseSchema", "args": {}, "id": "f", "type": "tool_call"}]),
+                AIMessage(
+                    content="", tool_calls=[{"name": "FinalResponseSchema", "args": {}, "id": "f", "type": "tool_call"}]
+                ),
                 HumanMessage(content="second"),
                 AIMessage(content="", tool_calls=[call]),
                 ToolMessage(content="BLOCKED: 'console_create_bug_report' — looped", tool_call_id="c1"),
@@ -679,12 +691,14 @@ class TestConservativeOverrideLogic:
                 ToolMessage(content="Ticket needs input", tool_call_id="call_1"),
                 ToolMessage(content="Email sent successfully", tool_call_id="call_2"),
                 AIMessage(content="Done - used email"),
+                _final_response_call(
+                    FinalResponseSchema(
+                        task_state=TaskState.TASK_STATE_COMPLETED,
+                        message="Email sent successfully as alternative approach",
+                        reasoning="Jira blocked but email succeeded",
+                    )
+                ),
             ],
-            "structured_response": FinalResponseSchema(
-                task_state=TaskState.TASK_STATE_COMPLETED,
-                message="Email sent successfully as alternative approach",
-                reasoning="Jira blocked but email succeeded",
-            ),
             "a2a_tracking": {
                 "JiraAgent": {"requires_input": True, "is_complete": False},
                 "EmailAgent": {"requires_input": False, "is_complete": True, "state": "TaskState.TASK_STATE_COMPLETED"},
@@ -725,12 +739,14 @@ class TestConservativeOverrideLogic:
                 ToolMessage(content="Jira needs input", tool_call_id="call_1"),
                 ToolMessage(content="Email needs input", tool_call_id="call_2"),
                 AIMessage(content="All done"),
+                _final_response_call(
+                    FinalResponseSchema(
+                        task_state=TaskState.TASK_STATE_COMPLETED,
+                        message="Tasks completed successfully",
+                        reasoning="Both completed",  # LLM hallucination
+                    )
+                ),
             ],
-            "structured_response": FinalResponseSchema(
-                task_state=TaskState.TASK_STATE_COMPLETED,
-                message="Tasks completed successfully",
-                reasoning="Both completed",  # LLM hallucination
-            ),
             "a2a_tracking": {
                 "JiraAgent": {"requires_input": True, "is_complete": False},
                 "EmailAgent": {"requires_input": True, "is_complete": False},
@@ -772,10 +788,12 @@ class TestConservativeOverrideLogic:
                 ToolMessage(content="Auth needed", tool_call_id="call_1"),
                 ToolMessage(content="Input needed", tool_call_id="call_2"),
                 AIMessage(content="Done"),
+                _final_response_call(
+                    FinalResponseSchema(
+                        task_state=TaskState.TASK_STATE_COMPLETED, message="Completed", reasoning="Done"
+                    )
+                ),
             ],
-            "structured_response": FinalResponseSchema(
-                task_state=TaskState.TASK_STATE_COMPLETED, message="Completed", reasoning="Done"
-            ),
             "a2a_tracking": {
                 "Agent1": {
                     "requires_auth": True,
@@ -822,12 +840,14 @@ class TestConservativeOverrideLogic:
                 ToolMessage(content="Ticket needs project", tool_call_id="call_1"),
                 ToolMessage(content="Notified team", tool_call_id="call_2"),
                 AIMessage(content="Need project for ticket"),
+                _final_response_call(
+                    FinalResponseSchema(
+                        task_state=TaskState.TASK_STATE_INPUT_REQUIRED,
+                        message="Which project should I create the ticket in?",
+                        reasoning="Slack succeeded but Jira needs project info",
+                    )
+                ),
             ],
-            "structured_response": FinalResponseSchema(
-                task_state=TaskState.TASK_STATE_INPUT_REQUIRED,
-                message="Which project should I create the ticket in?",
-                reasoning="Slack succeeded but Jira needs project info",
-            ),
             "a2a_tracking": {
                 "JiraAgent": {"requires_input": True, "is_complete": False},
                 "SlackAgent": {"requires_input": False, "is_complete": True, "state": "TaskState.TASK_STATE_COMPLETED"},
@@ -860,12 +880,14 @@ class TestConservativeOverrideLogic:
                 ),
                 ToolMessage(content="Processing", tool_call_id="call_1"),
                 AIMessage(content="Still working"),
+                _final_response_call(
+                    FinalResponseSchema(
+                        task_state=TaskState.TASK_STATE_WORKING,
+                        message="Task is still being processed in the background",
+                        reasoning="Async operation in progress",
+                    )
+                ),
             ],
-            "structured_response": FinalResponseSchema(
-                task_state=TaskState.TASK_STATE_WORKING,
-                message="Task is still being processed in the background",
-                reasoning="Async operation in progress",
-            ),
             "a2a_tracking": {
                 "AsyncAgent": {"requires_input": True, "is_complete": False},  # Might need input later
             },
@@ -908,12 +930,14 @@ class TestConservativeOverrideLogic:
                 # Current turn: simple greeting, no tool calls
                 HumanMessage(content="hi"),
                 AIMessage(content="Hello! How can I help you today?"),
+                _final_response_call(
+                    FinalResponseSchema(
+                        task_state=TaskState.TASK_STATE_COMPLETED,
+                        message="Hello! How can I help you today?",
+                        reasoning="Greeting response",
+                    )
+                ),
             ],
-            "structured_response": FinalResponseSchema(
-                task_state=TaskState.TASK_STATE_COMPLETED,
-                message="Hello! How can I help you today?",
-                reasoning="Greeting response",
-            ),
             # Stale blocked tracking from earlier turn — must NOT trigger override now
             "a2a_tracking": {
                 "file-analyzer": {"requires_input": True, "is_complete": False},
@@ -946,10 +970,12 @@ class TestConservativeOverrideLogic:
                 ),
                 ToolMessage(content="Need more details", tool_call_id="call_1"),
                 AIMessage(content="Done"),
+                _final_response_call(
+                    FinalResponseSchema(
+                        task_state=TaskState.TASK_STATE_COMPLETED, message="Ticket created", reasoning="Task complete"
+                    )
+                ),
             ],
-            "structured_response": FinalResponseSchema(
-                task_state=TaskState.TASK_STATE_COMPLETED, message="Ticket created", reasoning="Task complete"
-            ),
             "a2a_tracking": {
                 "JiraAgent": {"requires_input": True, "is_complete": False},
             },
@@ -1200,8 +1226,6 @@ class TestNoInternalTextReachesTheUser:
 
         Users read "task_state='completed' message=… include_subagent_output=False".
         """
-        from app.models.schemas import FinalResponseSchema
-
         answer = "Drafts 1 and 3 were created; draft 2 was rejected. Want me to retry it?"
         final_state = {
             "messages": [
@@ -1229,7 +1253,6 @@ class TestNoInternalTextReachesTheUser:
                     tool_call_id="f1",
                 ),
             ],
-            "structured_response": FinalResponseSchema(task_state=TaskState.TASK_STATE_COMPLETED, message=answer),
             "a2a_tracking": {"general-purpose": {"requires_input": True, "is_complete": False}},
         }
 

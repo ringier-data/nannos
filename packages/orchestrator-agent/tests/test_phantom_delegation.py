@@ -22,10 +22,19 @@ def _ai_task_call(call_id: str = "c1", subagent: str = "test-agent") -> AIMessag
 
 def test_phantom_when_flag_set_but_no_task_call():
     state = {
-        "structured_response": {"include_subagent_output": True, "task_state": "completed", "message": ""},
         "messages": [
             HumanMessage("convert this pdf"),
-            AIMessage(content=[{"type": "text", "text": '{"task_state":"completed","include_subagent_output":true}'}]),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "f1",
+                        "name": "FinalResponseSchema",
+                        "args": {"include_subagent_output": True, "task_state": "completed", "message": ""},
+                        "type": "tool_call",
+                    }
+                ],
+            ),
         ],
     }
     assert StreamHandler.is_phantom_subagent_completion(state) is True
@@ -77,3 +86,16 @@ def test_current_turn_final_response_tool_call_wins_over_stale_channel():
 def test_non_dict_state_is_safe():
     assert StreamHandler.is_phantom_subagent_completion(None) is False
     assert StreamHandler.is_phantom_subagent_completion("nope") is False
+
+
+def test_stale_channel_does_not_flag_a_plain_text_turn():
+    """nannos#358: the persisted ``structured_response`` channel still holds an earlier
+    turn's answer; a turn that answered in plain text made no claim at all."""
+    state = {
+        "structured_response": {"include_subagent_output": True, "task_state": "completed", "message": ""},
+        "messages": [
+            HumanMessage("what changed?"),
+            AIMessage(content="Only the condition."),
+        ],
+    }
+    assert StreamHandler.is_phantom_subagent_completion(state) is False

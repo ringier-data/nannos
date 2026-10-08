@@ -7,12 +7,11 @@ from a2a.types import TaskState
 from agent_common.a2a.base import SubAgentInput
 from agent_common.a2a.models import LocalLangGraphSubAgentConfig
 from agent_common.a2a.stream_events import ErrorEvent, TaskUpdate
-from agent_common.a2a.structured_response import SubAgentResponseSchema
 from agent_common.agents.dynamic_agent import (
     DynamicLocalAgentRunnable,
     create_dynamic_local_subagent,
 )
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import Tool
 
 
@@ -123,10 +122,6 @@ class TestDynamicLocalAgentRunnable:
 
         final_state = {
             "messages": [MagicMock(content="Task completed successfully.")],
-            "structured_response": SubAgentResponseSchema(
-                task_state="completed",
-                message="Task completed successfully.",
-            ),
         }
 
         with (
@@ -167,11 +162,18 @@ class TestDynamicLocalAgentRunnable:
         mock_graph.aget_state = AsyncMock(return_value=mock_state)
 
         final_state = {
-            "messages": [MagicMock(content="What is the project name?")],
-            "structured_response": SubAgentResponseSchema(
-                task_state="input_required",
-                message="What is the project name?",
-            ),
+            "messages": [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "SubAgentResponseSchema",
+                            "args": {"task_state": "input_required", "message": "What is the project name?"},
+                            "id": "call_1",
+                        }
+                    ],
+                )
+            ],
         }
 
         with (

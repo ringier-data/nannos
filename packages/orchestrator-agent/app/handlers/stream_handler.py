@@ -114,9 +114,9 @@ class StreamHandler:
         if not isinstance(final_state, dict):
             return False
 
-        # Resolve the structured response (current-turn tool call wins over the
-        # possibly-stale ``structured_response`` channel), mirroring
-        # ``parse_agent_response``.
+        # Resolve the structured response from this turn's tool call, mirroring
+        # ``parse_agent_response`` (never the persisted ``structured_response``
+        # channel, which may hold an earlier turn's answer).
         structured: Any = None
         messages = final_state.get("messages", [])
         if messages:
@@ -128,8 +128,6 @@ class StreamHandler:
                             break
                 if structured is not None:
                     break
-        if structured is None:
-            structured = final_state.get("structured_response")
 
         if isinstance(structured, dict):
             include = bool(structured.get("include_subagent_output", False))
@@ -373,13 +371,10 @@ class StreamHandler:
                 logger.warning("[STREAM HANDLER] Turn ended on an unanswered tool result; reporting it as the reply")
                 return AgentStreamResponse(state=TaskState.TASK_STATE_COMPLETED, content=stopped)
 
-        # FALLBACK: Check structured_response from final_state (may be set by AutoStrategy for OpenAI)
-        # Only use if we didn't find a tool call in the current turn
-        if not structured_response and isinstance(final_state, dict) and "structured_response" in final_state:
-            structured_response = final_state.get("structured_response")
-            logger.info(
-                f"[STREAM HANDLER] Using structured_response from final_state (fallback): {structured_response}"
-            )
+        # No fallback to ``final_state["structured_response"]``: that channel persists
+        # across turns, so with no FinalResponseSchema call this turn it holds an
+        # EARLIER turn's answer (nannos#358). Every response format the orchestrator
+        # uses yields a tool call, so a turn without one has no structured answer.
 
         if structured_response is not None:
             # Parse structured response using Pydantic model validation
@@ -511,8 +506,7 @@ class StreamHandler:
                 # clean (no IDs, no internals).
                 if not message:
                     message = (
-                        "I wasn't able to put together a response this time. "
-                        "Could you try rephrasing or asking again?"
+                        "I wasn't able to put together a response this time. Could you try rephrasing or asking again?"
                     )
                     logger.warning(
                         "[STREAM HANDLER] Substituted fallback message for empty include_subagent_output reply"
