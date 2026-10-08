@@ -59,6 +59,7 @@ from agent_common.core.graph_utils import code_interpreter_ptc_enabled
 from agent_common.core.hitl_resume import (
     HITL_DECISION_EVENT,
     KIND_AUTH,
+    KIND_HITL,
     interrupt_kind,
     pending_authorization_answer,
 )
@@ -1055,6 +1056,25 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         return content, a2a_metadata
 
     @staticmethod
+    async def _parked_continued_task(runnable: Any, subagent_state: dict[str, Any]) -> Any:
+        """The task this delegation continues, when it is parked on an approval or authorization.
+
+        Only a question the USER must answer counts. A sub-agent that stopped to ask
+        the orchestrator something in words (input-required with no interrupt) is
+        answered by the delegation itself, as before.
+        """
+        record = (subagent_state.get("a2a_tracking") or {}).get(runnable.tracking_key) or {}
+        continued_id = record.get("task_id") if isinstance(record, dict) else None
+        if not continued_id or record.get("is_complete", True):
+            return None
+        task = await runnable.aget_task(continued_id)
+        if task is None or task.status.state not in INTERVENTION_STATES:
+            return None
+        if interrupt_kind(interrupt_value_from_status(task.status)) not in (KIND_HITL, KIND_AUTH):
+            return None
+        return task
+
+    @staticmethod
     def _answer_input(
         runnable: Any,
         subagent_state: dict[str, Any],
@@ -1825,6 +1845,17 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         subagent_input: dict[str, Any] = subagent_state
         if isinstance(runnable, LocalA2ARunnable):
             parked = await runnable.aget_task(task_id)
+            if parked is None:
+                # A follow-up delegation continues the task an earlier call opened
+                # (a2a_tracking), so a question it raised parks THAT task, not one
+                # named after this call. Missing it, the replay re-sent this call's
+                # description as a continuation, and the sub-agent read the
+                # orchestrator's own "proceed now" as the user's answer: a typed
+                # "maybe later" approved the call.
+                continued = await self._parked_continued_task(runnable, subagent_state)
+                if continued is not None:
+                    parked, task_id = continued, continued.id
+                    subagent_state["proposed_task_id"] = task_id
             if parked is not None and parked.status.state not in INTERVENTION_STATES:
                 # The id already names a finished task (a provider reusing tool-call
                 # ids): let the server mint one instead of colliding with it.

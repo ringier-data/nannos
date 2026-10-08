@@ -151,3 +151,51 @@ async def test_a_question_asked_in_words_is_relayed_not_parked():
     tracking = a2a_tracking(state)["slack-notifier"]
     assert tracking["requires_input"] is True
     assert tracking["task_id"] == delegation_task_id("t-ask", "call-task"), "kept: the reply continues this task"
+
+
+class _AsksThenNeedsApproval(MockSubAgent):
+    """Asks the orchestrator something in words, then parks on an approval when it follows up."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "general-purpose", "General.", reply="draft created", input_required="what should the body be?"
+        )
+
+    async def _process(self, input_data, config):
+        if self.received:  # the follow-up delegation: now it needs the user's approval
+            self._input_required = None
+            self._approval = "gmail_create_draft"
+        return await super()._process(input_data, config)
+
+
+async def test_the_users_words_answer_an_approval_raised_by_a_follow_up_delegation():
+    """The replay must deliver the user's words, not the follow-up's own description.
+
+    The sub-agent asked "what should the body be?"; the orchestrator answered it with
+    a second delegation that CONTINUED the same task; that run parked on an approval.
+    The replay looked only for a task named after the second call, found none, and
+    re-sent "Proceed now…" as a continuation — which the sub-agent read as the
+    answer to its approval. The user had typed "maybe later"; the draft was created.
+    """
+    agent = _AsksThenNeedsApproval()
+    model = ScriptedChatModel(
+        responses=[
+            task_call("general-purpose", "draft an email to me", call_id="call-1"),
+            task_call("general-purpose", "The user explicitly asked for it. Proceed now.", call_id="call-2"),
+            final_response("Done."),
+        ]
+    )
+    graph = scripted_graph(model)
+    config = turn_config("t-follow-up")
+    context = runtime_context(agent)
+
+    parked_state = await graph.ainvoke(user_turn("draft an email to me"), config=config, context=context)
+    (interrupt,) = parked_state["__interrupt__"]
+    assert interrupt.value["action_requests"][0]["name"] == "gmail_create_draft"
+    first_task = delegation_task_id("t-follow-up", "call-1")
+    assert (await agent.aget_task(first_task)).status.state == TaskState.TASK_STATE_INPUT_REQUIRED
+
+    await graph.ainvoke(Command(resume={interrupt.id: "maybe later"}), config=config, context=context)
+
+    assert agent.resumed_with == [{APPROVAL_INTERRUPT_ID: "maybe later"}]
+    assert agent.received == ["draft an email to me", "The user explicitly asked for it. Proceed now."]
