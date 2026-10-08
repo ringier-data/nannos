@@ -195,7 +195,7 @@ NO_WORKAROUND_CLAUSE = (
     "tools you already have."
 )
 
-#: A call whose authorization the user skipped (read by the answer-after-refusal middleware).
+#: A call whose authorization the user skipped (read by the stopped-turn reply).
 SKIPPED_AUTH_LEAD = "The user skipped the authorization this call needs"
 
 _SKIPPED_AUTH_MESSAGE = (

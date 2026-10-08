@@ -1,6 +1,6 @@
 """Shared `<client_objects>` rendering for Embedded Nannos.
 
-Renders the on-screen ontology manifest as a trailing per-call message for *any* agent —
+Renders the on-screen ontology manifest as a per-call message for *any* agent —
 the orchestrator main graph or a LOCAL domain sub-agent (the embedded entrypoint).
 The manifest is read from the **RunnableConfig metadata** (provider-neutral), so a
 single implementation serves every build path without depending on the
@@ -33,7 +33,7 @@ from langchain_core.messages import ToolMessage
 from langgraph.config import get_config
 from langgraph.types import Command
 
-from .utils import append_volatile_context_message
+from .utils import place_volatile_context_message
 
 logger = logging.getLogger(__name__)
 
@@ -229,21 +229,20 @@ def inject_embedded_context(
     client_objects: Any,
 ) -> ModelRequest:
     """Attach the embedded-client context (`<current_page>` then `<client_objects>`)
-    to a model request as ONE trailing, flagged human message.
+    to a model request as ONE flagged human message, just before the current step.
 
     Single placement policy for both injection sites (orchestrator
-    `UserPreferencesMiddleware`, sub-agent `ClientObjectsMiddleware`). The block is
-    volatile on-screen state that is never checkpointed, so it must come AFTER all
-    persisted messages to keep the provider prompt cache warm — see
-    `agent_common.middleware.utils.append_volatile_context_message` for why the
-    previous "last human message" placement busted the cache every turn.
+    `UserPreferencesMiddleware`, sub-agent `ClientObjectsMiddleware`). See
+    `agent_common.middleware.utils.place_volatile_context_message` for why it sits
+    there: last, it read as a new ask after a refused call; after the user's
+    message, it pushed the turn's tool loop out of the prompt cache.
     Returns the request unchanged when there is nothing to render.
     """
     blocks = [render_current_page_block(page_context), render_client_objects_block(client_objects)]
     block = "\n\n".join(b for b in blocks if b)
     if not block:
         return request
-    return request.override(messages=append_volatile_context_message(request.messages, block))
+    return request.override(messages=place_volatile_context_message(request.messages, block))
 
 
 #: Where a host's tool result says its object is shown (the console's ``console_path``).

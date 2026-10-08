@@ -1,6 +1,6 @@
 """Utility functions for middleware."""
 
-from langchain_core.messages import AnyMessage, ContentBlock, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, AnyMessage, ContentBlock, HumanMessage, SystemMessage
 
 
 def append_to_system_message(
@@ -24,38 +24,52 @@ def append_to_system_message(
 
 
 VOLATILE_CONTEXT_KEY = "volatile_context"
-"""``additional_kwargs`` flag on a per-call context message appended by
-:func:`append_volatile_context_message`. Consumers that reason about the
-"real" conversation tail (e.g. the prompt-caching breakpoint) skip it."""
+"""``additional_kwargs`` flag on the per-call context message placed by
+:func:`place_volatile_context_message`. Consumers that reason about the
+"real" conversation (e.g. the prompt-caching breakpoint) skip it."""
 
 
-def append_volatile_context_message(
+def place_volatile_context_message(
     messages: list[AnyMessage],
     text: str,
 ) -> list[AnyMessage]:
-    """Append ``text`` as a trailing, flagged :class:`HumanMessage`.
+    """Place ``text`` as a flagged :class:`HumanMessage` just before the current step.
 
     For volatile, per-call context (the on-screen ``<current_page>`` /
-    ``<client_objects>`` block). The block is applied to the model request only —
-    never checkpointed — so the ONLY placement that keeps the provider prompt cache
-    warm is *after* everything that is persisted:
+    ``<client_objects>`` block), applied to the model request only, never
+    checkpointed. "The current step" is the last model call that called tools, and
+    their results, when it comes after the last user message; otherwise (a turn's
+    first step) the block goes last, after the user's message.
 
-    - Appending to the last human message (the previous design) moved the block
-      from ``Human_N`` to ``Human_N+1`` on the next turn. ``Human_N`` was then sent
-      WITHOUT the block it carried before, so the token stream diverged there and
-      turn N's whole tool loop was re-tokenised on every subsequent turn, page
-      changed or not.
-    - Appended last, every byte before the block is identical to what the
-      checkpoint holds, across tool-loop iterations and across turns. Only the
-      block itself is re-tokenised per call.
+    Not last: after the tool results, a user message reads as a NEW ask. Replaying a
+    captured console request (set a field and save, then Reject), with the block last
+    the model acted on the page again instead of answering: Claude Sonnet 4.6 re-sent
+    the rejected save 5/5, Haiku 4.5 2/5, and gpt-6-sol read or highlighted the page
+    9/9. Placed before the step, all three answered (5/5, 5/5, 5/5).
 
-    Role validity: mid-tool-loop the tail is a ``ToolMessage``. Chat-completions
-    accepts a user message after tool results, and the Anthropic/Bedrock adapters
-    fold consecutive user-role messages (tool results are user-role there) into one
-    turn, so ``[..., Tool, Human(block)]`` is a valid request everywhere we route.
+    Not after the user's message either: the block is not persisted, so wherever it
+    sits, the next request's token stream diverges there. Right after the user's
+    message, every step that changed it and every next turn re-sent the whole tool
+    loop past the provider prompt cache. Before the current step, a call re-sends one
+    step (the previous call and its results); a new turn, only the last step of the
+    previous one.
 
-    The message is flagged ``additional_kwargs[VOLATILE_CONTEXT_KEY] = True`` so the
-    caching middleware places its conversation breakpoint on the stable message in
-    front of it rather than on the block.
+    Role validity: ``[..., Tool, Human(block), AI, Tool]`` and ``[..., Human,
+    Human(block)]`` are valid chat-completions requests, and the Anthropic/Bedrock
+    adapters fold consecutive user-role messages (tool results are user-role there)
+    into one turn.
     """
-    return [*messages, HumanMessage(content=text, additional_kwargs={VOLATILE_CONTEXT_KEY: True})]
+    block = HumanMessage(content=text, additional_kwargs={VOLATILE_CONTEXT_KEY: True})
+    at = _current_step_start(messages)
+    return [*messages[:at], block, *messages[at:]]
+
+
+def _current_step_start(messages: list[AnyMessage]) -> int:
+    """The index of the last tool-calling model call when no user message follows it,
+    else the end (a call that only answered is not a step in progress)."""
+    for i in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[i], AIMessage):
+            return i if messages[i].tool_calls else len(messages)
+        if isinstance(messages[i], HumanMessage):
+            break
+    return len(messages)

@@ -1,7 +1,6 @@
 """How the results that stop an agent's step begin — one definition for producers and readers.
 
-The loop guard and the approval layer write these; the answer-after-refusal middleware and
-the stopped-turn reply read them. A reader matching its own copy of the wording would stop
+The loop guard and the approval layer write these; the stopped-turn reply reads them. A reader matching its own copy of the wording would stop
 working, silently, the day a producer is reworded.
 """
 

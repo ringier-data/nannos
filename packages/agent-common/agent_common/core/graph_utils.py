@@ -82,7 +82,6 @@ from agent_common.core.ptc_discovery import (
     build_discovery_tools,
 )
 from agent_common.core.ptc_signatures import render_tools_namespace
-from agent_common.middleware.answer_after_refusal import AnswerAfterRefusalMiddleware
 from agent_common.middleware.continue_on_truncation import ContinueOnTruncationMiddleware
 from agent_common.middleware.premature_final_response import PrematureFinalResponseMiddleware
 from agent_common.middleware.conversation_context_tools_middleware import (
@@ -1976,8 +1975,6 @@ def build_common_middleware_stack(
     middleware += [
         loop_detection,
         ToolSchemaCleaningMiddleware(),
-        # Innermost: after a refused or blocked call, only the response tool is offered.
-        AnswerAfterRefusalMiddleware(),
     ]
     return middleware
 

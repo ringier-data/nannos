@@ -198,10 +198,11 @@ def _tag_last_message(messages: list[Any], cache_control: dict[str, str]) -> lis
     or a tool result (both carry content), so a breakpoint is placed on virtually
     every turn.
 
-    Trailing *volatile context* messages (``additional_kwargs[VOLATILE_CONTEXT_KEY]``,
-    the per-call ``<current_page>``/``<client_objects>`` block) are skipped: they
-    are not checkpointed and change between calls, so a breakpoint on them would
-    never be hit. The breakpoint goes on the last persisted message in front.
+    A trailing *volatile context* message (``additional_kwargs[VOLATILE_CONTEXT_KEY]``,
+    the per-call ``<current_page>``/``<client_objects>`` block, last on a turn's first
+    step) is skipped: it is not checkpointed and changes between calls, so a
+    breakpoint on it would never be hit. The breakpoint goes on the last persisted
+    message in front.
     """
     idx = len(messages) - 1
     while idx >= 0 and (getattr(messages[idx], "additional_kwargs", None) or {}).get(VOLATILE_CONTEXT_KEY):
