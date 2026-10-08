@@ -509,3 +509,20 @@ class TestRefusalsAreReportedAsTheUsers:
         with _classification("unclear"):
             decisions = await decisions_from_resume("what's the weather?", ACTION_REQUESTS)
         assert "declined it" not in decisions[0]["message"]
+
+
+class TestTheAuthorizationReaderGetsOnlyTheWordsToo:
+    @pytest.mark.asyncio
+    async def test_classify_reply_strips_the_thread_for_every_caller(self):
+        """The sign-in classifier read the bot's own "Authorize in the browser…" lines."""
+        from agent_common.core.hitl_resume import classify_reply
+
+        wrapped = (
+            "<thread_context>\n<message role=\"assistant\">Authorize in the browser, then confirm here</message>\n"
+            "</thread_context>\n<current_request userId=\"U1\">maybe later</current_request>"
+        )
+        with _classification("unclear") as model_factory:
+            await classify_reply(wrapped, [], question="authorize?")
+        prompt = model_factory.return_value.ainvoke.call_args.args[0][1]["content"]
+        assert prompt.endswith("maybe later")
+        assert "Authorize in the browser" not in prompt

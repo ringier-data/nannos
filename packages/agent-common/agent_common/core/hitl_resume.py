@@ -305,6 +305,8 @@ async def classify_reply(reply: str, action_requests: list[Any], *, question: st
     """
     if not isinstance(reply, str) or not reply.strip():
         return None
+    # Every caller, the authorization readers too: chat clients prepend the thread.
+    reply = _users_words(reply)
     from agent_common.middleware.gateway_attribution_middleware import run_config_attribution_scope
 
     try:
@@ -323,6 +325,7 @@ def classify_reply_sync(reply: str, action_requests: list[Any], *, question: str
     """Blocking twin of :func:`classify_reply` for the sync ``after_model`` path."""
     if not isinstance(reply, str) or not reply.strip():
         return None
+    reply = _users_words(reply)
     from agent_common.middleware.gateway_attribution_middleware import run_config_attribution_scope
 
     try:
