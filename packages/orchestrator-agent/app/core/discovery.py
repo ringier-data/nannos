@@ -100,12 +100,15 @@ class AgentDiscoveryService:
         self,
         agent_metadata: dict[str, dict[str, Any]],
         token: str,
+        report: "DiscoveryReport | None" = None,
     ) -> List[CompiledSubAgent]:
         """Discover available sub-agents by fetching their agent cards.
 
         Args:
             agent_metadata: Metadata map from agent_url -> {sub_agent_id, name, description}
             token: User's access token for authentication and token exchange
+            report: Marked incomplete when an agent's card could not be fetched, so the
+                shortened list is not cached as the user's full set of sub-agents
 
         Returns:
             List of discovered sub-agents
@@ -130,6 +133,8 @@ class AgentDiscoveryService:
             except Exception as e:
                 logger.warning(f"Failed to discover agent at {base_url}: {type(e).__name__}: {e}")
                 self._log_discovery_error(e, base_url)
+                if report is not None:
+                    report.mark_incomplete(f"sub-agent card unavailable ({type(e).__name__})")
 
         logger.debug(f"Agent discovery complete. Found {len(sub_agents)} agents")
 

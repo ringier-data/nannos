@@ -17,7 +17,7 @@ import httpx
 import pytest
 from app.core import discovery_cache as dc
 from app.core.discovery import DiscoveryReport, ToolDiscoveryService
-from app.core.executor import OrchestratorDeepAgentExecutor
+from app.core.executor import PARTIAL_DISCOVERY_TTL_S, OrchestratorDeepAgentExecutor
 from app.models.config import AgentSettings
 
 
@@ -101,7 +101,13 @@ class TestOnlyACompleteDiscoveryIsCached:
         dc._discovery_cache = None
 
     @pytest.mark.asyncio
-    async def test_a_partial_toolset_is_rediscovered_next_turn(self):
+    async def test_a_partial_toolset_is_cached_only_briefly(self):
+        """Not for the TTL (one timeout hid Gmail for five minutes), not zero either.
+
+        Uncached, a source that keeps failing (a dead server, a dev stack without the
+        gateway) cost a full discovery on every turn.
+        """
+
         async def partial(token, white_list=None, token_provider=None, report=None):
             report.mark_incomplete("gateway servers could not be listed (ConnectTimeout)")
             return []
@@ -112,8 +118,22 @@ class TestOnlyACompleteDiscoveryIsCached:
 
         await self._build(executor, token)
         await self._build(executor, token)
+        assert discover.await_count == 1  # the second turn reuses the brief entry
 
-        assert discover.await_count == 2
+        (entry,) = dc._discovery_cache._store.values()
+        assert entry.expires_at - time.time() <= PARTIAL_DISCOVERY_TTL_S + 1
+
+    @pytest.mark.asyncio
+    async def test_a_missing_sub_agent_card_makes_it_partial(self):
+        from app.core.discovery import AgentDiscoveryService
+
+        service = object.__new__(AgentDiscoveryService)
+        service._discover_single_agent = AsyncMock(side_effect=TimeoutError("card fetch timed out"))
+        service._log_discovery_error = Mock()
+        report = DiscoveryReport()
+
+        assert await service.register_agents({"https://agent.example": {}}, "token", report=report) == []
+        assert not report.complete
 
     @pytest.mark.asyncio
     async def test_a_complete_toolset_is_cached_as_before(self):

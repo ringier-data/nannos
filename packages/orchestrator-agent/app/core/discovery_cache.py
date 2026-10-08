@@ -223,8 +223,8 @@ class TtlTokenCache:
             return None
         return entry.value
 
-    def put(self, key: str, value: Any, access_token: str | None) -> None:
-        expires_at = time.time() + self._ttl
+    def put(self, key: str, value: Any, access_token: str | None, ttl_seconds: float | None = None) -> None:
+        expires_at = time.time() + (self._ttl if ttl_seconds is None else ttl_seconds)
         exp = token_exp(access_token)
         if exp is not None:
             expires_at = min(expires_at, exp - _TOKEN_EXP_MARGIN_S)
