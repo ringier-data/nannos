@@ -56,6 +56,13 @@ export interface ConversationsStoreOptions {
   embedded?: boolean;
   /** Playground scoping (console sub-agent playground). */
   subAgentConfigHash?: string;
+  /** Cookie-session embedded scope (the console's own assistant): the bound sub-agent
+   *  the handshake named. The server cannot scope a cookie request by token, so the
+   *  list filters by it — only ever the caller's own conversations either way. */
+  getEmbeddedSubAgentId?: () => string | number | null | undefined;
+  /** Resolves once `getEmbeddedSubAgentId` can answer (the handshake is done, or gave
+   *  up). Every list load waits for it, so no caller can fetch the unscoped list first. */
+  whenScoped?: () => Promise<void>;
   /** Filter by orchestrator URL (console passes its configured agent). */
   getAgentUrl?: () => string | undefined;
   /** Console behavior: adopt the most recent conversation when none is active.
@@ -158,6 +165,7 @@ export class ConversationsStore {
   async loadList(search?: string): Promise<void> {
     this.set({ isLoading: true });
     try {
+      if (this.opts.whenScoped) await this.opts.whenScoped();
       const params = new URLSearchParams();
       params.set('limit', '50');
       if (search?.trim()) params.set('search', search.trim());
@@ -170,7 +178,10 @@ export class ConversationsStore {
       }
       // Embedded widget: the server scopes the list to the sub-agent the bearer
       // token is bound to (ADR-0006) — a host page only ever receives its own
-      // conversations, and nothing the page could send would widen that.
+      // conversations, and nothing the page could send would widen that. A cookie
+      // scope has no token to scope by, so it names its bound agent itself.
+      const embeddedSubAgentId = this.opts.getEmbeddedSubAgentId?.();
+      if (embeddedSubAgentId != null) params.set('embedded_sub_agent_id', String(embeddedSubAgentId));
 
       const resp = await this.opts.fetch(`/api/v1/conversations/?${params.toString()}`);
       if (!resp.ok) throw new Error(`Failed to load conversations (status=${resp.status})`);

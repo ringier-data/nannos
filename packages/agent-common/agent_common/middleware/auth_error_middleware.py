@@ -64,6 +64,7 @@ from langchain.tools.tool_node import ToolCallRequest
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 from langgraph.typing import ContextT
+from typing_extensions import NotRequired
 
 from agent_common.core.hitl_resume import (
     NO_WORKAROUND_CLAUSE,
@@ -73,7 +74,7 @@ from agent_common.core.hitl_resume import (
     name_or_nothing,
     pending_authorization_answer,
 )
-from typing_extensions import NotRequired
+from agent_common.core.turn_stops import DECLINED_AUTH_LEAD
 
 logger = logging.getLogger(__name__)
 
@@ -490,7 +491,7 @@ class AuthErrorDetectionMiddleware(AgentMiddleware[AuthErrorState, ContextT]):
         """The refusal handed to the model — identical whichever path read the "no"."""
         reason = f" They said: {message}" if message.strip() else ""
         content = (
-            f"The user DECLINED the authorization required by "
+            f"{DECLINED_AUTH_LEAD} "
             f"{self._subject(tool_name, auth_requirement)}.{reason} "
             f"{NOT_MISSING_CLAUSE} "
             "Do not retry the call and do not send the authorization link again. "

@@ -33,6 +33,8 @@ import {
 } from '@/api/generated/@tanstack/react-query.gen';
 import { client } from '@/api/generated/client.gen';
 import { getErrorMessage } from '@/lib/utils';
+import { NannosForm } from '@/components/nannos/NannosForm';
+import type { ActionOutcome } from '@nannos/embed-sdk';
 
 // --- Types (will come from SDK after regen) ---
 
@@ -399,8 +401,21 @@ export function SourceManager({ catalogId, canEdit }: SourceManagerProps) {
     );
   }, []);
 
-  const handleSaveDriveSource = useCallback(() => {
-    if (!selectedDrive) return;
+  // Resolves with what happened, for the assistant's submit; onError has already toasted a failure.
+  const addSourceOutcome = useCallback(
+    async (base: Omit<CatalogSource, 'id'>): Promise<ActionOutcome> => {
+      try {
+        await addMutation.mutateAsync(base);
+        return true;
+      } catch (err) {
+        return { ok: false, detail: getErrorMessage(err) };
+      }
+    },
+    [addMutation],
+  );
+
+  const handleSaveDriveSource = useCallback(async (): Promise<ActionOutcome> => {
+    if (!selectedDrive) return { ok: false, detail: 'No drive selected' };
     const base: Omit<CatalogSource, 'id'> = selectedFolder
       ? {
           type: 'drive_folder',
@@ -417,11 +432,11 @@ export function SourceManager({ catalogId, canEdit }: SourceManagerProps) {
     if (wizardExcludePatterns.length > 0) {
       base.exclude_folder_patterns = wizardExcludePatterns;
     }
-    addMutation.mutate(base);
-  }, [selectedDrive, selectedFolder, wizardExcludePatterns, addMutation]);
+    return addSourceOutcome(base);
+  }, [selectedDrive, selectedFolder, wizardExcludePatterns, addSourceOutcome]);
 
-  const handleSaveSharedFolder = useCallback(() => {
-    if (!sharedFolderRoot) return;
+  const handleSaveSharedFolder = useCallback(async (): Promise<ActionOutcome> => {
+    if (!sharedFolderRoot) return { ok: false, detail: 'No shared folder selected' };
     const target = selectedSharedSubfolder ?? sharedFolderRoot;
     const base: Omit<CatalogSource, 'id'> = {
       type: 'shared_folder',
@@ -431,8 +446,8 @@ export function SourceManager({ catalogId, canEdit }: SourceManagerProps) {
     if (wizardExcludePatterns.length > 0) {
       base.exclude_folder_patterns = wizardExcludePatterns;
     }
-    addMutation.mutate(base);
-  }, [sharedFolderRoot, selectedSharedSubfolder, wizardExcludePatterns, addMutation]);
+    return addSourceOutcome(base);
+  }, [sharedFolderRoot, selectedSharedSubfolder, wizardExcludePatterns, addSourceOutcome]);
 
   const handleUpdateExclusions = useCallback(
     (sourceId: string, patterns: string[]) => {
@@ -621,6 +636,7 @@ export function SourceManager({ catalogId, canEdit }: SourceManagerProps) {
       {/* ─── Step: browse folders within a drive ─── */}
       {step === 'pick-folder' && selectedDrive && (
         <FolderBrowserPanel
+          catalogId={catalogId}
           backLabel="Drives"
           onBack={() => setStep('pick-drive')}
           rootIcon={<HardDrive className="h-3 w-3 mr-1" />}
@@ -688,6 +704,7 @@ export function SourceManager({ catalogId, canEdit }: SourceManagerProps) {
       {/* ─── Step: browse subfolders within a shared folder ─── */}
       {step === 'browse-shared-folder' && sharedFolderRoot && (
         <FolderBrowserPanel
+          catalogId={catalogId}
           backLabel="Shared folders"
           onBack={() => { setSharedFolderRoot(null); setSharedFolderPath([]); setStep('pick-shared-folder'); }}
           rootIcon={<Share2 className="h-3 w-3 mr-1" />}
@@ -740,6 +757,8 @@ export function SourceManager({ catalogId, canEdit }: SourceManagerProps) {
 // ─────────────────────────────── Folder Browser Panel ───────────────────────────────
 
 interface FolderBrowserPanelProps {
+  /** The catalog the source is being added to (parent of the assistant's CatalogSource). */
+  catalogId: string;
   backLabel: string;
   onBack: () => void;
   rootIcon: React.ReactNode;
@@ -755,12 +774,13 @@ interface FolderBrowserPanelProps {
   summaryText: React.ReactNode;
   excludePatterns: string[];
   onExcludePatternsChange: (patterns: string[]) => void;
-  onSave: () => void;
+  onSave: () => Promise<ActionOutcome>;
   onCancel: () => void;
   saving: boolean;
 }
 
 function FolderBrowserPanel({
+  catalogId,
   backLabel,
   onBack,
   rootIcon,
@@ -859,7 +879,17 @@ function FolderBrowserPanel({
         )}
       </button>
       {showExclusions && (
-        <div className="ml-5 rounded-md border border-orange-200 dark:border-orange-800/50 bg-orange-50/50 dark:bg-orange-950/20 p-3">
+        <div
+          data-nannos-field="excludeFolderPatterns"
+          className="ml-5 rounded-md border border-orange-200 dark:border-orange-800/50 bg-orange-50/50 dark:bg-orange-950/20 p-3"
+        >
+          <NannosForm
+            type="CatalogSource"
+            id={undefined}
+            parentId={catalogId}
+            fields={{ excludeFolderPatterns: [excludePatterns, onExcludePatternsChange] }}
+            save={onSave}
+          />
           <ExclusionPatternEditor
             patterns={excludePatterns}
             onChange={onExcludePatternsChange}
@@ -872,7 +902,7 @@ function FolderBrowserPanel({
         <div className="text-xs text-muted-foreground">{summaryText}</div>
         <div className="flex items-center gap-2">
           <Button variant="ghost" size="sm" onClick={onCancel}>Cancel</Button>
-          <Button size="sm" onClick={onSave} disabled={saving}>
+          <Button size="sm" onClick={() => void onSave()} disabled={saving}>
             {saving && <Loader2 className="mr-2 h-3 w-3 animate-spin" />}
             Add
           </Button>

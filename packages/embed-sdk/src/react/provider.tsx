@@ -30,6 +30,7 @@ import {
   mergePageContexts,
   sanitizePageContext,
   snapshotScreenOutline,
+  type AppliedChange,
   type ApplyResult,
   type NannosAuth,
   type NannosConfig,
@@ -238,11 +239,16 @@ export interface NannosProviderProps {
   enabled?: boolean;
 
   /** Client actions — provider-only in v2 (the adapter carries none). */
-  navigate?: (to: string) => void;
+  navigate?: (to: string) => void | string;
   highlight?: (target: { type: string; id: string }, field?: string) => void;
   /** Called after an `apply` that rejected at least one field — the only place
    *  a rejection surfaces (the agent gets no ack). */
   onApplyResult?: (target: { type: string; id: string }, result: ApplyResult) => void;
+  /** Mark the fields an `apply` wrote / drop the marks after a save — see
+   *  `createClientActionHandlers`, which builds both. */
+  beforeApply?: (target: { type: string; id: string }, fields: string[]) => unknown;
+  markChanged?: (target: { type: string; id: string }, changes: AppliedChange[], captured: unknown) => void;
+  clearChanged?: (target: { type: string; id: string }) => void;
   /** Forward SDK-internal failures (connection/init/auth/apply) to host monitoring. */
   onError?: (e: NannosErrorEvent) => void;
   /** Include the rendered page as a markdown outline (a visibility-respecting
@@ -291,6 +297,9 @@ export function NannosProvider(props: NannosProviderProps): ReactNode {
     navigate,
     highlight,
     onApplyResult,
+    beforeApply,
+    markChanged,
+    clearChanged,
     onError,
     screenOutline = true,
     adapter,
@@ -448,10 +457,13 @@ export function NannosProvider(props: NannosProviderProps): ReactNode {
       navigate,
       highlight,
       onApplyResult,
+      beforeApply,
+      markChanged,
+      clearChanged,
       readCurrentPage,
       screenOutline: screenOutline ? snapshotScreenOutline : undefined,
     });
-  }, [resolved, navigate, highlight, onApplyResult, readCurrentPage, screenOutline]);
+  }, [resolved, navigate, highlight, onApplyResult, beforeApply, markChanged, clearChanged, readCurrentPage, screenOutline]);
 
   useEffect(() => {
     if (!resolved || !onError) return;

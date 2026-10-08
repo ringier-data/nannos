@@ -190,6 +190,16 @@ export interface IOAuthStateStore {
 }
 
 /**
+ * Interface for the approval cards a typed answer may have to settle: call id → card
+ * message name, remembered when the card is posted (the app cannot list messages).
+ */
+export interface IHitlCardStore {
+  set(projectId: string, messageName: string, callIds: string[], ttlSeconds?: number): Promise<void>;
+  /** The cards asking about these calls, each returned (and forgotten) once. */
+  take(projectId: string, callIds: string[]): Promise<string[]>;
+}
+
+/**
  * Interface for per-installation notification-secret storage.
  * Backs the 'db' installation-secret provider (the cloud-agnostic default).
  */

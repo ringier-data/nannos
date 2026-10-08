@@ -50,7 +50,7 @@ from typing import Any, Literal
 
 from langchain_core.messages import SystemMessage
 
-from .utils import VOLATILE_CONTEXT_KEY
+from .utils import VOLATILE_CONTEXT_KEY, current_step_start
 
 from langchain.agents.middleware.types import (
     AgentMiddleware,
@@ -120,7 +120,9 @@ class LiteLLMPromptCachingMiddleware(AgentMiddleware):
             logger.debug("Injected cache_control breakpoint on system prefix (ttl=%s)", self.ttl)
 
         if self.cache_conversation and request.messages:
-            tagged_messages = _tag_last_message(request.messages, self._cache_control)
+            tagged_messages = _tag_before_current_step(
+                _tag_last_message(request.messages, self._cache_control), self._cache_control
+            )
             if tagged_messages is not request.messages:
                 new_request = new_request.override(messages=tagged_messages)
                 logger.debug("Injected cache_control breakpoint on last conversation message")
@@ -198,15 +200,41 @@ def _tag_last_message(messages: list[Any], cache_control: dict[str, str]) -> lis
     or a tool result (both carry content), so a breakpoint is placed on virtually
     every turn.
 
-    Trailing *volatile context* messages (``additional_kwargs[VOLATILE_CONTEXT_KEY]``,
-    the per-call ``<current_page>``/``<client_objects>`` block) are skipped: they
-    are not checkpointed and change between calls, so a breakpoint on them would
-    never be hit. The breakpoint goes on the last persisted message in front.
+    A trailing *volatile context* message (``additional_kwargs[VOLATILE_CONTEXT_KEY]``,
+    the per-call ``<current_page>``/``<client_objects>`` block, last on a turn's first
+    step) is skipped: it is not checkpointed and changes between calls, so a
+    breakpoint on it would never be hit. The breakpoint goes on the last persisted
+    message in front.
     """
     idx = len(messages) - 1
     while idx >= 0 and (getattr(messages[idx], "additional_kwargs", None) or {}).get(VOLATILE_CONTEXT_KEY):
         idx -= 1
     if idx < 0:
+        return messages
+    new_content = _tag_last_block(messages[idx].content, cache_control)
+    if new_content is None:
+        return messages
+    new_messages = list(messages)
+    new_messages[idx] = messages[idx].model_copy(update={"content": new_content})
+    return new_messages
+
+
+def _tag_before_current_step(messages: list[Any], cache_control: dict[str, str]) -> list[Any]:
+    """Also tag the last persisted message before the current step.
+
+    The page-context block sits just before the current step
+    (``place_volatile_context_message``), so the entry written at the last message
+    contains it, and the block has moved by the next step: on Anthropic/Bedrock, which
+    read only at a prefix a breakpoint wrote, that entry is never read. The entry
+    written here ends before the block, so the next step reads it and re-sends one
+    step. On a turn's first step, or without a block, it is the last message's own
+    breakpoint, or one the previous step already wrote. At most three breakpoints
+    in all (system + these two), within the providers' four.
+    """
+    idx = current_step_start(messages) - 1
+    while idx >= 0 and (getattr(messages[idx], "additional_kwargs", None) or {}).get(VOLATILE_CONTEXT_KEY):
+        idx -= 1
+    if idx < 0 or idx == len(messages) - 1:
         return messages
     new_content = _tag_last_block(messages[idx].content, cache_control)
     if new_content is None:

@@ -13,9 +13,8 @@ import { describe, expect, it, beforeEach, vi } from 'vitest';
 import type { Socket } from 'socket.io-client';
 import { createNannos } from '../core';
 import { NannosProvider, useAssistant, type AssistantValue, type NannosHostAdapter } from '../react';
-import type { NannosUIMessage } from '../transport';
+import { isAnsweredInChat, type NannosUIMessage } from '../transport';
 import { NannosChatScope, useChatEngine, type ChatEngine } from './engine';
-import { ApplyModeProvider, type ApplyMode } from './apply-mode';
 import { useNannosChat, type UseNannosChatValue } from './hooks/use-nannos-chat';
 
 /** Socket fake mirroring connection-store.test.ts: handlers by name, emits captured. */
@@ -49,9 +48,9 @@ const ADAPTER: NannosHostAdapter = {
   api: { getUserSettings: async () => null },
 };
 
-function mountScope() {
+function mountScope(config: Parameters<typeof createNannos>[0] = {}) {
   const sockets: FakeSocket[] = [];
-  const core = createNannos({}, () => {
+  const core = createNannos(config, () => {
     const socket = new FakeSocket();
     sockets.push(socket);
     return socket as unknown as Socket;
@@ -188,6 +187,28 @@ describe('NannosChatScope lifecycle', () => {
     });
   });
 
+  it("sends the page's objects only from an embedded scope", async () => {
+    // A host's own chat drives its page; the console's main chat (cookie session, its
+    // own agents) must not get `client_action` and the objects prompt on every turn.
+    const sentObjects = async (config: Parameters<typeof createNannos>[0]) => {
+      const scope = mountScope(config);
+      const socket = scope.socket();
+      await handshake(socket);
+      scope.core.register({ type: 'Page', id: '/a', scope: 'view', getState: () => ({}), apply: () => {} });
+      await scope.engine().transport.sendMessages({
+        trigger: 'submit-message',
+        chatId: 'conv-1',
+        messageId: undefined,
+        messages: [USER_MESSAGE],
+        abortSignal: undefined,
+      });
+      const [, payload] = socket.emitted.find(([e]) => e === 'send_message')! as [string, { metadata?: Record<string, unknown> }];
+      return payload.metadata?.clientObjects;
+    };
+    expect(await sentObjects({})).toBeUndefined();
+    expect(await sentObjects({ getToken: async () => 't' })).toHaveLength(1);
+  });
+
   it('handshakes a socket that connects AFTER the scope asked to initialize', async () => {
     // Child effects run before the provider's connect(), so the scope's own
     // initialize() can find no socket at all; the connect must retry it.
@@ -302,9 +323,13 @@ describe('client-action round trip (awaited apply)', () => {
   });
 });
 
-describe('apply mode: the risk-gated fill', () => {
-  /** A registry the agent can write into, plus a mounted chat surface in `mode`. */
-  function mountWithMode(mode: ApplyMode | undefined, conversationId: string) {
+describe('client_action approval: the risk-gated directive', () => {
+  // A form fill (`apply`) is scored LOW by the agent and never raises a gate;
+  // an action that saves (`invoke` of one marked requiresApproval) does. The panel does not judge kinds: any
+  // gated `client_action` renders the normal approval card, and approving it
+  // runs the directive right then so ONE resume carries the result.
+  /** A registry the agent can write into, plus a mounted chat surface. */
+  function mountChat(conversationId: string) {
     const sockets: FakeSocket[] = [];
     const applied: Array<Record<string, unknown>> = [];
     const core = createNannos({}, () => {
@@ -332,11 +357,9 @@ describe('apply mode: the risk-gated fill', () => {
     render(
       <StrictMode>
         <NannosProvider core={core}>
-          <ApplyModeProvider mode={mode}>
-            <NannosChatScope adapter={ADAPTER}>
-              <Probe />
-            </NannosChatScope>
-          </ApplyModeProvider>
+          <NannosChatScope adapter={ADAPTER}>
+            <Probe />
+          </NannosChatScope>
         </NannosProvider>
       </StrictMode>,
     );
@@ -348,7 +371,7 @@ describe('apply mode: the risk-gated fill', () => {
     };
   }
 
-  /** The risk gate the agent raises for a `client_action` apply: FLAT tool args. */
+  /** A risk gate the agent raises for a `client_action`: FLAT tool args. */
   function gate(contextId: string, callId = 'tooluse_1') {
     return {
       kind: 'status-update',
@@ -386,8 +409,8 @@ describe('apply mode: the risk-gated fill', () => {
     };
   }
 
-  it('manual: the fill waits for a human and touches nothing until then', async () => {
-    const h = mountWithMode('manual', 'conv-manual');
+  it('the gated directive waits for a human and touches nothing until then', async () => {
+    const h = mountChat('conv-gated');
     await handshake(h.socket());
     await act(async () => {
       h.chat().send('fill out the form');
@@ -395,7 +418,7 @@ describe('apply mode: the risk-gated fill', () => {
     await vi.waitFor(() => expect(h.sends()).toHaveLength(1));
 
     await act(async () => {
-      h.socket().fire('agent_response', gate('conv-manual'));
+      h.socket().fire('agent_response', gate('conv-gated'));
     });
 
     // The card is up, the form is untouched, and no resume went out.
@@ -405,8 +428,8 @@ describe('apply mode: the risk-gated fill', () => {
     expect(h.sends()).toHaveLength(1);
   });
 
-  it('allow-edits: the panel answers, the form is written, ONE resume carries the result', async () => {
-    const h = mountWithMode('allow-edits', 'conv-allow');
+  it('approving runs the directive at once, and ONE resume carries the result', async () => {
+    const h = mountChat('conv-approve');
     await handshake(h.socket());
     await act(async () => {
       h.chat().send('fill out the form');
@@ -414,7 +437,12 @@ describe('apply mode: the risk-gated fill', () => {
     await vi.waitFor(() => expect(h.sends()).toHaveLength(1));
 
     await act(async () => {
-      h.socket().fire('agent_response', gate('conv-allow'));
+      h.socket().fire('agent_response', gate('conv-approve'));
+    });
+    await vi.waitFor(() => expect(h.chat().interrupt.pending).toHaveLength(1));
+
+    await act(async () => {
+      await h.chat().interrupt.respond(h.chat().interrupt.pending[0].approvalId, true);
     });
 
     // The values reached the registered form, unwrapped from the flat tool args.
@@ -432,36 +460,10 @@ describe('apply mode: the risk-gated fill', () => {
       type: 'approve',
       client_action_result: { ok: true, applied: ['name', 'budget'], rejected: [] },
     });
-
-    // No card ever rendered — not even for a frame.
-    expect(h.chat().interrupt.pending).toHaveLength(0);
   });
 
-  it('allow-edits does not answer a gate that is not an apply', async () => {
-    // Unknown/other kinds are scored to interrupt as a fail-safe. Honouring that
-    // is the point: only a form fill is covered by this mode.
-    const h = mountWithMode('allow-edits', 'conv-other');
-    await handshake(h.socket());
-    await act(async () => {
-      h.chat().send('do something risky');
-    });
-    await vi.waitFor(() => expect(h.sends()).toHaveLength(1));
-
-    const other = gate('conv-other', 'tooluse_2');
-    const args = other.status.message.parts[1].data!.action_requests[0].args as Record<string, unknown>;
-    args.kind = 'refresh';
-
-    await act(async () => {
-      h.socket().fire('agent_response', other);
-    });
-
-    await vi.waitFor(() => expect(h.chat().interrupt.pending).toHaveLength(1));
-    expect(h.applied).toHaveLength(0);
-    expect(h.sends()).toHaveLength(1);
-  });
-
-  it('allow-edits leaves a non-client_action approval to the human', async () => {
-    const h = mountWithMode('allow-edits', 'conv-tool');
+  it('a non-client_action approval stays with the human', async () => {
+    const h = mountChat('conv-tool');
     await handshake(h.socket());
     await act(async () => {
       h.chat().send('delete everything');
@@ -478,5 +480,37 @@ describe('apply mode: the risk-gated fill', () => {
     await vi.waitFor(() => expect(h.chat().interrupt.pending).toHaveLength(1));
     expect(h.chat().interrupt.pending[0].toolName).toBe('delete_campaign');
     expect(h.sends()).toHaveLength(1);
+  });
+
+  it('a reply TYPED at an open card answers it: the buttons go at once', async () => {
+    const h = mountChat('conv-typed');
+    await handshake(h.socket());
+    await act(async () => {
+      h.chat().send('delete everything');
+    });
+    await vi.waitFor(() => expect(h.sends()).toHaveLength(1));
+    const other = gate('conv-typed', 'tooluse_4');
+    other.status.message.parts[1].data!.action_requests[0].name = 'delete_campaign';
+    await act(async () => {
+      h.socket().fire('agent_response', other);
+    });
+    await vi.waitFor(() => expect(h.chat().interrupt.pending).toHaveLength(1));
+
+    await act(async () => {
+      h.chat().send('actually, only the drafts');
+    });
+
+    // No card left to click, and the card reads as answered in chat until the
+    // server's reading of the words arrives with the next turn.
+    expect(h.chat().interrupt.pending).toHaveLength(0);
+    const card = h
+      .chat()
+      .messages.flatMap((m) => m.parts)
+      .find((p) => p.type === 'dynamic-tool' && p.toolCallId === 'tooluse_4');
+    expect(card).toMatchObject({ state: 'output-denied' });
+    expect(isAnsweredInChat(card as { callProviderMetadata?: unknown })).toBe(true);
+    // The words go out as a plain new turn — the server reads them.
+    await vi.waitFor(() => expect(h.sends()).toHaveLength(2));
+    expect((h.sends()[1][1] as { message?: string }).message).toBe('actually, only the drafts');
   });
 });

@@ -28,7 +28,8 @@ dependencies = [
     "ringier-a2a-sdk>=0.1.0",
     "object-storage>=0.1.0",
     "uuid6>=2024.7.10",
-    "fastapi-mcp>=0.4.0",
+    # <0.5: fastapi_mcp_patch overrides the private FastApiMCP._request.
+    "fastapi-mcp>=0.4.0,<0.5",
     "python-keycloak>=7.0.2",
     "python-multipart>=0.0.9",
     "croniter>=2.0.0",

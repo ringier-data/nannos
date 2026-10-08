@@ -9,9 +9,11 @@ from unittest.mock import patch
 
 import pytest
 from agent_common.a2a.structured_response import (
+    StructuredResponseMixin,
     SubAgentResponseSchema,
     get_response_format,
 )
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain.agents.structured_output import ToolStrategy
 
 _PATCH_TARGET = "agent_common.a2a.structured_response.get_model_provider"
@@ -130,3 +132,59 @@ def test_an_unprobed_or_forceable_alias_keeps_tool_strategy(caps: dict):
 
     assert isinstance(fmt, ToolStrategy)
     assert tools == []
+
+
+class _Translator(StructuredResponseMixin):
+    """The mixin over stub builders: each records what it was handed."""
+
+    name = "assistant"
+
+    def _build_response_from_schema(self, schema, context_id, task_id):
+        return ("schema", schema.message)
+
+    def _build_success_response(self, content, context_id=None, task_id=None, **extra):
+        return ("success", content)
+
+    def _build_error_response(self, message, context_id=None, task_id=None, **extra):
+        return ("error", message)
+
+
+def _answered_turn(text: str, call_id: str) -> list:
+    """One turn answered through the response tool, as ToolStrategy records it."""
+    args = {"task_state": "completed", "message": text}
+    return [
+        HumanMessage(content=f"ask {call_id}"),
+        AIMessage(content="", tool_calls=[{"name": "SubAgentResponseSchema", "args": args, "id": call_id}]),
+        ToolMessage(content="ok", tool_call_id=call_id, name="SubAgentResponseSchema"),
+    ]
+
+
+def test_a_turn_that_ended_on_a_blocked_call_never_replays_the_previous_answer():
+    """``structured_response`` is persisted state: after a turn ends on a loop block (an
+    error result the model never reacted to) it still holds the PREVIOUS turn's answer."""
+    previous = SubAgentResponseSchema(task_state="completed", message="the settings page shows...")
+    messages = _answered_turn("the settings page shows...", "a1") + [
+        HumanMessage(content="wait until the page loads"),
+        AIMessage(content="", tool_calls=[{"name": "client_action", "args": {"kind": "read"}, "id": "r1"}]),
+        ToolMessage(
+            content="BLOCKED: 'client_action' — called 6 times with identical arguments", tool_call_id="r1", status="error"
+        ),
+    ]
+    out = _Translator()._translate_agent_result({"structured_response": previous, "messages": messages}, None, None)
+    # Reported in plain words: the block text is an instruction to the model, not a reply.
+    from agent_common.a2a.structured_response import STOPPED_REPLY
+
+    assert out[0] == "success" and out[1].startswith(STOPPED_REPLY)
+
+
+def test_this_turns_structured_response_is_still_used():
+    current = SubAgentResponseSchema(task_state="completed", message="it does not exist")
+    messages = _answered_turn("earlier", "a1") + _answered_turn("it does not exist", "a2")
+    out = _Translator()._translate_agent_result({"structured_response": current, "messages": messages}, None, None)
+    assert out == ("schema", "it does not exist")
+
+
+def test_without_structured_state_the_response_tool_call_is_read_from_this_turn_only():
+    messages = _answered_turn("earlier", "a1") + _answered_turn("now", "a2")
+    out = _Translator()._translate_agent_result({"messages": messages}, None, None)
+    assert out == ("schema", "now")

@@ -16,6 +16,7 @@ import { PlaybooksPage } from './pages/PlaybooksPage';
 import { SkillRegistryPage } from './pages/SkillRegistryPage';
 import { CatalogsPage } from './pages/CatalogsPage';
 import { CatalogDetailPage } from './pages/CatalogDetailPage';
+import { NotFoundPage } from './pages/NotFoundPage';
 import { AdminRoute } from './components/AdminRoute';
 import { GroupManagerRoute } from './components/GroupManagerRoute';
 import { AnalyticsPage } from './pages/admin/AnalyticsPage';
@@ -74,8 +75,11 @@ function App() {
         <Route path="subagents/:id" element={<SubAgentDetailPage />} />
         <Route path="usage" element={<UsagePage />} />
         <Route path="scheduler" element={<SchedulerPage />} />
+        {/* The create dialogs have addresses, so a link (or the assistant) can open them. */}
+        <Route path="scheduler/new" element={<SchedulerPage create />} />
         <Route path="scheduler/:id" element={<SchedulerJobDetailPage />} />
         <Route path="catalogs" element={<CatalogsPage />} />
+        <Route path="catalogs/new" element={<CatalogsPage create />} />
         <Route path="catalogs/:id" element={<CatalogDetailPage />} />
         <Route path="delivery-channels" element={<DeliveryChannelsPage />} />
         <Route path="playbooks" element={<PlaybooksPage />} />
@@ -216,6 +220,7 @@ function App() {
             </AdminRoute>
           }
         />
+        <Route path="*" element={<NotFoundPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/app" replace />} />
     </Routes>

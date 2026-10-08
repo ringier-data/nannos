@@ -141,7 +141,18 @@ class ClientActionMeta(BaseModel):
     client_action: Dict[str, Any] = Field(default_factory=dict)
 
 
-EventMetadata = Union[ActivityLogMeta, WorkPlanMeta, IntermediateOutputMeta, ClientActionMeta]
+class HitlDecisionMeta(BaseModel):
+    """How a TYPED answer to a pending approval was read (``HITL_DECISION_EXTENSION``).
+
+    Emitted by ``agent_common.core.hitl_resume`` when it classifies the user's words
+    instead of receiving a click: one ``{"id", "type", "intent"}`` per pending call.
+    Display-only — it lets the client settle the approval card to what happened.
+    """
+
+    hitl_decision: list[dict[str, Any]] = Field(default_factory=list)
+
+
+EventMetadata = ActivityLogMeta | WorkPlanMeta | IntermediateOutputMeta | ClientActionMeta | HitlDecisionMeta
 
 # ---------------------------------------------------------------------------
 # Top-level stream event models
@@ -208,4 +219,6 @@ def parse_event_metadata(raw: Optional[Dict[str, Any]]) -> Optional[EventMetadat
         return IntermediateOutputMeta()
     if raw.get("client_action"):
         return ClientActionMeta(client_action=raw["client_action"])
+    if raw.get("hitl_decision"):
+        return HitlDecisionMeta(hitl_decision=raw["hitl_decision"])
     return None

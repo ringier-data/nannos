@@ -117,3 +117,32 @@ describe('isTurnDelivered', () => {
     expect(call({ finalizeMessageTs: '123.456', streamErrored: true, hasStreamedAnswer: true })).toBe(true);
   });
 });
+
+describe('finalizeStreamedTask — the plan header settles', () => {
+  function recordingStreamer() {
+    const calls: { finish?: any } = {};
+    return {
+      calls,
+      streamer: {
+        appendAnswer: async () => undefined,
+        finish: async (opts: any) => {
+          calls.finish = opts;
+        },
+        answerTs: 'a',
+        ts: 's',
+      } as any,
+    };
+  }
+
+  test.each(['completed', 'failed', 'input-required'])('%s → "Thinking", never left on "Working"', async (state) => {
+    const { streamer, calls } = recordingStreamer();
+    const task = {
+      ...taskWithState(state),
+      status: { state, message: { parts: [{ kind: 'text', text: 'Which channel?' }] } },
+    } as unknown as Task;
+
+    await finalizeStreamedTask({ task, streamer, slackClient: {} as any, messageContext });
+
+    expect(calls.finish.planTitle).toBe('Thinking');
+  });
+});

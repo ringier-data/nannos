@@ -17,6 +17,17 @@ import { refuseForeignClick } from '../../utils/interruptOwner.js';
  * Button values encode taskId, contextId, toolName, reason as base64 JSON
  * to pass context through Slack's action flow.
  */
+/**
+ * One decision per call the clicked card names, each carrying its call id. The
+ * server answers only those calls, so a click on a card that was already answered
+ * in words, or replaced by a newer card, cannot answer anything else. Cards from
+ * before call ids were carried send the bare decision.
+ */
+export function forCalls<T extends { type: string }>(decision: T, callIds: unknown): Array<T & { id?: string }> {
+  const ids = Array.isArray(callIds) ? callIds.filter((id): id is string => typeof id === 'string' && id.length > 0) : [];
+  return ids.length > 0 ? ids.map((id) => ({ ...decision, id })) : [decision];
+}
+
 export function registerHitlActions(app: App, makeDeps: () => HandlerDependencies): void {
   const logger = Logger.getLogger('hitlButton');
 
@@ -51,7 +62,7 @@ export function registerHitlActions(app: App, makeDeps: () => HandlerDependencie
 
       // Send reject decision to orchestrator via handleIncomingMessage.
       // No message → the server supplies the default rejection text.
-      const decisions = { decisions: [{ type: 'reject' }] };
+      const decisions = { decisions: forCalls({ type: 'reject' }, decodedValue.callIds) };
       const syntheticMessage: NormalizedMessage = {
         userId,
         teamId: (body as any).team?.id || '',
@@ -104,7 +115,7 @@ export function registerHitlActions(app: App, makeDeps: () => HandlerDependencie
       await recordDecision(client, channelId, messageTs, decodedValue.streamMessageTs, 'Approved', decodedValue.summary || decodedValue.toolName, true);
 
       // Send approve decision to orchestrator
-      const decisions = { decisions: [{ type: 'approve' }] };
+      const decisions = { decisions: forCalls({ type: 'approve' }, decodedValue.callIds) };
       const syntheticMessage: NormalizedMessage = {
         userId,
         teamId: (body as any).team?.id || '',
@@ -155,7 +166,7 @@ export function registerHitlActions(app: App, makeDeps: () => HandlerDependencie
 
       await recordDecision(client, channelId, messageTs, decodedValue.streamMessageTs, 'Approved', `${decodedValue.summary || decodedValue.toolName} — always allow`, true);
 
-      const decisions = { decisions: [{ type: 'approve', bypass: true, bypass_all: true }] };
+      const decisions = { decisions: forCalls({ type: 'approve', bypass: true, bypass_all: true }, decodedValue.callIds) };
       const syntheticMessage: NormalizedMessage = {
         userId,
         teamId: (body as any).team?.id || '',
@@ -206,7 +217,7 @@ export function registerHitlActions(app: App, makeDeps: () => HandlerDependencie
 
       await recordDecision(client, channelId, messageTs, decodedValue.streamMessageTs, 'Approved', `${decodedValue.summary || decodedValue.toolName} — pattern allowed`, true);
 
-      const decisions = { decisions: [{ type: 'approve', bypass: true, bypass_pattern: decodedValue.matchedPattern }] };
+      const decisions = { decisions: forCalls({ type: 'approve', bypass: true, bypass_pattern: decodedValue.matchedPattern }, decodedValue.callIds) };
       const syntheticMessage: NormalizedMessage = {
         userId,
         teamId: (body as any).team?.id || '',
@@ -265,6 +276,7 @@ export function registerHitlActions(app: App, makeDeps: () => HandlerDependencie
         planMessageTs: decodedValue.planMessageTs,
         streamMessageTs: decodedValue.streamMessageTs,
         summary: decodedValue.summary,
+        callIds: decodedValue.callIds,
       });
 
       const toolLabel = (toolName || 'unknown').replace(/_/g, ' ');

@@ -16,6 +16,7 @@ import {
   AlertTriangle,
 } from 'lucide-react';
 import { toast } from 'sonner';
+import { useObjectStateAdapter, type ActionOutcome } from '@nannos/embed-sdk';
 
 import {
   getBedrockRegions,
@@ -66,6 +67,8 @@ import {
 } from '@/lib/catalogPricing';
 import { FailoverChains } from '@/components/admin/FailoverChains';
 import { WebSearchSettings } from '@/components/admin/WebSearchSettings';
+import { NannosForm } from '@/components/nannos/NannosForm';
+import { NannosActions } from '@/components/nannos/NannosActions';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Badge } from '@/components/ui/badge';
 import {
@@ -223,7 +226,7 @@ const visiblePricingUnits = (mode: string, prices: Record<string, string>, canSe
 const pricesFromPrefill = (pricing: CostPrefill['pricing']): Record<string, string> =>
   Object.fromEntries(Object.entries(pricing ?? {}).map(([unit, e]) => [unit, String(Number(e.price_per_million))]));
 
-interface FormState {
+type FormState = {
   model_name: string;
   litellm_model: string;
   // Provider ROUTE, never authored here and never sent: seeded from the picked catalog entry's
@@ -242,7 +245,7 @@ interface FormState {
   supports_reasoning: boolean;
   supports_web_search: boolean;
   prices: Record<string, string>; // unit -> price string
-}
+};
 
 const EMPTY_FORM: FormState = {
   model_name: '',
@@ -493,6 +496,33 @@ export function ModelGatewayPage() {
     setPrefillDiff({});
     setForm((f) => ({ ...f, base_model: entry.model_id, prices: pricesFromCatalogEntry(entry) }));
   };
+
+  // Assistant writes go through the same paths as typing. An alias it sets is pinned like a hand-edited
+  // one; within one apply pass `aliasEdited` hasn't re-rendered yet, so the ref re-asserts it over a
+  // catalog pick applied after it.
+  const agentAlias = useRef<string | null>(null);
+  const nannosForm = useObjectStateAdapter(form, (next) => {
+    const { model_name, litellm_model, ...rest } = next;
+    if (model_name !== undefined && !editingId) {
+      setAliasEdited(true);
+      agentAlias.current = model_name;
+      queueMicrotask(() => {
+        agentAlias.current = null;
+      });
+      setForm((f) => ({ ...f, model_name }));
+    }
+    if (litellm_model !== undefined) {
+      const entry = catalog.find((c) => c.model_id === litellm_model);
+      if (entry) {
+        applyCatalogEntry(entry);
+        const pinned = agentAlias.current;
+        if (pinned !== null) setForm((f) => ({ ...f, model_name: pinned }));
+      } else {
+        setForm((f) => ({ ...f, litellm_model, provider: deriveProvider(litellm_model) || f.provider }));
+      }
+    }
+    if (Object.keys(rest).length) setForm((f) => ({ ...f, ...rest }));
+  });
 
   // The provider route this deployment will be served and billed under. ONE value answers all of it,
   // and the form never authors it — it mirrors the server's resolution so what you see is what will
@@ -889,22 +919,23 @@ export function ModelGatewayPage() {
       );
   };
 
-  const submit = () => {
+  // The run window reports the outcome to the user; the resolved value reports it to the assistant.
+  const submit = async (): Promise<ActionOutcome> => {
     setRegionError(null); // a retry re-answers the question; don't leave the last verdict up
     if (!form.model_name || !form.litellm_model) {
       toast.error('Alias and gateway model id are required');
-      return;
+      return { ok: false, detail: 'Alias and gateway model id are required' };
     }
     // The server refuses an id it can't resolve a route for (it would have to guess what bills);
     // mirror that here so the failure is visible before saving, not as a 422. Gated on the ROUTABLE
     // provider: a cost-map tag inherited from the gateway is not a route the server would accept.
     if (!routableProvider) {
       toast.error('Prefix the gateway model id with its provider route (e.g. bedrock/…)');
-      return;
+      return { ok: false, detail: 'Prefix the gateway model id with its provider route (e.g. bedrock/…)' };
     }
     if (aliasTaken) {
       toast.error(`'${form.model_name}' is already registered — pick a different alias`);
-      return;
+      return { ok: false, detail: `'${form.model_name}' is already registered — pick a different alias` };
     }
     // Local use only — which credential params this route takes. The request carries no provider:
     // the server resolves the route itself (id prefix, else its catalog entry) and keys billing on it.
@@ -918,7 +949,7 @@ export function ModelGatewayPage() {
     }
     if (Object.keys(pricing).length === 0) {
       toast.error('Set at least one price — a model must be billable before it can be used');
-      return;
+      return { ok: false, detail: 'Set at least one price — a model must be billable before it can be used' };
     }
     const litellm_params: Record<string, unknown> = { model: form.litellm_model, max_retries: 0 };
     if (isVertexProvider(provider)) {
@@ -950,7 +981,18 @@ export function ModelGatewayPage() {
       input_modes: form.input_modes,
       pricing,
     };
-    saveMutation.mutate(body);
+    const wasEditing = Boolean(editingId);
+    try {
+      await saveMutation.mutateAsync(body);
+      return true;
+    } catch (e) {
+      return {
+        ok: false,
+        detail: wasEditing
+          ? `The update or its test failed (the update may already be applied, verify it): ${errMsg(e)}`
+          : `Test failed, the registration was rolled back: ${errMsg(e)}`,
+      };
+    }
   };
 
   const saving = saveMutation.isPending;
@@ -965,6 +1007,55 @@ export function ModelGatewayPage() {
 
   return (
     <div className="container mx-auto p-6 space-y-6">
+      {/* The create button, for the assistant: without it the agent could only ask the user to
+          click it. It opens the GatewayModel form, which takes this type:id while the dialog is open. */}
+      {!dialogOpen && (
+        <NannosActions
+          type="GatewayModel"
+          id={undefined}
+          actions={{
+            create: {
+              label: 'Register model',
+              description: 'Open the Register model dialog with an empty, unsaved form; then fill it and submit.',
+              run: openCreate,
+            },
+            // The "Make default" / "Default low tier" buttons save at once: offered with
+            // requiresApproval, so the agent's call waits for the admin's click on a card.
+            // Embedding defaults are left out: switching one needs the re-index warning the
+            // admin confirms in its own dialog.
+            set_default: {
+              label: 'Set as default',
+              description:
+                "Make a listed chat model the default for a role, like its 'Make default' / 'Default low tier' / " +
+                "'Default premium tier' button. Saves immediately (the user approves).",
+              requiresApproval: true,
+              params: [
+                { name: 'model_name', type: 'string', description: 'The model alias as listed' },
+                {
+                  name: 'role',
+                  type: 'string',
+                  enum: ['chat', 'chat:low', 'chat:premium'],
+                  description: 'chat = the standard default; chat:low / chat:premium = the low / premium tier',
+                },
+              ],
+              run: async ({ model_name, role }) => {
+                const m = models.find((x) => x.model_name === model_name);
+                if (!m?.model_id) return { ok: false, detail: `No listed model is called ${String(model_name)}.` };
+                const wanted = role as DefaultRole;
+                if (isEmbeddingRole(wanted) || !defaultRolesFor(m).includes(wanted)) {
+                  return { ok: false, detail: `${m.model_name} cannot be the default for ${String(role)} here.` };
+                }
+                try {
+                  const result = await defaultMutation.mutateAsync({ modelId: m.model_id, role: wanted });
+                  return result?.warning ? { ok: true, detail: result.warning } : true;
+                } catch (e) {
+                  return { ok: false, detail: errMsg(e) };
+                }
+              },
+            },
+          }}
+        />
+      )}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold">Model Gateway</h1>
@@ -1123,6 +1214,7 @@ export function ModelGatewayPage() {
 
       <Dialog open={dialogOpen} onOpenChange={(o) => (o ? setDialogOpen(true) : closeDialog())}>
         <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
+          <NannosForm type="GatewayModel" id={editingId ?? undefined} form={nannosForm} save={submit} />
           <DialogHeader>
             <DialogTitle>{editingId ? 'Edit model' : 'Register model'}</DialogTitle>
             <DialogDescription>

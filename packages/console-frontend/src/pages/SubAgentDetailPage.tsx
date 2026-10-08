@@ -74,8 +74,12 @@ import { MCPToolToggleList } from '@/components/settings/MCPToolToggleList';
 import { PricingConfigurationSection } from '@/components/subagents/PricingConfigurationSection';
 import { ConfigSection } from '@/components/subagents/ConfigSection';
 import { EmbedBindingPanel } from '@/components/subagents/EmbedBindingPanel';
+import { NannosForm } from '@/components/nannos/NannosForm';
+import { NannosActions } from '@/components/nannos/NannosActions';
+import { AssistantChangesBar } from '@/components/nannos/AssistantChangesBar';
 import { toast } from 'sonner';
 import { useAuth } from '@/contexts/AuthContext';
+import { httpStatusOf } from '@/api/setupClient';
 import { getErrorMessage } from '@/lib/utils';
 import {
   useAvailableModels,
@@ -114,6 +118,7 @@ import type { SubAgentStatus } from '@/components/subagents/types';
 import { client } from '@/api/generated/client.gen';
 import { Markdown } from '@/components/ui/markdown';
 import { NannosChatScope } from '@nannos/embed-sdk/panel';
+import type { ObjectAction, ActionOutcome } from '@nannos/embed-sdk';
 import { PlaygroundChatPanel } from '@/components/subagents/PlaygroundChatPanel';
 import { SkillEditorModal } from '@/components/skills/SkillEditorModal';
 import { SkillRegistryBrowseDialog } from '@/components/skills/SkillRegistryBrowseDialog';
@@ -143,7 +148,15 @@ type SkillDiffInfo = {
     | { type: 'activation'; activationId: number };
 };
 
+// Keyed by the route id: moving from one sub-agent to another (back/forward, a link,
+// the assistant's navigate) must not carry the first agent's edit state into the second,
+// where Save would write it onto the wrong agent.
 export function SubAgentDetailPage() {
+  const { id } = useParams<{ id: string }>();
+  return <SubAgentDetail key={id} />;
+}
+
+function SubAgentDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -281,6 +294,9 @@ export function SubAgentDetailPage() {
       path: { sub_agent_id: parseInt(id || '0', 10) },
     }),
     enabled: !!id,
+    // A missing (or unreadable) agent will not appear on retry: show it at once, so the
+    // user — and the assistant reading the page — gets "not found" instead of a spinner.
+    retry: (failures, error) => ![403, 404].includes(httpStatusOf(error) ?? 0) && failures < 3,
   });
 
   // Determine if this is a local agent type
@@ -601,6 +617,18 @@ export function SubAgentDetailPage() {
   const canDelete = isOwner || canApprove;
   // Can submit if owner or has write access through groups, and current version is draft
   const canSubmitForApproval = (isOwner || hasGroupWriteAccess) && currentVersionStatus === 'draft';
+  // Offered on whichever registration is mounted (view-mode actions or the edit form).
+  const pageActions: Record<string, ObjectAction> = canSubmitForApproval
+    ? {
+        request_approval: {
+          label: 'Submit for Approval',
+          description:
+            'Open the dialog that submits the current draft version for approval; it asks for a change summary ' +
+            '(fill it, then submit the dialog).',
+          run: () => setShowSubmitDialog(true),
+        },
+      }
+    : {};
 
   // Left panel tab: owners/writers default to config, everyone else to personalize
   // GP agent (system_role='general-purpose') always shows personalize (no configurable settings)
@@ -685,7 +713,9 @@ export function SubAgentDetailPage() {
     : (subAgent?.config_version?.thinking_level ?? null);
 
   useEffect(() => {
-    if (subAgent) {
+    // Not while editing: a refetch would wipe unsaved edits, the assistant's included.
+    // Cancel re-seeds from the latest data, and a save's refetch lands after editing ends.
+    if (subAgent && !isEditing) {
       initEditState(subAgent);
     }
   }, [subAgent]);
@@ -860,8 +890,17 @@ export function SubAgentDetailPage() {
     setShowChangeSummaryDialog(true);
   };
 
-  const handleSaveWithSummary = async (summary: string) => {
-    if (!subAgent || !id) return;
+  // The assistant's "Save…": the same as the Save button, which only opens the summary dialog.
+  const openSaveDialog = (): ActionOutcome => {
+    setShowChangeSummaryDialog(true);
+    return {
+      ok: true,
+      detail: 'Opened the "Save Configuration Changes" dialog — fill its fields and submit it to finish saving.',
+    };
+  };
+
+  const handleSaveWithSummary = async (summary: string): Promise<ActionOutcome> => {
+    if (!subAgent || !id) return { ok: false, detail: 'Sub-agent not loaded' };
 
     let typeSpecificConfig: any = {};
     if (subAgent.type === 'remote') {
@@ -908,7 +947,7 @@ export function SubAgentDetailPage() {
       };
     }
 
-    updateMutation.mutate({
+    const saving = updateMutation.mutateAsync({
       path: { sub_agent_id: parseInt(id, 10) },
       body: {
         name: editName,
@@ -922,7 +961,24 @@ export function SubAgentDetailPage() {
     });
 
     setShowChangeSummaryDialog(false);
-    setChangeSummary('');
+    try {
+      const saved = await saving;
+      // Cleared only once saved: a retry through open_save_dialog keeps what was written.
+      setChangeSummary('');
+      // Why the version stayed a draft, measured by the backend — so the assistant
+      // repeats the real reason instead of guessing one.
+      const blockers = saved?.approval_blockers;
+      return blockers?.length
+        ? { ok: true, detail: `Saved as a draft that needs approval: ${blockers.join('; ')}.` }
+        : true;
+    } catch (err) {
+      // onError already toasted. The dialog is closed by now, and the form has no
+      // `save` of its own: say how to try again.
+      return {
+        ok: false,
+        detail: `${getErrorMessage(err)} The save dialog has closed; to try again, invoke \`open_save_dialog\`.`,
+      };
+    }
   };
 
   const handleCancelEdit = () => {
@@ -935,6 +991,76 @@ export function SubAgentDetailPage() {
 
   const handleFieldChange = () => {
     setHasUnsavedChanges(true);
+  };
+
+  const handleEditModelChange = (value: string) => {
+    setEditModel(value);
+    // Tier selections have no concrete alias to check capabilities against.
+    if (!value.startsWith('tier:') && !modelSupportsThinking(value, availableModels)) {
+      setEditEnableThinking(false);
+      setEditThinkingLevel(null);
+    }
+    handleFieldChange();
+  };
+
+  const handleEditEnableThinkingChange = (checked: boolean) => {
+    setEditEnableThinking(checked);
+    if (!checked) {
+      setEditThinkingLevel(null);
+    } else if (editThinkingLevel === null) {
+      setEditThinkingLevel('low');
+    }
+    handleFieldChange();
+  };
+
+  const handleEditSandboxChange = (checked: boolean) => {
+    setEditSandboxEnabled(checked);
+    if (!checked) setEditSandboxAutoEnabled(false);
+    handleFieldChange();
+  };
+
+  // What the assistant may set while editing (registered below under `isEditing && canEdit`).
+  // Fields the embedding host owns are left out, the same ones the inputs lock.
+  const edited =
+    <V,>(set: (value: V) => void) =>
+    (value: V) => {
+      set(value);
+      handleFieldChange();
+    };
+  const isLocalEdit = subAgent?.type !== 'remote' && subAgent?.type !== 'foundry';
+  const nannosEditFields = {
+    name: [editName, edited(setEditName)] as const,
+    is_public: [editIsPublic, edited(setEditIsPublic)] as const,
+    ...(!isEmbedBound && { description: [editDescription, edited(setEditDescription)] as const }),
+    ...(subAgent?.type === 'remote' && { agent_url: [editAgentUrl, edited(setEditAgentUrl)] as const }),
+    ...(subAgent?.type === 'foundry' && {
+      foundry_hostname: [editFoundryHostname, edited(setEditFoundryHostname)] as const,
+      foundry_client_id: [editFoundryClientId, edited(setEditFoundryClientId)] as const,
+      foundry_ontology_rid: [editFoundryOntologyRid, edited(setEditFoundryOntologyRid)] as const,
+      foundry_query_api_name: [editFoundryQueryApiName, edited(setEditFoundryQueryApiName)] as const,
+      foundry_scopes: [editFoundryScopes, edited(setEditFoundryScopes)] as const,
+      foundry_version: [editFoundryVersion, edited(setEditFoundryVersion)] as const,
+    }),
+    ...(isLocalEdit && {
+      ...(!isEmbedBound && { system_prompt: [editSystemPrompt, edited(setEditSystemPrompt)] as const }),
+      ...(!hostOwnsModel && { model: [editModel, handleEditModelChange] as const }),
+      ...(!hostOwnsTools && { mcp_tools: [editMcpTools, edited(setEditMcpTools)] as const }),
+      ...(!hostOwnsThinking && {
+        enable_thinking: [editEnableThinking, handleEditEnableThinkingChange] as const,
+        // The level picker only offers the model's levels; snap anything else to 'low' like the create form.
+        thinking_level: [
+          editThinkingLevel,
+          edited((level: OrchestratorThinkingLevel | null) =>
+            setEditThinkingLevel(
+              level === null || getAvailableThinkingLevels(editModelAlias, availableModels).some((o) => o.value === level)
+                ? level
+                : 'low'
+            )
+          ),
+        ] as const,
+      }),
+      sandbox_enabled: [editSandboxEnabled, handleEditSandboxChange] as const,
+    }),
   };
 
   const handleImportSkillFromRegistry = async (skill: SkillSearchResult) => {
@@ -1130,14 +1256,22 @@ export function SubAgentDetailPage() {
     });
   };
 
-  const handleSubmitForApproval = async () => {
-    if (!id || !submitChangeSummary.trim()) return;
-    submitMutation.mutate({
+  const handleSubmitForApproval = async (): Promise<ActionOutcome> => {
+    if (!id) return { ok: false, detail: 'Sub-agent not loaded' };
+    if (!submitChangeSummary.trim()) return { ok: false, detail: 'A change summary is required' };
+    const submitting = submitMutation.mutateAsync({
       path: { sub_agent_id: parseInt(id, 10) },
       body: { change_summary: submitChangeSummary.trim() },
     });
     setShowSubmitDialog(false);
     setSubmitChangeSummary('');
+    try {
+      await submitting;
+      return true;
+    } catch (err) {
+      // onError already toasted.
+      return { ok: false, detail: getErrorMessage(err) };
+    }
   };
 
   const handleApprovalAction = async (action: 'approve' | 'reject', rejectionReason?: string) => {
@@ -1174,8 +1308,12 @@ export function SubAgentDetailPage() {
       <div className="flex flex-col items-center justify-center h-64 gap-4 p-4">
         <AlertCircle className="h-12 w-12 text-destructive" />
         <div className="text-center space-y-1">
-          <p className="font-medium">Could not load this sub-agent</p>
-          <p className="text-sm text-muted-foreground max-w-md break-words">{getErrorMessage(subAgentError)}</p>
+          <p className="font-medium">
+            {httpStatusOf(subAgentError) === 404 ? 'Sub-agent not found' : 'Could not load this sub-agent'}
+          </p>
+          {httpStatusOf(subAgentError) !== 404 && (
+            <p className="text-sm text-muted-foreground max-w-md break-words">{getErrorMessage(subAgentError)}</p>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <Button variant="outline" onClick={() => navigate('/app/subagents')}>
@@ -1560,7 +1698,54 @@ export function SubAgentDetailPage() {
                 )}
               </div>
 
+              {/* Someone else's agent, a system agent, admin mode off: still on screen, so the
+                  assistant sees it — with nothing to fill and nothing to click, which the manifest
+                  spells out as read-only. Left unregistered, the assistant reads the gap as "no form
+                  here" and reaches for a server write. Outside the tab content: the default tab for
+                  a read-only agent is My Skills, and an inactive TabsContent is unmounted. */}
+              {!canEdit && <NannosActions type="SubAgent" id={subAgent.id} actions={{}} />}
               <TabsContent value="config" className="flex-1 min-h-0 flex flex-col mt-0 data-[state=inactive]:hidden">
+                {isEditing && canEdit ? (
+                  <NannosForm
+                    type="SubAgent"
+                    id={subAgent.id}
+                    fields={nannosEditFields}
+                    dirty={hasUnsavedChanges}
+                    // No `save` here: this one only opens the change-summary dialog, so
+                    // as an approval-gated save it reported "saved" (and cleared the
+                    // marks) for nothing persisted. The dialog's own `save` saves.
+                    actions={{
+                      ...pageActions,
+                      open_save_dialog: {
+                        label: 'Save…',
+                        description:
+                          'Open the "Save Configuration Changes" dialog, as the Save button does. Nothing is ' +
+                          'saved until that dialog is filled and its own save is invoked.',
+                        run: openSaveDialog,
+                      },
+                    }}
+                  />
+                ) : (
+                  canEdit && (
+                    <NannosActions
+                      type="SubAgent"
+                      id={subAgent.id}
+                      actions={{
+                        edit: {
+                          label: 'Edit configuration',
+                          description: 'Switch the configuration panel to edit mode, so its fields can be filled.',
+                          run: () => {
+                            setIsEditing(true);
+                            setActiveFocusArea('config');
+                            setShowConversationList(false);
+                          },
+                        },
+                        ...pageActions,
+                      }}
+                    />
+                  )
+                )}
+                {isEditing && canEdit && <AssistantChangesBar type="SubAgent" id={subAgent.id} variant="strip" />}
                 {/* Read-only mode indicator */}
                 {isViewingHistoricalVersion && (
                   <div className="px-3 py-2 bg-amber-500/10 border-b border-amber-500/20 flex items-center justify-between shrink-0">
@@ -1960,20 +2145,12 @@ export function SubAgentDetailPage() {
                       <>
                         {/* Section: Model & Intelligence (local agents) */}
                         <ConfigSection title="Model" icon={Cpu}>
-                          <div className="space-y-1.5">
+                          <div className="space-y-1.5" data-nannos-field="model">
                             {isEditing ? (
                               <Select
                                 value={editModel}
                                 disabled={hostOwnsModel}
-                                onValueChange={(value) => {
-                                  setEditModel(value);
-                                  // Tier selections have no concrete alias to check capabilities against.
-                                  if (!value.startsWith('tier:') && !modelSupportsThinking(value, availableModels)) {
-                                    setEditEnableThinking(false);
-                                    setEditThinkingLevel(null);
-                                  }
-                                  handleFieldChange();
-                                }}
+                                onValueChange={handleEditModelChange}
                               >
                                 <SelectTrigger id="model" className="h-8 text-sm">
                                   <SelectValue placeholder="Select a model or tier" />
@@ -2036,7 +2213,7 @@ export function SubAgentDetailPage() {
                           backend would silently drop on save. */}
                           {isEditing
                             ? modelSupportsThinking(editModelAlias, availableModels) && (
-                                <div className="flex items-center justify-between">
+                                <div className="flex items-center justify-between" data-nannos-field="enable_thinking">
                                   <div className="space-y-0.5">
                                     <span className="text-xs font-medium text-foreground">Extended Thinking</span>
                                     <p className="text-[11px] text-muted-foreground">
@@ -2046,15 +2223,7 @@ export function SubAgentDetailPage() {
                                   <Switch
                                     checked={editEnableThinking}
                                     disabled={hostOwnsThinking}
-                                    onCheckedChange={(checked) => {
-                                      setEditEnableThinking(checked);
-                                      if (!checked) {
-                                        setEditThinkingLevel(null);
-                                      } else if (editThinkingLevel === null) {
-                                        setEditThinkingLevel('low');
-                                      }
-                                      handleFieldChange();
-                                    }}
+                                    onCheckedChange={handleEditEnableThinkingChange}
                                   />
                                 </div>
                               )
@@ -2072,7 +2241,7 @@ export function SubAgentDetailPage() {
                           {isEditing &&
                             editEnableThinking &&
                             modelSupportsThinking(editModelAlias, availableModels) && (
-                              <div className="space-y-1.5 pl-1">
+                              <div className="space-y-1.5 pl-1" data-nannos-field="thinking_level">
                                 <span className="text-[11px] text-muted-foreground">Thinking Level</span>
                                 <Select
                                   value={editThinkingLevel || undefined}
@@ -2100,7 +2269,7 @@ export function SubAgentDetailPage() {
                         {/* Section: Tools & Skills */}
                         <ConfigSection title="Tools & Skills" icon={Wrench}>
                           {/* MCP Tools */}
-                          <div className="space-y-2">
+                          <div className="space-y-2" data-nannos-field="mcp_tools">
                             <div className="flex items-center justify-between">
                               <span className="text-xs font-medium text-foreground">MCP Tools</span>
                               {isEditing && (
@@ -2542,7 +2711,7 @@ export function SubAgentDetailPage() {
                           <hr className="border-border/40" />
 
                           {/* Sandbox Toggle */}
-                          <div className="flex items-center justify-between">
+                          <div className="flex items-center justify-between" data-nannos-field="sandbox_enabled">
                             <div className="space-y-0.5">
                               <span className="text-xs font-medium text-foreground">Sandbox Execution</span>
                               <p className="text-[11px] text-muted-foreground">Run skill scripts in isolation</p>
@@ -2550,11 +2719,7 @@ export function SubAgentDetailPage() {
                             {isEditing ? (
                               <Switch
                                 checked={editSandboxEnabled}
-                                onCheckedChange={(checked) => {
-                                  setEditSandboxEnabled(checked);
-                                  if (!checked) setEditSandboxAutoEnabled(false);
-                                  handleFieldChange();
-                                }}
+                                onCheckedChange={handleEditSandboxChange}
                               />
                             ) : (
                               <Badge
@@ -2576,7 +2741,7 @@ export function SubAgentDetailPage() {
                         <ConfigSection title="System Prompt" icon={Code} defaultOpen={true}>
                           <div className="flex flex-col gap-2 min-h-0">
                             {isEditing && !isEmbedBound ? (
-                              <div className="flex flex-col gap-2 min-h-0">
+                              <div className="flex flex-col gap-2 min-h-0" data-nannos-field="system_prompt">
                                 {/* Edit/Preview Tabs */}
                                 <div className="flex gap-1 p-0.5 bg-muted rounded-md">
                                   <button
@@ -2911,6 +3076,12 @@ export function SubAgentDetailPage() {
       {/* Submit for Approval Dialog */}
       <Dialog open={showSubmitDialog} onOpenChange={setShowSubmitDialog}>
         <DialogContent>
+          <NannosForm
+            type="SubAgentApprovalRequest"
+            id={subAgent.id}
+            fields={{ change_summary: [submitChangeSummary, setSubmitChangeSummary] }}
+            save={handleSubmitForApproval}
+          />
           <DialogHeader>
             <DialogTitle>Submit for Approval</DialogTitle>
             <DialogDescription>
@@ -2956,6 +3127,12 @@ export function SubAgentDetailPage() {
       {/* Change Summary Dialog (for Save action) */}
       <Dialog open={showChangeSummaryDialog} onOpenChange={setShowChangeSummaryDialog}>
         <DialogContent>
+          <NannosForm
+            type="SubAgentSaveSummary"
+            id={subAgent.id}
+            fields={{ change_summary: [changeSummary, setChangeSummary] }}
+            save={() => handleSaveWithSummary(changeSummary)}
+          />
           <DialogHeader>
             <DialogTitle>Save Configuration Changes</DialogTitle>
             <DialogDescription>Describe what you changed (optional but recommended for tracking).</DialogDescription>

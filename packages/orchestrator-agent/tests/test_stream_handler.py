@@ -112,6 +112,26 @@ class TestParseAgentResponse:
         assert response.state == TaskState.TASK_STATE_COMPLETED
         assert response.content == "Hi! How can I help?"
 
+    def test_a_force_stopped_turn_never_replays_the_previous_answer(self):
+        """``structured_response`` is persisted: after a loop force-stop it still holds the
+        previous turn's answer, which must not be reported as this turn's."""
+        call = {"name": "console_create_bug_report", "args": {}, "id": "c1", "type": "tool_call"}
+        final_state = {
+            "messages": [
+                HumanMessage(content="first"),
+                AIMessage(content="", tool_calls=[{"name": "FinalResponseSchema", "args": {}, "id": "f", "type": "tool_call"}]),
+                HumanMessage(content="second"),
+                AIMessage(content="", tool_calls=[call]),
+                ToolMessage(content="BLOCKED: 'console_create_bug_report' — looped", tool_call_id="c1"),
+            ],
+            "structured_response": {"task_state": "completed", "message": "The PREVIOUS turn's answer"},
+        }
+
+        response = StreamHandler.parse_agent_response(final_state)
+
+        assert "PREVIOUS" not in response.content
+        assert response.content.startswith("I stopped working on this")
+
     def test_parse_agent_response_with_empty_messages(self):
         """Test parsing with no messages."""
         final_state = {"messages": []}
@@ -1128,3 +1148,102 @@ class TestIncludeSubagentOutput:
 
         assert response.state == TaskState.TASK_STATE_COMPLETED
         assert response.content == ""
+
+
+class TestNoInternalTextReachesTheUser:
+    """Labels and reprs meant for the model must not be shown to the user."""
+
+    @staticmethod
+    def _relay_turn(subagent_text: str) -> dict:
+        return {
+            "messages": [
+                HumanMessage(content="create the draft"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"name": "task", "args": {"subagent_type": "general-purpose"}, "id": "t1", "type": "tool_call"}
+                    ],
+                ),
+                ToolMessage(content=subagent_text, tool_call_id="t1"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "FinalResponseSchema",
+                            "args": {"task_state": "failed", "message": "", "include_subagent_output": True},
+                            "id": "f1",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+            ]
+        }
+
+    def test_relayed_sub_agent_output_loses_its_state_label(self):
+        """Gemini relays the sub-agent's result as-is; it began "ERROR: Task failed - "."""
+        for labelled in (
+            "ERROR: Task failed - I could not create the draft: the approval was rejected.",
+            "Agent status: TASK_STATE_INPUT_REQUIRED - I could not create the draft: the approval was rejected.",
+        ):
+            response = StreamHandler.parse_agent_response(self._relay_turn(labelled))
+            assert response.content == "I could not create the draft: the approval was rejected.", labelled
+
+    def test_strip_state_label_leaves_plain_text_alone(self):
+        from agent_common.a2a.event_translation import strip_state_label
+
+        assert strip_state_label("ERROR: the API said no") == "ERROR: the API said no"
+        assert strip_state_label("Task execution failed: timeout") == "timeout"
+        assert strip_state_label("INCOMPLETE: Agent is still working - halfway") == "halfway"
+
+    def test_the_blocked_override_shows_the_models_answer_not_the_schema_repr(self):
+        """messages[-1] is LangChain's structured-response tool message: the schema's repr.
+
+        Users read "task_state='completed' message=… include_subagent_output=False".
+        """
+        from app.models.schemas import FinalResponseSchema
+
+        answer = "Drafts 1 and 3 were created; draft 2 was rejected. Want me to retry it?"
+        final_state = {
+            "messages": [
+                HumanMessage(content="three drafts"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"name": "task", "args": {"subagent_type": "general-purpose"}, "id": "t1", "type": "tool_call"}
+                    ],
+                ),
+                ToolMessage(content="2 of 3 created", tool_call_id="t1"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "FinalResponseSchema",
+                            "args": {"task_state": "completed", "message": answer, "include_subagent_output": False},
+                            "id": "f1",
+                            "type": "tool_call",
+                        }
+                    ],
+                ),
+                ToolMessage(
+                    content=f"task_state='completed' message={answer!r} include_subagent_output=False",
+                    tool_call_id="f1",
+                ),
+            ],
+            "structured_response": FinalResponseSchema(task_state=TaskState.TASK_STATE_COMPLETED, message=answer),
+            "a2a_tracking": {"general-purpose": {"requires_input": True, "is_complete": False}},
+        }
+
+        response = StreamHandler.parse_agent_response(final_state)
+
+        assert response.state == TaskState.TASK_STATE_INPUT_REQUIRED
+        assert response.content == answer
+
+    def test_a_failed_override_still_says_it_failed(self):
+        """Every agent failed but the model claims success: the reply must not read as one."""
+        from app.handlers.stream_handler import StreamHandler as SH
+
+        response = SH._build_blocked_agent_response(
+            "JiraAgent", {"state": "TaskState.TASK_STATE_FAILED"}, [], answer="Done, I created the ticket."
+        )
+        assert response.state == TaskState.TASK_STATE_FAILED
+        assert response.content == "JiraAgent failed: Done, I created the ticket."

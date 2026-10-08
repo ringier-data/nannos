@@ -20,8 +20,9 @@ import {
   removeEmbedBindingApiV1SubAgentsSubAgentIdEmbedBindingDeleteMutation,
   setEmbedBindingApiV1SubAgentsSubAgentIdEmbedBindingPutMutation,
 } from '@/api/generated/@tanstack/react-query.gen';
-import type { EmbedBinding } from '@/api/generated/types.gen';
+import type { EmbedBinding, EmbedBindingUpsert } from '@/api/generated/types.gen';
 import { getErrorMessage } from '@/lib/utils';
+import type { ActionOutcome } from '@nannos/embed-sdk';
 
 interface EmbedBindingPanelProps {
   subAgentId: number;
@@ -91,6 +92,16 @@ export function EmbedBindingPanel({ subAgentId, binding, canManage, onChanged }:
       toast.error('Failed to stop embedding', { description: getErrorMessage(err) });
     },
   });
+
+  const saveBinding = async (body: EmbedBindingUpsert): Promise<ActionOutcome> => {
+    try {
+      const result = await setMutation.mutateAsync({ path: { sub_agent_id: subAgentId }, body });
+      return result.last_error ? { ok: true, detail: `Saved, but the first fetch failed: ${result.last_error}` } : true;
+    } catch (err) {
+      // onError already toasted.
+      return { ok: false, detail: getErrorMessage(err) };
+    }
+  };
 
   if (!binding && !canManage) return null;
 
@@ -225,6 +236,7 @@ export function EmbedBindingPanel({ subAgentId, binding, canManage, onChanged }:
       </div>
 
       <EmbedBindingDialog
+        subAgentId={subAgentId}
         open={dialogOpen}
         onOpenChange={setDialogOpen}
         title={binding ? 'Edit application' : 'Embed in an application'}
@@ -232,7 +244,7 @@ export function EmbedBindingPanel({ subAgentId, binding, canManage, onChanged }:
         submitLabel={binding ? 'Save and sync' : 'Embed and sync'}
         initial={binding ? { baseUrl: binding.base_url, azps: binding.azps } : undefined}
         pending={setMutation.isPending}
-        onSubmit={(body) => setMutation.mutate({ path: { sub_agent_id: subAgentId }, body })}
+        onSubmit={saveBinding}
       />
 
       <Dialog open={confirmRemove} onOpenChange={setConfirmRemove}>

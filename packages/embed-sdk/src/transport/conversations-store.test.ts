@@ -174,6 +174,28 @@ describe('ConversationsStore', () => {
     expect(store.contextKeyOf('c2')).toBe('campaign:7');
   });
 
+  it('a cookie embed scope filters the list by the agent its handshake bound', async () => {
+    const { fetch, calls } = fetchReturning([serverConv('c1')]);
+    const store = new ConversationsStore({ fetch, embedded: true, getEmbeddedSubAgentId: () => 42 });
+    await store.loadList();
+    expect(calls[0]).toContain('embedded_sub_agent_id=42');
+  });
+
+  it('a cookie embed scope never fetches before its handshake names the agent', async () => {
+    const { fetch, calls } = fetchReturning([serverConv('c1')]);
+    let bound: number | undefined;
+    let scoped!: () => void;
+    const whenScoped = () => new Promise<void>((resolve) => (scoped = resolve));
+    const store = new ConversationsStore({ fetch, embedded: true, getEmbeddedSubAgentId: () => bound, whenScoped });
+    const loading = store.loadList();
+    await Promise.resolve();
+    expect(calls).toHaveLength(0);
+    bound = 7;
+    scoped();
+    await loading;
+    expect(calls[0]).toContain('embedded_sub_agent_id=7');
+  });
+
   it('a reload lands back on the conversation the tab was on, not the most recent', async () => {
     sessionStorage.setItem('nannos-active-conversation:default', JSON.stringify({ id: 'c2' }));
     const { fetch } = fetchReturning([serverConv('c1'), serverConv('c2')]);

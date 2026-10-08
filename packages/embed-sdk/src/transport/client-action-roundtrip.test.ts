@@ -10,7 +10,7 @@ import { decodeApproval, encodeApproval } from './approval-codec';
 import { createDemuxState, demux } from './demux';
 import { directiveFromToolArgs } from '../core/client-action';
 import { clientActionDirective } from '../core/schemas';
-import { findPendingInterrupt, type RestMessageRow } from './index';
+import { rowsToUIMessages, type RestMessageRow } from './index';
 
 const RESULT = { ok: true, applied: ['budget'], rejected: [{ field: 'type', reason: 'bad enum' }] };
 
@@ -158,16 +158,15 @@ describe('history restore: a parked request self-heals on reload', () => {
   });
 
   it('restores the pending request as a marked, machine-answerable action', () => {
-    const restored = findPendingInterrupt([requestRow('2026-08-26T10:00:00Z')]);
-    expect(restored).not.toBeNull();
-    expect(restored!.actionRequests).toEqual([
+    const [restored] = rowsToUIMessages([requestRow('2026-08-26T10:00:00Z')]);
+    expect(restored.parts).toEqual([
       {
-        name: 'client_action',
-        args: {
-          directive: { kind: 'apply' },
-          _clientActionRequest: true,
-          _call_id: 'call-9#client-action',
-        },
+        type: 'dynamic-tool',
+        toolName: 'client_action',
+        toolCallId: 'call-9#client-action',
+        state: 'approval-requested',
+        input: { directive: { kind: 'apply' }, _clientActionRequest: true },
+        approval: { id: 'call-9#client-action' },
       },
     ]);
   });
@@ -179,7 +178,10 @@ describe('history restore: a parked request self-heals on reload', () => {
       created_at: '2026-08-26T10:01:00Z',
       raw_payload: JSON.stringify({ status: { state: 'completed' } }),
     };
-    expect(findPendingInterrupt([requestRow('2026-08-26T10:00:00Z'), resolvedRow])).toBeNull();
+    const [restored] = rowsToUIMessages([requestRow('2026-08-26T10:00:00Z'), resolvedRow]);
+    expect(restored.parts.some((p) => p.type === 'dynamic-tool' && p.state === 'approval-requested')).toBe(
+      false,
+    );
   });
 });
 

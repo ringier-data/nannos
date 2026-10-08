@@ -45,6 +45,10 @@ class InMemoryConversationService:
         user_id: str,
         limit: int = 20,
         search: str | None = None,
+        *,
+        sub_agent_config_hash: str | None = None,
+        exclude_playground: bool = False,
+        embedded_sub_agent_id: str | None = None,
     ) -> list[Conversation]:
         needle = search.strip().lower() if search and search.strip() else None
         conv_ids = self._user_index.get(user_id, [])
@@ -53,6 +57,15 @@ class InMemoryConversationService:
             conv = self._conversations.get(cid)
             if conv and conv.status == "active":
                 if needle and needle not in conv.title.lower():
+                    continue
+                if sub_agent_config_hash is not None and conv.sub_agent_config_hash != sub_agent_config_hash:
+                    continue
+                if sub_agent_config_hash is None and exclude_playground and conv.sub_agent_config_hash is not None:
+                    continue
+                if (
+                    embedded_sub_agent_id is not None
+                    and (conv.metadata or {}).get("embedded_sub_agent_id") != embedded_sub_agent_id
+                ):
                     continue
                 conversations.append(conv)
                 if len(conversations) >= limit:

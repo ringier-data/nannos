@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import { Pagination } from '@/components/admin/Pagination';
@@ -84,11 +84,14 @@ import { AgentActionFields } from '@/components/AgentActionFields';
 import { agentActionError, automatedSubAgentParameters } from '@/lib/agentAction';
 import { argsView, missingRequiredArgs, resolveArgs } from '@/lib/watchArgs';
 import { type ConditionMode, type MessageMode, conditionModeOf, resolveWatchChoices } from '@/lib/watchChoices';
-import { WatchFields } from '@/components/WatchFields';
+import { WatchFields, type CheckOutcome } from '@/components/WatchFields';
 import { describeCron } from '@/lib/cron';
 import { AiBadge, FieldError, SectionHeader } from '@/components/formChrome';
 import { toast } from 'sonner';
 import { DeliveryChannelOptions, DeliveryReachabilityNote } from '@/components/scheduler/DeliveryChannelOptions';
+import { NannosForm } from '@/components/nannos/NannosForm';
+import { AssistantChangesBar } from '@/components/nannos/AssistantChangesBar';
+import { useObjectStateAdapter, type ObjectAction, type ActionOutcome } from '@nannos/embed-sdk';
 
 /** The fields the create form shows a server-side refusal under. */
 const FORM_ERROR_FIELDS = new Set([
@@ -206,7 +209,8 @@ function nowDatetimeLocal(timeZone?: string | null): string {
 
 type SubAgentMode = 'existing' | 'automated';
 
-interface CreateJobForm {
+// A type alias, not an interface: useObjectStateAdapter needs it to be a Record.
+type CreateJobForm = {
   name: string;
   job_type: JobType;
   schedule_kind: ScheduleKind;
@@ -253,7 +257,7 @@ interface CreateJobForm {
   notification_brief: string;
   destroy_after_trigger: boolean;
   delivery_channel: string;
-}
+};
 
 const defaultForm: CreateJobForm = {
   name: '',
@@ -302,6 +306,10 @@ function CreateJobDialog({
 }) {
   const [form, setForm] = useState<CreateJobForm>({ ...defaultForm });
   const [error, setError] = useState<string | null>(null);
+  const nannosForm = useObjectStateAdapter(form, (next) => {
+    setForm((f) => ({ ...f, ...next }));
+    setError(null);
+  });
 
   const [aiQuery, setAiQuery] = useState('');
   const [aiLoading, setAiLoading] = useState(false);
@@ -522,7 +530,18 @@ function CreateJobDialog({
   // ── Submission ────────────────────────────────────────────────────────────
   const [submitting, setSubmitting] = useState(false);
 
-  async function handleSubmit() {
+  // Also the assistant's `save`: it reports what the form shows when nothing was created.
+  // "Run check" for the assistant: the watch section's own call (see WatchFields).
+  const runCheckRef = useRef<(() => Promise<CheckOutcome>) | undefined>(undefined);
+  const runCheckAction: ObjectAction = {
+    label: 'Run check',
+    description:
+      "Call the check tool once with the form's arguments and show its response, so the condition is " +
+      'tested against a real payload. Read-only tools only; for others the user must confirm.',
+    run: () => runCheckRef.current?.() ?? { ok: false, detail: 'The check section is not on screen.' },
+  };
+
+  async function handleSubmit(): Promise<ActionOutcome> {
     // Schedule and name errors are per-field too, so nothing about what to fix is
     // left to a single sentence above the footer.
     const scheduleErrors: Record<string, string> = {};
@@ -538,13 +557,17 @@ function CreateJobDialog({
       scheduleErrors.run_at = 'A date and time is required.';
     if (Object.keys(scheduleErrors).length > 0) {
       setFieldErrors(scheduleErrors);
-      return setError(null);
+      setError(null);
+      return { ok: false, detail: Object.values(scheduleErrors).join(' ') };
     }
     
     // Task job validations
     if (form.job_type === 'task') {
       const agentError = agentActionError(form);
-      if (agentError) return setError(agentError);
+      if (agentError) {
+        setError(agentError);
+        return { ok: false, detail: agentError };
+      }
       // Message is optional for all task jobs
     }
     
@@ -579,14 +602,18 @@ function CreateJobDialog({
 
       if (Object.keys(errors).length > 0) {
         setFieldErrors(errors);
-        return setError(null);
+        setError(null);
+        return { ok: false, detail: Object.values(errors).join(' ') };
       }
       setFieldErrors({});
 
       // Held to the same standard as a task's, now that a watch can carry one.
       if (form.outcome === 'agent') {
         const agentError = agentActionError(form);
-        if (agentError) return setError(agentError);
+        if (agentError) {
+          setError(agentError);
+          return { ok: false, detail: agentError };
+        }
       }
     }
 
@@ -651,6 +678,7 @@ function CreateJobDialog({
       const created = await createScheduledJob(body);
       qc.invalidateQueries({ queryKey: ['scheduler-jobs'] });
       onCreated(created.id);
+      return true;
     } catch (e) {
       // A refusal the form has a control for is shown under that control; only the
       // rest goes to the banner, which would otherwise repeat it in the API's wording.
@@ -664,6 +692,7 @@ function CreateJobDialog({
       } else {
         setError(e instanceof Error ? e.message : String(e));
       }
+      return { ok: false, detail: e instanceof Error ? e.message : String(e) };
     } finally {
       setSubmitting(false);
     }
@@ -672,6 +701,13 @@ function CreateJobDialog({
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-h-[90vh] sm:max-w-3xl overflow-y-auto">
+        <NannosForm
+          type="ScheduledJob"
+          id={undefined}
+          form={nannosForm}
+          save={handleSubmit}
+          actions={form.job_type === 'watch' ? { run_check: runCheckAction } : undefined}
+        />
         <DialogHeader>
           <DialogTitle>Create Scheduled Job</DialogTitle>
           <DialogDescription>
@@ -752,7 +788,7 @@ function CreateJobDialog({
 
           {/* Job type / Schedule kind */}
           <div className="grid grid-cols-2 gap-4">
-            <div className="grid gap-1.5">
+            <div className="grid gap-1.5" data-nannos-field="job_type">
               <Label>
                 Job type
                 {aiFilled.has('job_type') && <AiBadge />}
@@ -780,7 +816,7 @@ function CreateJobDialog({
                 </SelectContent>
               </Select>
             </div>
-            <div className="grid gap-1.5">
+            <div className="grid gap-1.5" data-nannos-field="schedule_kind">
               <Label>
                 Schedule
                 {aiFilled.has('schedule') && <AiBadge />}
@@ -875,6 +911,7 @@ function CreateJobDialog({
           {form.job_type === 'watch' && (
             <WatchFields
               mode="edit"
+              runCheckRef={runCheckRef}
               value={form}
               onChange={(next) => {
                 setForm((f) => ({ ...f, ...next }));
@@ -915,7 +952,7 @@ function CreateJobDialog({
             />
           </div>
 
-          <div className="grid gap-1.5">
+          <div className="grid gap-1.5" data-nannos-field="delivery_channel">
             <Label>
               Delivery channel <span className="text-muted-foreground text-xs">(optional)</span>
               {aiFilled.has('delivery_channel') && <AiBadge />}
@@ -946,11 +983,13 @@ function CreateJobDialog({
 
         {error && <p className="text-sm text-destructive">{error}</p>}
 
+        <AssistantChangesBar type="ScheduledJob" id={undefined} />
+
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>
             Cancel
           </Button>
-          <Button onClick={handleSubmit} disabled={submitting}>
+          <Button onClick={() => void handleSubmit()} disabled={submitting}>
             {submitting ? 'Creating…' : 'Create job'}
           </Button>
         </DialogFooter>
@@ -1134,11 +1173,13 @@ function SharedWithYou({ onOpen }: { onOpen: (jobId: number) => void }) {
 const JOBS_PAGE_SIZE = 20;
 const SHARED_PAGE_SIZE = 20;
 
-export function SchedulerPage() {
+/** `create`: the New Job dialog is open — the page at /app/scheduler/new. */
+export function SchedulerPage({ create = false }: { create?: boolean }) {
   const navigate = useNavigate();
   const qc = useQueryClient();
 
-  const [showCreate, setShowCreate] = useState(false);
+  const showCreate = create;
+  const setShowCreate = (open: boolean) => navigate(open ? '/app/scheduler/new' : '/app/scheduler');
   const [deleteTarget, setDeleteTarget] = useState<ScheduledJob | null>(null);
 
   const [search, setSearch] = useState('');
@@ -1358,10 +1399,7 @@ export function SchedulerPage() {
       <CreateJobDialog
         open={showCreate}
         onClose={() => setShowCreate(false)}
-        onCreated={(jobId) => {
-          setShowCreate(false);
-          navigate(`/app/scheduler/${jobId}`);
-        }}
+        onCreated={(jobId) => navigate(`/app/scheduler/${jobId}`)}
       />
 
       {/* Delete confirmation */}

@@ -68,6 +68,7 @@ from agent_common.a2a.stream_events import (
     ActivityLogMeta,
     ArtifactUpdate,
     ClientActionMeta,
+    HitlDecisionMeta,
     ErrorEvent,
     IntermediateOutputMeta,
     StreamEvent,
@@ -93,6 +94,7 @@ from agent_common.core.graph_utils import (
 )
 from agent_common.core.model_factory import get_model_input_capabilities
 from agent_common.core.catalogue_ingest import fetch_catalogue
+from agent_common.core.hitl_resume import HITL_DECISION_EVENT
 from agent_common.core.notify_user_tool import NOTE_KIND, USER_NOTE_EVENT
 from agent_common.core.stream_watchdog import watch_stream_with_resume
 from agent_common.core.step_budget import (
@@ -2022,6 +2024,14 @@ class DynamicLocalAgentRunnable(StructuredResponseMixin, LocalA2ARunnable):
                             if event_type == "client_action" and payload.get("directive"):
                                 yield TaskUpdate(
                                     event_metadata=ClientActionMeta(client_action=payload["directive"]),
+                                )
+                                continue
+                            # How the user's TYPED answer to a pending approval was
+                            # read (hitl_resume): forwarded so the client can settle
+                            # the card to the real outcome instead of guessing.
+                            if event_type == HITL_DECISION_EVENT and payload.get("decisions"):
+                                yield TaskUpdate(
+                                    event_metadata=HitlDecisionMeta(hitl_decision=payload["decisions"]),
                                 )
                                 continue
                             # Mid-turn note from the notify_user tool: the agent's own

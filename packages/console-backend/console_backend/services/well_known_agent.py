@@ -336,6 +336,10 @@ class WellKnownAgentClient:
 
     `allow_private_destinations` lifts the public-address rule. Only local development
     sets it: there the authority is localhost or a docker network.
+
+    `aliases` maps a public base URL to the origin it is actually read from. Only the
+    console's own assistant uses it: its frontend container sits in the same pod as this
+    backend, so the definition is read from there instead of through the ingress.
     """
 
     def __init__(
@@ -343,9 +347,11 @@ class WellKnownAgentClient:
         client: httpx.AsyncClient | None = None,
         *,
         allow_private_destinations: bool = False,
+        aliases: dict[str, str] | None = None,
     ) -> None:
         self._client = client
         self._allow_private = allow_private_destinations
+        self._aliases = {k.rstrip("/"): v.rstrip("/") for k, v in (aliases or {}).items()}
         # base_url -> (monotonic expiry, definition)
         self._cache: dict[str, tuple[float, WellKnownDefinition]] = {}
 
@@ -370,11 +376,21 @@ class WellKnownAgentClient:
         if cached and not force and time.monotonic() < cached[0]:
             return cached[1]
 
-        origin = origin_of(base_url)
+        # An aliased authority is read from where the deployment says it is served (the
+        # console's own definition, from the frontend container next to this backend);
+        # everything recorded below still names the public base URL.
+        fetch_base = self._aliases.get(base_url, base_url)
+        origin = origin_of(fetch_base)
         # Every request below stays on this origin (index, files, redirects), so one
-        # destination check up front covers them all.
-        await self._refuse_private_destination(base_url, origin)
-        index_url = base_url.rstrip("/") + WELL_KNOWN_INDEX_PATH
+        # destination check up front covers them all. An alias is deployment config, not
+        # admin input, so the SSRF guard does not apply to it.
+        if fetch_base == base_url:
+            await self._refuse_private_destination(base_url, origin)
+        index_url = fetch_base.rstrip("/") + WELL_KNOWN_INDEX_PATH
+
+        def public(url: str) -> str:
+            return base_url.rstrip("/") + url[len(origin) :] if url.startswith(origin) else url
+
         raw_index, headers = await self._get(
             base_url, index_url, origin, MAX_INDEX_BYTES, "index"
         )
@@ -415,7 +431,7 @@ class WellKnownAgentClient:
                     body=body,
                     visibility=visibility,
                     inline=inline,
-                    url=skill_url,
+                    url=public(skill_url),
                     digest=entry["digest"],
                 )
             )
@@ -430,13 +446,13 @@ class WellKnownAgentClient:
             else None,
             model_tier=agent_meta.get("model_tier"),
             thinking_level=agent_meta.get("thinking_level"),
-            url=prompt_url,
+            url=public(prompt_url),
             digest=agent_meta["prompt"]["digest"],
         )
         ttl = parse_cache_ttl(headers.get("cache-control"))
         definition = WellKnownDefinition(
             base_url=base_url,
-            index_url=index_url,
+            index_url=public(index_url),
             agent=agent,
             skills=skills,
             revision=compute_revision(agent, skills),

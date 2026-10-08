@@ -19,6 +19,7 @@ import logging
 from typing import Any, Dict, List, Literal, Optional
 
 from langchain.agents.structured_output import ToolStrategy
+from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel, Field
 
@@ -71,6 +72,51 @@ You are a sub-agent communicating with an orchestrator. You must determine the a
 Do not leave the task state ambiguous.
 </response_protocol>
 """
+
+
+#: The reply when a run was force-stopped by loop detection: the model never answered, and
+#: the block text ("BLOCKED: 'client_action[apply]' — …") is an instruction to the model.
+STOPPED_REPLY = (
+    "I stopped working on this because I kept repeating the same step without getting anywhere, "
+    "so it was not finished. Tell me how you would like to continue."
+)
+
+#: The reply when a turn ends on a refused call the model never answered.
+REFUSED_REPLY = "Understood: that was not done. Tell me what you would like instead."
+
+
+def unanswered_turn_reply(turn_messages: list[Any], response_tool: str) -> str | None:
+    """The reply for a turn that ended on a tool result the model never reacted to, or None.
+
+    ``turn_messages`` are this turn's messages only. A turn that ends on a tool result
+    other than the response tool has no answer, and the previous turn's answer, still in
+    the persisted ``structured_response`` channel, must not be replayed as this one's:
+
+    - a loop force-stop reads as plain words, keeping which step repeated — a delegated
+      sub-agent's reply reaches the orchestrator, which needs that to try another way;
+    - a refused call reads as "that was not done" — its text is addressed to the model;
+    - anything else is reported as it is.
+    """
+    from agent_common.core.hitl_resume import REFUSAL_LEADS, SKIPPED_AUTH_LEAD
+    from agent_common.core.turn_stops import (
+        BLOCKED_LEAD,
+        DECLINED_AUTH_LEAD,
+        REFUSED_AGAIN_LEAD,
+        STOPPED_SIBLING_LEAD,
+    )
+
+    last = turn_messages[-1] if turn_messages else None
+    if not isinstance(last, ToolMessage) or last.name == response_tool:
+        return None
+    content = last.content if isinstance(last.content, str) else str(last.content)
+    if content.startswith(BLOCKED_LEAD):
+        step = content[len(BLOCKED_LEAD) :].split("'", 1)[0]
+        return f"{STOPPED_REPLY} (The step that kept repeating: {step}.)" if step else STOPPED_REPLY
+    if content.startswith(STOPPED_SIBLING_LEAD):
+        return STOPPED_REPLY
+    if content.startswith((*REFUSAL_LEADS, REFUSED_AGAIN_LEAD, SKIPPED_AUTH_LEAD, DECLINED_AUTH_LEAD)):
+        return REFUSED_REPLY
+    return content
 
 
 def select_response_format(
@@ -217,15 +263,29 @@ class StructuredResponseMixin:
         Returns:
             Dict with 'messages' and A2A metadata
         """
+        agent_name = getattr(self, "name", "unknown")
+        all_messages = result.get("messages", [])
+        # Only THIS turn's messages can answer this turn: everything up to the last human
+        # message was answered before. ``structured_response`` is a persisted state channel,
+        # so a turn that ends without an answer still finds the previous turn's response
+        # there — and a thread's earlier response tool calls are still in the history.
+        turn_start = max((i for i, m in enumerate(all_messages) if isinstance(m, HumanMessage)), default=-1) + 1
+        messages = all_messages[turn_start:]
+        # The run ended on a tool result the model never got to react to — a loop block,
+        # a force-stop. There is no answer for this turn: report why, never the previous
+        # turn's answer as if it were new.
+        stopped = unanswered_turn_reply(messages, SubAgentResponseSchema.__name__)
+        if stopped is not None:
+            logger.warning(f"Run of '{agent_name}' ended on an unanswered tool result; reporting it as the reply")
+            return self._build_success_response(stopped, context_id=context_id, task_id=task_id)  # type: ignore[attr-defined]
+
         # Check for structured_response (AutoStrategy for OpenAI)
         structured_response = result.get("structured_response")
         if structured_response and isinstance(structured_response, SubAgentResponseSchema):
             return self._build_response_from_schema(structured_response, context_id, task_id)
 
         # Check messages for tool call with SubAgentResponseSchema (Bedrock)
-        agent_name = getattr(self, "name", "unknown")
         logger.info(f"Translating agent result for '{agent_name}'")
-        messages = result.get("messages", [])
         for msg in reversed(messages):
             # Check if this is a tool message with SubAgentResponseSchema result
             if hasattr(msg, "name") and msg.name == "SubAgentResponseSchema":

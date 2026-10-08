@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router';
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import { ArrowLeft, Plus, X, Save, UserPlus, ExternalLink, Server, Trash2, Globe, Search } from 'lucide-react';
@@ -31,6 +31,7 @@ import {
   schedulerRemoveGroupDefaultJobMutation,
   consoleListMcpServersOptions,
 } from '@/api/generated/@tanstack/react-query.gen';
+import type { ActionOutcome } from '@nannos/embed-sdk';
 import type { RoleEnum, McpGatewayStatusResponse, McpGatewayServerPermissionsResponse } from '@/api/generated';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -52,6 +53,8 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Badge } from '@/components/ui/badge';
 import { Pagination } from '@/components/admin/Pagination';
+import { NannosForm } from '@/components/nannos/NannosForm';
+import { NannosActions } from '@/components/nannos/NannosActions';
 import { UserOnboardingBadge } from '@/components/admin/UserOnboardingBadge';
 import { OnboardingFilters } from '@/components/admin/OnboardingFilters';
 import {
@@ -64,7 +67,14 @@ import {
 const USER_PAGE_SIZE = 20;
 const ACCESSIBLE_PAGE_SIZE = 20;
 
+// Keyed by the route id, like the sub-agent page: moving from one group to another must
+// not carry the first group's edit state (or open dialogs) into the second.
 export function GroupDetailPage() {
+  const { id } = useParams<{ id: string }>();
+  return <GroupDetail key={id} />;
+}
+
+function GroupDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -436,6 +446,34 @@ export function GroupDetailPage() {
   const membersMeta = membersData?.meta ?? { page: 1, limit: 20, total: 0 };
   // Already filtered server-side to active non-members (see the query above).
   const availableUsers = usersData?.data ?? [];
+
+  // The assistant picks people by email (ids are opaque to it). Every user the dialog
+  // has listed is remembered, so a pick survives paging and a new search; an email the
+  // list never showed fails the save by name instead of vanishing.
+  const knownUsersRef = useRef(new Map<string, string>());
+  const unresolvedMembersRef = useRef<string[]>([]);
+  const [selectedEmailById, setSelectedEmailById] = useState<Record<string, string>>({});
+  useEffect(() => {
+    for (const user of availableUsers) if (user.email) knownUsersRef.current.set(user.email.toLowerCase(), user.id);
+  }, [availableUsers]);
+  const selectedMemberEmails = Object.entries(selectedEmailById)
+    .filter(([id]) => selectedUsersToAdd.has(id))
+    .map(([, email]) => email);
+  const setMemberEmails = (emails: string[]) => {
+    const ids = new Set<string>();
+    const byId: Record<string, string> = {};
+    const missing: string[] = [];
+    for (const email of emails ?? []) {
+      const id = knownUsersRef.current.get(String(email).trim().toLowerCase());
+      if (id) {
+        ids.add(id);
+        byId[id] = String(email).trim().toLowerCase();
+      } else missing.push(String(email));
+    }
+    unresolvedMembersRef.current = missing;
+    setSelectedEmailById((prev) => ({ ...prev, ...byId }));
+    setSelectedUsersToAdd(ids);
+  };
   const availableUsersMeta = usersData?.meta ?? { page: 1, limit: USER_PAGE_SIZE, total: 0 };
 
   // The members list total follows its search box, so the group's own count is
@@ -471,25 +509,59 @@ export function GroupDetailPage() {
     setIsEditing(true);
   };
 
+  // The mutations' onError toasts; these only report the outcome to the assistant.
+  const saveGroup = async (): Promise<ActionOutcome> => {
+    try {
+      await updateMutation.mutateAsync({
+        path: { group_id: groupId },
+        body: {
+          name: editName,
+          description: editDescription || null,
+        },
+      });
+      return true;
+    } catch (error) {
+      return { ok: false, detail: getErrorMessage(error) };
+    }
+  };
+
   const handleSave = () => {
-    updateMutation.mutate({
-      path: { group_id: groupId },
-      body: {
-        name: editName,
-        description: editDescription || null,
-      },
-    });
+    void saveGroup();
+  };
+
+  const addMembers = async (): Promise<ActionOutcome> => {
+    if (unresolvedMembersRef.current.length)
+      return {
+        ok: false,
+        detail: `Not in the dialog's user list: ${unresolvedMembersRef.current.join(', ')}. Search for them first.`,
+      };
+    if (selectedUsersToAdd.size === 0) return { ok: false, detail: 'No users selected to add' };
+    try {
+      await addMembersMutation.mutateAsync({
+        path: { group_id: groupId },
+        body: {
+          user_ids: Array.from(selectedUsersToAdd),
+          role: newMemberRole,
+        },
+      });
+      return true;
+    } catch (error) {
+      return { ok: false, detail: getErrorMessage(error) };
+    }
   };
 
   const handleAddMembers = () => {
-    if (selectedUsersToAdd.size === 0) return;
-    addMembersMutation.mutate({
-      path: { group_id: groupId },
-      body: {
-        user_ids: Array.from(selectedUsersToAdd),
-        role: newMemberRole,
-      },
-    });
+    void addMembers();
+  };
+
+  const grantServerAccess = async (): Promise<ActionOutcome> => {
+    if (!selectedServerSlug) return { ok: false, detail: 'No server selected' };
+    try {
+      await grantServerAccessMutation.mutateAsync({ serverSlug: selectedServerSlug, role: selectedServerRole });
+      return true;
+    } catch (error) {
+      return { ok: false, detail: getErrorMessage(error) };
+    }
   };
 
   const handleRemoveSelectedMembers = () => {
@@ -582,6 +654,37 @@ export function GroupDetailPage() {
 
   return (
     <div className="space-y-6 p-4">
+      {/* The page's buttons, for the assistant: told to add a member here, it found nothing to
+          click and claimed the admin lacked access. Each opens a form the agent can fill. */}
+      {!isEditing && !addMemberDialogOpen && !grantServerDialogOpen && (
+        <NannosActions
+          type="Group"
+          id={String(groupId)}
+          actions={{
+            ...(isAdminView && {
+              edit: {
+                label: 'Edit group',
+                description: 'Switch the group to edit mode (name, description); then fill it and submit.',
+                run: startEditing,
+              },
+            }),
+            add_members: {
+              label: 'Add members',
+              description:
+                'Open the Add Members dialog; then search_users, fill members (emails) and role, and submit.',
+              run: () => setAddMemberDialogOpen(true),
+            },
+            ...(isAdminView &&
+              gatewayStatus?.managed && {
+                grant_server: {
+                  label: 'Grant server access',
+                  description: 'Open the Grant Server Access dialog (server and role); then fill it and submit.',
+                  run: () => setGrantServerDialogOpen(true),
+                },
+              }),
+          }}
+        />
+      )}
       <div className="flex items-center gap-4">
         <Button variant="ghost" size="icon" onClick={() => navigate(backPath)}>
           <ArrowLeft className="h-4 w-4" />
@@ -610,6 +713,12 @@ export function GroupDetailPage() {
 
       {isEditing && isAdminView ? (
         <Card>
+          <NannosForm
+            type="Group"
+            id={groupId}
+            fields={{ name: [editName, setEditName], description: [editDescription, setEditDescription] }}
+            save={saveGroup}
+          />
           <CardHeader>
             <CardTitle>Edit Group</CardTitle>
             <CardDescription>Update group details and permissions</CardDescription>
@@ -1108,10 +1217,29 @@ export function GroupDetailPage() {
             setUserSearch('');
             setUserPage(1);
             setSelectedUsersToAdd(new Set());
+            unresolvedMembersRef.current = [];
           }
         }}
       >
         <DialogContent className="max-w-lg">
+          <NannosForm
+            type="GroupMembers"
+            id={undefined}
+            parentId={groupId}
+            fields={{ role: [newMemberRole, setNewMemberRole], members: [selectedMemberEmails, setMemberEmails] }}
+            actions={{
+              search_users: {
+                label: 'Search users',
+                description: "Filter the dialog's user list by name or email; read the page, then fill members.",
+                params: [{ name: 'query', type: 'string', description: 'Name or email' }],
+                run: ({ query }) => {
+                  setUserSearch(typeof query === 'string' ? query : '');
+                  setUserPage(1);
+                },
+              },
+            }}
+            save={addMembers}
+          />
           <DialogHeader>
             <DialogTitle>Add Members</DialogTitle>
             <DialogDescription>Select users to add to this group.</DialogDescription>
@@ -1171,6 +1299,7 @@ export function GroupDetailPage() {
                           const newSet = new Set(selectedUsersToAdd);
                           if (checked) {
                             newSet.add(user.id);
+                            setSelectedEmailById((prev) => ({ ...prev, [user.id]: user.email.toLowerCase() }));
                           } else {
                             newSet.delete(user.id);
                           }
@@ -1215,6 +1344,13 @@ export function GroupDetailPage() {
       {/* Grant Server Access Dialog */}
       <Dialog open={grantServerDialogOpen} onOpenChange={setGrantServerDialogOpen}>
         <DialogContent>
+          <NannosForm
+            type="GroupServerAccess"
+            id={undefined}
+            parentId={groupId}
+            fields={{ server_slug: [selectedServerSlug, setSelectedServerSlug], role: [selectedServerRole, setSelectedServerRole] }}
+            save={grantServerAccess}
+          />
           <DialogHeader>
             <DialogTitle>Grant Server Access</DialogTitle>
             <DialogDescription>Select an MCP gateway server and role to grant access to this group.</DialogDescription>
@@ -1257,9 +1393,7 @@ export function GroupDetailPage() {
               Cancel
             </Button>
             <Button
-              onClick={() =>
-                grantServerAccessMutation.mutate({ serverSlug: selectedServerSlug, role: selectedServerRole })
-              }
+              onClick={() => void grantServerAccess()}
               disabled={!selectedServerSlug || grantServerAccessMutation.isPending}
             >
               {grantServerAccessMutation.isPending ? 'Granting...' : 'Grant Access'}

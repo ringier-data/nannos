@@ -23,10 +23,12 @@ to incomplete/partial args.
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 import logging
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Generator, Iterable
+from contextvars import ContextVar
 from pathlib import PurePosixPath
 
 from langchain.agents.middleware.types import AgentMiddleware, AgentState
@@ -68,6 +70,22 @@ _CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 # Max distinct tool names to list in an ``eval`` status before summarising.
 _PTC_STATUS_MAX_TOOLS = 5
 
+# Set by the PTC guard around an ``eval`` run that REPLAYS a program on an approval
+# resume. A replay re-runs the snippet to rediscover its pending calls, and a refused
+# call still appears in it: labelling it "Running <tool>…" told the user a call ran
+# that never did. The guard announces the calls it actually lets through itself.
+_status_suppressed: ContextVar[bool] = ContextVar("tool_status_suppressed", default=False)
+
+
+@contextlib.contextmanager
+def tool_status_suppressed(active: bool = True) -> Generator[None, None, None]:
+    """Silence :class:`ToolStatusMiddleware` for the tool calls made inside the block."""
+    token = _status_suppressed.set(active)
+    try:
+        yield
+    finally:
+        _status_suppressed.reset(token)
+
 
 class ToolStatusMiddleware(AgentMiddleware[AgentState, ContextT]):
     """Emits descriptive status messages for all tool calls."""
@@ -81,11 +99,11 @@ class ToolStatusMiddleware(AgentMiddleware[AgentState, ContextT]):
     ) -> ToolMessage | Command:
         tool_name = request.tool_call.get("name", "")
 
-        if tool_name and tool_name not in _SUPPRESSED_TOOLS:
+        if tool_name and tool_name not in _SUPPRESSED_TOOLS and not _status_suppressed.get():
             args = request.tool_call.get("args", {})
             status = _build_status(tool_name, args)
             if status:
-                await _emit_status(status, tool_name)
+                await emit_tool_status(status, tool_name)
 
         return await handler(request)
 
@@ -182,11 +200,7 @@ def _build_status(tool_name: str, args: dict) -> str | None:
                 return _build_status(name, call_args)
         called = _extract_ptc_tool_calls(code)
         if called:
-            shown = ", ".join(called[:_PTC_STATUS_MAX_TOOLS])
-            extra = len(called) - _PTC_STATUS_MAX_TOOLS
-            if extra > 0:
-                shown += f" +{extra} more"
-            return f"Running {shown}\u2026"
+            return ptc_running_status(called)
         return f"Running `{_truncate(code, 80)}`\u2026"
 
     if tool_name == "execute":
@@ -212,6 +226,18 @@ def _build_status(tool_name: str, args: dict) -> str | None:
 
     # Generic fallback for all other tools
     return f"Using {tool_name}\u2026"
+
+
+def ptc_running_status(tool_names: Iterable[str]) -> str | None:
+    """``"Running a, b +2 more…"`` for the distinct *tool_names*, or *None* when empty."""
+    called = list(dict.fromkeys(tool_names))
+    if not called:
+        return None
+    shown = ", ".join(called[:_PTC_STATUS_MAX_TOOLS])
+    extra = len(called) - _PTC_STATUS_MAX_TOOLS
+    if extra > 0:
+        shown += f" +{extra} more"
+    return f"Running {shown}\u2026"
 
 
 def _camel_to_snake(name: str) -> str:
@@ -262,7 +288,7 @@ def _truncate(text: str, max_len: int) -> str:
     return text[:max_len] + "\u2026"
 
 
-async def _emit_status(message: str, tool_name: str) -> None:
+async def emit_tool_status(message: str, tool_name: str) -> None:
     """Push a ``(TOOL_STATUS_EVENT, {...})`` custom event into the stream.
 
     The payload carries the originating ``tool`` name alongside the human

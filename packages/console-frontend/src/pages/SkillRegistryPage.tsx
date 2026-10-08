@@ -74,8 +74,11 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { getErrorMessage } from '@/lib/utils';
+import type { ActionOutcome } from '@nannos/embed-sdk';
 import { describeSkillReferencedConflict } from '@/lib/skillConflict';
 import { SkillImportPanel } from '@/components/skills/SkillImportPanel';
+import { NannosForm } from '@/components/nannos/NannosForm';
+import { NannosActions } from '@/components/nannos/NannosActions';
 
 // --- Helpers for SKILL.md structured editing ---
 
@@ -407,6 +410,39 @@ export function SkillRegistryPage() {
   const displayBody = editedBody ?? parsedSkillMd?.body ?? '';
   const displayContent = editedContent ?? currentFileContent;
 
+  // Assistant writes (the NannosForm on the SKILL.md editor). The agent may set
+  // several fields in one tick, so each write builds on the draft the previous
+  // one produced rather than this render's `draftSkill`; synced after each commit.
+  const agentDraftRef = useRef<{ draft: typeof draftSkill; description: string; body: string }>({
+    draft: null,
+    description: '',
+    body: '',
+  });
+  useEffect(() => {
+    agentDraftRef.current = { draft: isDraft ? draftSkill : null, description: displayDescription, body: displayBody };
+  });
+  const writeAgentDraft = (patch: { name?: string; description?: string; body?: string; visibility?: string }) => {
+    const current = agentDraftRef.current;
+    const d = current.draft ?? ensureEditDraft();
+    if (!d) return;
+    const description = patch.description ?? current.description;
+    const body = patch.body ?? current.body;
+    const next = { ...d };
+    if (patch.name !== undefined) {
+      next.name = patch.name;
+      next.slug = patch.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+    }
+    if (patch.visibility !== undefined) next.visibility = patch.visibility;
+    if (patch.description !== undefined || patch.body !== undefined) {
+      const content = composeSkillMd(next.name, description, body);
+      next.files = d.files.map((f) => (f.path === 'SKILL.md' ? { ...f, content } : f));
+      if (patch.description !== undefined) setEditedDescription(description);
+      if (patch.body !== undefined) setEditedBody(body);
+    }
+    agentDraftRef.current = { draft: next, description, body };
+    setDraftSkill(next);
+  };
+
   const isDirty = isDraft
     ? (() => {
         if (!draftSkill?.existingId || !draftSkill.originalFiles) return false;
@@ -439,10 +475,10 @@ export function SkillRegistryPage() {
     return { ...draftSkill, files: updatedFiles };
   };
 
-  const handleSaveDraft = async () => {
-    if (!draftSkill) return;
+  const handleSaveDraft = async (): Promise<ActionOutcome> => {
+    if (!draftSkill) return { ok: false, detail: 'No unsaved changes' };
     const flushed = flushDraftEdits();
-    if (!flushed) return;
+    if (!flushed) return { ok: false, detail: 'No unsaved changes' };
     setSaving(true);
     try {
       if (flushed.existingId) {
@@ -465,6 +501,7 @@ export function SkillRegistryPage() {
         setEditedBody(null);
         invalidateDetail();
         invalidateSearch();
+        return true;
       } else {
         // Create new skill
         const res = await createRegistrySkillApiV1SkillsRegistryPost({
@@ -485,6 +522,7 @@ export function SkillRegistryPage() {
         setEditedBody(null);
         invalidateSearch();
         if (newId) setSelectedSkillId(newId);
+        return true;
       }
     } catch (err) {
       // ADR-0011: visibility -> private on a referenced row is refused. Say who holds it, and
@@ -494,9 +532,10 @@ export function SkillRegistryPage() {
       if (referenced) {
         toast.error('This skill is published and in use', { description: referenced });
         setDraftSkill({ ...flushed, visibility: detail?.visibility ?? 'public' });
-      } else {
-        toast.error('Failed to save skill', { description: getErrorMessage(err) });
+        return { ok: false, detail: `This skill is published and in use: ${referenced}` };
       }
+      toast.error('Failed to save skill', { description: getErrorMessage(err) });
+      return { ok: false, detail: getErrorMessage(err) };
     } finally {
       setSaving(false);
     }
@@ -789,6 +828,29 @@ export function SkillRegistryPage() {
 
   return (
     <div className="flex h-full">
+      {/* The "+" and the list, for the assistant: the editor they open is the Skill form. */}
+      {!draftSkill && (
+        <NannosActions
+          type="Skill"
+          id={undefined}
+          actions={{
+            create: {
+              label: 'Create skill',
+              description: 'Open the editor with a new, unsaved skill draft; then fill its form and submit it.',
+              run: handleStartCreate,
+            },
+            open: {
+              label: 'Open a skill',
+              description: 'Open an existing skill in the editor (its id from console_search_skills).',
+              params: [{ name: 'skill_id', type: 'string', description: 'The skill id' }],
+              run: ({ skill_id }) => {
+                if (typeof skill_id !== 'string' || !skill_id) return { ok: false, detail: 'skill_id is required.' };
+                setSelectedSkillId(skill_id);
+              },
+            },
+          }}
+        />
+      )}
       {/* Left panel: skill list (full-width when browsing, narrow sidebar when editing) */}
       <div className={`${isEditing ? 'w-72 border-r shrink-0' : 'flex-1'} flex flex-col transition-[width,flex] duration-300 ease-in-out overflow-hidden`}>
         {/* Header */}
@@ -1087,7 +1149,7 @@ export function SkillRegistryPage() {
                   <TooltipContent>Back to browse</TooltipContent>
                 </Tooltip>
                 <span className="flex items-center gap-1">
-                  <span className="font-medium text-sm">
+                  <span className="font-medium text-sm" data-nannos-field="name">
                     {isDraft ? draftSkill.name : detail?.name}
                   </span>
                   {!isImported && (
@@ -1124,7 +1186,7 @@ export function SkillRegistryPage() {
                 {isDraft ? (
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
-                      <button className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 border rounded-md hover:bg-accent transition-colors">
+                      <button data-nannos-field="visibility" className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 border rounded-md hover:bg-accent transition-colors">
                         {visibilityIcon(draftSkill.visibility ?? 'public')}
                         {draftSkill.visibility ?? 'public'}
                       </button>
@@ -1141,7 +1203,7 @@ export function SkillRegistryPage() {
                 ) : detail?.visibility ? (
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
-                      <button className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 border rounded-md hover:bg-accent transition-colors">
+                      <button data-nannos-field="visibility" className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 border rounded-md hover:bg-accent transition-colors">
                         {visibilityIcon(detail.visibility)}
                         {detail.visibility}
                       </button>
@@ -1231,7 +1293,7 @@ export function SkillRegistryPage() {
                       Discard
                     </Button>
                     {(isDirty || !draftSkill.existingId) && (
-                      <Button size="sm" className="h-7 text-xs" onClick={handleSaveDraft} disabled={saving}>
+                      <Button size="sm" className="h-7 text-xs" onClick={() => void handleSaveDraft()} disabled={saving}>
                         {saving ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : <Save className="h-3 w-3 mr-1" />}
                         Save
                       </Button>
@@ -1452,6 +1514,22 @@ export function SkillRegistryPage() {
                 )}
                 {isSkillMd ? (
                   <div className="space-y-4 max-w-2xl">
+                    {!isImported && (isDraft || detail) && (
+                      <NannosForm
+                        type="Skill"
+                        id={isDraft ? draftSkill.existingId : detail?.id}
+                        fields={{
+                          name: [isDraft ? draftSkill.name : detail?.name ?? '', (v: string) => writeAgentDraft({ name: v })],
+                          description: [displayDescription, (v: string) => writeAgentDraft({ description: v })],
+                          instructions: [displayBody, (v: string) => writeAgentDraft({ body: v })],
+                          visibility: [
+                            (isDraft ? draftSkill.visibility : detail?.visibility) ?? 'public',
+                            (v: string) => writeAgentDraft({ visibility: v }),
+                          ],
+                        }}
+                        save={handleSaveDraft}
+                      />
+                    )}
                     <div className="space-y-2">
                       <Label className="text-xs font-medium text-muted-foreground">Description</Label>
                       <Input

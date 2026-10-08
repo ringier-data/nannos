@@ -42,6 +42,8 @@ import {
   type DeliveryChannel,
   type DeliveryChannelUpdate,
 } from '@/api/scheduler';
+import { NannosForm } from '@/components/nannos/NannosForm';
+import type { ActionOutcome } from '@nannos/embed-sdk';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -86,7 +88,7 @@ function EditDialog({ channel, onClose }: EditDialogProps) {
     onError: (e: unknown) => setError(e instanceof Error ? e.message : String(e)),
   });
 
-  function handleSave() {
+  async function save(): Promise<ActionOutcome> {
     setError(null);
 
     const patch: DeliveryChannelUpdate = {
@@ -96,12 +98,33 @@ function EditDialog({ channel, onClose }: EditDialogProps) {
     };
     if (secret) patch.secret = secret;
 
-    mutation.mutate(patch);
+    try {
+      await mutation.mutateAsync(patch);
+      return true;
+    } catch (e) {
+      // onError has already shown it in the dialog.
+      return { ok: false, detail: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  function handleSave() {
+    void save();
   }
 
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-w-lg">
+        {/* The secret is deliberately not offered to the assistant. */}
+        <NannosForm
+          type="DeliveryChannel"
+          id={channel.id}
+          fields={{
+            name: [name, setName],
+            description: [description, setDescription],
+            webhookUrl: [webhookUrl, setWebhookUrl],
+          }}
+          save={save}
+        />
         <DialogHeader>
           <DialogTitle>Edit delivery channel</DialogTitle>
           <DialogDescription>

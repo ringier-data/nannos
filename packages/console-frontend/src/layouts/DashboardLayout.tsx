@@ -23,6 +23,7 @@ import { NotificationInbox } from '@/components/notifications/NotificationInbox'
 import { ImpersonationBanner } from '@/components/ImpersonationBanner';
 import { SchedulerNotifications } from '@/components/SchedulerNotifications';
 import { ConsoleNannosProvider } from '@/components/nannos/ConsoleNannosProvider';
+import { ConsoleAssistantDock, ConsoleAssistantLauncher } from '@/components/nannos/ConsoleAssistant';
 
 export function DashboardLayout() {
   const { user, isAdmin, isGroupManager, adminMode, toggleAdminMode } = useAuth();
@@ -114,11 +115,13 @@ export function DashboardLayout() {
           )}
         </SidebarContent>
       </Sidebar>
-      <SidebarInset className="h-screen overflow-hidden">
+      {/* A pinned assistant docks at the right edge; the page yields its width. */}
+      <SidebarInset className="h-screen overflow-hidden pr-[var(--nannos-panel-width,0px)]">
         <header className="flex h-14 shrink-0 items-center gap-4 border-b px-4">
           <SidebarTrigger />
           <div className="flex-1" />
           <div className="flex items-center gap-2">
+            <ConsoleAssistantLauncher />
             <NotificationInbox />
             <span className="text-sm text-muted-foreground">{user?.email}</span>
             <Button variant="ghost" size="icon" onClick={handleLogout} title="Logout">
@@ -131,6 +134,7 @@ export function DashboardLayout() {
           <Outlet />
         </main>
       </SidebarInset>
+      <ConsoleAssistantDock />
       </SidebarProvider>
     </ConsoleNannosProvider>
   );

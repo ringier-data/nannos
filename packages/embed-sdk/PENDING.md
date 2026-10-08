@@ -31,16 +31,6 @@ socket makes — and shows the claims, the remaining life and (on request) the
 raw JWT, which is what separates a wrong-audience token from a broken
 backend.
 
-### 7. Fire-and-forget directives are dropped in an own-socket scope
-`NannosCore.bindClientActions` listens on `core.transport`, but a scope with
-`customHeaders`/`playground` (console's sub-agent playground) runs its chat on
-its OWN `TransportClient` (`panel/engine.tsx`), which the core binding never
-sees. `navigate`/`highlight` therefore no-op there; the round-trip kinds
-(`apply`/`read_current_page`) are unaffected because they travel as approval
-parts through the chat transport, not the core listener. Harmless while the
-playground registers no on-screen objects — the fix is for the engine to route
-its own socket's client-action events into `core.runClientAction`.
-
 ### 6. shiki grammar fan-out under CRA (cockpit build hygiene)
 The bundled streamdown/shiki stack ships every grammar as a lazy module;
 webpack pre-builds an async chunk per grammar. Runtime cost is lazy/none, but
@@ -107,3 +97,10 @@ events, console-backend untouched):
 - **Second React root / `mount()`**: replaced by `<ShadowPortal>` (one tree,
   context flows, style isolation kept).
 - **Silently dropped socket `error` event**: now forwarded to `onError`.
+
+## Closed 2026-10-06: own-socket scopes drop fire-and-forget directives (was #7)
+
+`NannosCore.routeClientActions(client)` routes an own-socket scope's `agent_response`
+events into the hooks `bindClientActions` registered; the engine wires it for every
+own-socket scope (playground, the console's embed-scope assistant). Needed once the
+console's docked assistant moved onto its own socket.

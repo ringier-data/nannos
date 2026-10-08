@@ -13,9 +13,13 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { parseAzps } from '@/components/subagents/embedBinding';
+import { NannosForm } from '@/components/nannos/NannosForm';
 import type { EmbedBindingUpsert } from '@/api/generated/types.gen';
+import type { ActionOutcome } from '@nannos/embed-sdk';
 
 interface EmbedBindingDialogProps {
+  /** The sub-agent being bound; names the form for the assistant. */
+  subAgentId: number;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   title: string;
@@ -24,7 +28,8 @@ interface EmbedBindingDialogProps {
   /** Prefill when editing an existing binding. */
   initial?: { baseUrl: string; azps: string[] };
   pending?: boolean;
-  onSubmit: (values: EmbedBindingUpsert) => void;
+  /** Resolves `{ ok: false, detail }` when nothing was saved. */
+  onSubmit: (values: EmbedBindingUpsert) => Promise<ActionOutcome>;
 }
 
 /**
@@ -33,6 +38,7 @@ interface EmbedBindingDialogProps {
  * existing sub-agent and to create one from the host's definition.
  */
 export function EmbedBindingDialog({
+  subAgentId,
   open,
   onOpenChange,
   title,
@@ -51,6 +57,7 @@ export function EmbedBindingDialog({
         </DialogHeader>
         {/* DialogContent unmounts when closed, so the form state resets on every open. */}
         <EmbedBindingForm
+          subAgentId={subAgentId}
           initial={initial}
           pending={pending}
           submitLabel={submitLabel}
@@ -63,27 +70,38 @@ export function EmbedBindingDialog({
 }
 
 interface EmbedBindingFormProps {
+  subAgentId: number;
   initial?: { baseUrl: string; azps: string[] };
   pending: boolean;
   submitLabel: string;
   onCancel: () => void;
-  onSubmit: (values: EmbedBindingUpsert) => void;
+  /** Resolves `{ ok: false, detail }` when nothing was saved. */
+  onSubmit: (values: EmbedBindingUpsert) => Promise<ActionOutcome>;
 }
 
-function EmbedBindingForm({ initial, pending, submitLabel, onCancel, onSubmit }: EmbedBindingFormProps) {
+function EmbedBindingForm({ subAgentId, initial, pending, submitLabel, onCancel, onSubmit }: EmbedBindingFormProps) {
   const [baseUrl, setBaseUrl] = useState(initial?.baseUrl ?? '');
   const [azpsText, setAzpsText] = useState(initial?.azps.join('\n') ?? '');
 
   const azps = parseAzps(azpsText);
   const canSubmit = baseUrl.trim().length > 0 && azps.length > 0 && !pending;
 
-  const submit = () => {
-    if (!canSubmit) return;
-    onSubmit({ base_url: baseUrl.trim(), azps });
+  const submit = async (): Promise<ActionOutcome> => {
+    if (pending) return { ok: false, detail: 'A save is already in progress' };
+    if (!baseUrl.trim()) return { ok: false, detail: 'The authority origin is required' };
+    if (azps.length === 0) return { ok: false, detail: 'At least one OAuth client id is required' };
+    return onSubmit({ base_url: baseUrl.trim(), azps });
   };
 
   return (
     <>
+      <NannosForm
+        type="EmbedBinding"
+        parentId={subAgentId}
+        id={initial ? subAgentId : undefined}
+        fields={{ base_url: [baseUrl, setBaseUrl], azps: [azps, (next: string[]) => setAzpsText(next.join('\n'))] }}
+        save={submit}
+      />
       <div className="space-y-4">
         <div className="space-y-1.5">
           <Label htmlFor="embed-base-url">Authority origin</Label>
@@ -115,7 +133,7 @@ function EmbedBindingForm({ initial, pending, submitLabel, onCancel, onSubmit }:
         <Button variant="outline" onClick={onCancel} disabled={pending}>
           Cancel
         </Button>
-        <Button onClick={submit} disabled={!canSubmit}>
+        <Button onClick={() => void submit()} disabled={!canSubmit}>
           {pending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
           {submitLabel}
         </Button>

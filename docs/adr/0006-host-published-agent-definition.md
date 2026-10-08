@@ -460,3 +460,49 @@ exclusivity). Migration 091 is applied by the database fixtures.
   browser never carry the prompt.
 - ADR-0002 Amendments 4 and 5: unchanged. Stage 2, parked, would replace the
   public `azp` in the binding with the confidential one.
+
+## Amendment 1 (2026-10-06): the console is a host of its own
+
+The console embeds its own assistant, the **Nannos Assistant**, the way the cockpit
+embeds the Alloy AI Assistant: a docked panel on every console page, the console's
+forms registered as client objects, and a definition the console publishes under
+`<FRONTEND_URL>/.well-known/agent-skills/` (console-frontend `well-known/agent-skills/`,
+emitted by `vite-plugins/agentSkills.ts`). The definition publishes a `tools` list: the
+console MCP server's `console_*` and `scheduler_*` tools, so the agent is scoped to the
+console's own operations.
+
+**Binding from deployment config, for this one host.** Decision 4 makes a binding
+admin-authored data. The console is the exception: its definition ships in the same
+release as console-backend, and both facts a binding needs are already deployment
+config — `FRONTEND_URL` (base URL) and `OIDC_CLIENT_ID` (the console's client). So
+console-backend binds it itself: `EmbedBindingService.ensure_console_assistant()` runs at
+the start of every sync pass and, when no binding lists the console's client, runs the
+create flow (`create_bound_sub_agent`, signed by the seeded `system` user). An existing
+binding for the client — made here or by an admin — is left alone; the azp primary key
+settles replicas starting together; a fetch failure (the frontend not serving yet) is
+retried on the next pass. `CONSOLE_ASSISTANT_ENABLED=false` turns it off; an admin who
+only unbinds it gets it back on the next pass, so the switch is the way to opt out.
+
+**Read from the pod, recorded as the public origin.** The console's nginx frontend
+(listening on 8081, `console-frontend/nginx.conf`) and console-backend are containers of
+one pod (`example-k8s-deployment/base/console.yaml`), so outside local development the
+definition is read from `http://localhost:8081` by default: no DNS, load balancer or TLS,
+and always the definition of the frontend deployed with this backend. No deployment
+config is needed; `CONSOLE_ASSISTANT_DEFINITION_URL` overrides it for a different layout. `WellKnownAgentClient(aliases=...)` reads from the alias and
+records every URL under `FRONTEND_URL`, which the framing and the console show. The
+public-address rule and the `https://` rule do not apply to this binding: both guard
+admin input, and this base URL is deployment config. Local stacks read `FRONTEND_URL`
+itself, where the frontend is a separate dev server.
+
+**The console's socket opts in.** Embed mode stays identity-driven, but the console's
+users carry a cookie, not a token. The assistant's chat scope opens its own socket with
+`auth = {"embedScope": true}` (embed-sdk `NannosChatScope embedScope`); for a cookie
+session that asked, `handle_connect` binds through the console's own client id
+(`_bind_console_assistant`). The console's main chat connects with the same cookie and no
+opt-in, and keeps running the full orchestrator. The page still cannot name a sub-agent.
+A cookie request has no token to scope the conversation list by, so the assistant's
+scope filters it by the sub-agent the handshake named (`embedded_sub_agent_id`, which
+only ever narrows the caller's own conversations).
+
+Known edge: unbinding the console's agent in the console keeps the sub-agent, and the
+next pass creates a new one beside it. Turn the switch off instead of unbinding.

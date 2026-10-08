@@ -36,6 +36,7 @@ from ..extensions import (
     new_auth_required_message,
     new_client_action_message,
     new_client_action_request_message,
+    new_hitl_decision_message,
     new_hitl_interrupt_message,
     new_work_plan_message,
 )
@@ -45,6 +46,7 @@ from ..stream_events import (
     ActivityLogMeta,
     ArtifactUpdate,
     ClientActionMeta,
+    HitlDecisionMeta,
     ErrorEvent,
     IntermediateOutputMeta,
     StreamEvent,
@@ -257,6 +259,12 @@ class LocalSubAgentExecutor(AgentExecutor):
                     await updater.update_status(
                         TaskState.TASK_STATE_WORKING,
                         new_client_action_message(meta.client_action, task.context_id, task.id),
+                    )
+                    continue
+                if isinstance(meta, HitlDecisionMeta):
+                    await updater.update_status(
+                        TaskState.TASK_STATE_WORKING,
+                        new_hitl_decision_message(meta.hitl_decision, task.context_id, task.id),
                     )
                     continue
                 if isinstance(meta, ActivityLogMeta) or event.status_text:

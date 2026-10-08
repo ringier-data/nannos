@@ -58,6 +58,7 @@ export class TransportClient {
   private readonly responseListeners = new Set<(data: AgentResponseData) => void>();
   private readonly errorListeners = new Set<(e: NannosErrorEvent) => void>();
   private pendingInit: ((ok: boolean) => void) | null = null;
+  private pendingInitTimer: ReturnType<typeof setTimeout> | null = null;
   private reauthTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
@@ -136,7 +137,9 @@ export class TransportClient {
                 });
             },
           }
-        : {}),
+        : this.cfg.embedScope
+          ? { auth: { embedScope: true } }
+          : {}),
     };
     // Same-origin (console) when no backendUrl; absolute origin when embedded.
     const socket = this.ioFactory(this.cfg.backendUrl, opts);
@@ -207,15 +210,26 @@ export class TransportClient {
         return;
       }
       const timeoutMs = this.cfg.initTimeoutMs ?? INIT_TIMEOUT_MS;
+      // A handshake started before the previous one was answered supersedes it:
+      // the reply answers both callers, and only the newest timer runs — an
+      // orphaned one would fire later and mark an initialized client as not
+      // initialized, forcing a needless re-handshake.
+      const superseded = this.pendingInit;
+      if (this.pendingInitTimer) clearTimeout(this.pendingInitTimer);
       const timeout = setTimeout(() => {
+        this.pendingInitTimer = null;
         this.setState({ initialized: false });
         this.pendingInit = null;
         this.emitError({ type: 'init', message: 'initialize_client timed out', detail: { timeoutMs } });
+        superseded?.(false);
         resolve(false);
       }, timeoutMs);
+      this.pendingInitTimer = timeout;
 
       this.pendingInit = (ok: boolean) => {
         clearTimeout(timeout);
+        this.pendingInitTimer = null;
+        superseded?.(ok);
         resolve(ok);
       };
 
@@ -340,6 +354,8 @@ export class TransportClient {
     this.reauthTimer = null;
     this.socket?.disconnect();
     this.socket = null;
+    if (this.pendingInitTimer) clearTimeout(this.pendingInitTimer);
+    this.pendingInitTimer = null;
     this.pendingInit = null;
     this.setState({ socketConnected: false, initialized: false, agentInfo: null, embeddedAgent: null });
   }

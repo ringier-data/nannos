@@ -35,6 +35,9 @@ export type ToolPart = ToolUIPart | DynamicToolUIPart;
 export type ToolHeaderProps = {
   title?: string;
   className?: string;
+  /** What actually happened, when the part state alone would mislead (a typed approval
+   *  settles as `output-denied`; a failed browser action as `output-available`). */
+  statusLabel?: string;
 } & (
   | { type: ToolUIPart["type"]; state: ToolUIPart["state"]; toolName?: never }
   | {
@@ -64,13 +67,13 @@ const statusIcons: Record<ToolPart["state"], ReactNode> = {
   "output-error": <XCircleIcon className="size-3 text-red-600" />,
 };
 
-export const getStatusBadge = (status: ToolPart["state"]) => (
+export const getStatusBadge = (status: ToolPart["state"], label?: string) => (
   <Badge
     className="gap-1 rounded-full px-1.5 py-0 text-[11px]"
     variant="secondary"
   >
     {statusIcons[status]}
-    {statusLabels[status]}
+    {label ?? statusLabels[status]}
   </Badge>
 );
 
@@ -80,6 +83,7 @@ export const ToolHeader = ({
   type,
   state,
   toolName,
+  statusLabel,
   ...props
 }: ToolHeaderProps) => {
   const derivedName =
@@ -96,7 +100,7 @@ export const ToolHeader = ({
       <div className="flex items-center gap-1.5">
         <WrenchIcon className="size-3.5 text-muted-foreground" />
         <span className="font-medium text-xs">{title ?? derivedName}</span>
-        {getStatusBadge(state)}
+        {getStatusBadge(state, statusLabel)}
       </div>
       <ChevronDownIcon className="size-3.5 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
     </CollapsibleTrigger>

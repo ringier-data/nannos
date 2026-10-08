@@ -6,20 +6,40 @@ import type { ManifestEntry, ObjectHandle, RegisterInput } from './types';
  * client-action (the widget can never touch anything not in this map).
  */
 export class ObjectRegistry {
-  private readonly objects = new Map<string, RegisterInput>();
+  // Registrations per key, newest last. A page and its dialog can hold one key at once
+  // (a view's `create` under `X:new`, the create form opening over it), and a closing
+  // dialog disposes after its exit animation, in either order relative to the page's
+  // re-registration: the newest live entry is the object, and disposing it brings back
+  // the one beneath.
+  private readonly stacks = new Map<string, RegisterInput[]>();
   private readonly listeners = new Set<() => void>();
+
+  /** The current registration per key. */
+  private get objects(): Map<string, RegisterInput> {
+    return new Map([...this.stacks].map(([key, stack]) => [key, stack[stack.length - 1]]));
+  }
 
   register<TState>(input: RegisterInput<TState>): ObjectHandle {
     const key = `${input.type}:${input.id}`;
-    this.objects.set(key, input as RegisterInput);
+    const entry = input as RegisterInput;
+    this.stacks.set(key, [...(this.stacks.get(key) ?? []), entry]);
     this.emit();
     return {
       key,
       dispose: () => {
-        this.objects.delete(key);
+        const stack = this.stacks.get(key);
+        if (!stack?.includes(entry)) return;
+        const rest = stack.filter((e) => e !== entry);
+        if (rest.length) this.stacks.set(key, rest);
+        else this.stacks.delete(key);
         this.emit();
       },
     };
+  }
+
+  /** The `type:id` of every object holding unsaved edits (`RegisterInput.isDirty`). */
+  dirty(): string[] {
+    return [...this.objects.entries()].filter(([, o]) => isDirty(o)).map(([key]) => key);
   }
 
   get(type: string, id: string): RegisterInput | undefined {
@@ -36,12 +56,24 @@ export class ObjectRegistry {
   /** Compact index pushed with each turn — progressive disclosure: no schema, no state. */
   manifest(): ManifestEntry[] {
     return [...this.objects.values()].map((o) => {
-      const { type, id, scope, label, fields, fieldSpecs, includeValues, getState } = o;
+      const { type, id, scope, label, fields, fieldSpecs, includeValues, getState, actions } = o;
       const entry: ManifestEntry = {
         type,
         id,
         scope,
         ...(label ? { label } : {}),
+        ...(isDirty(o) ? { unsaved: true } : {}),
+        ...(actions && Object.keys(actions).length
+          ? {
+              actions: Object.entries(actions).map(([name, a]) => ({
+                name,
+                label: a.label,
+                ...(a.description ? { description: a.description } : {}),
+                ...(a.params?.length ? { params: a.params } : {}),
+                ...(a.requiresApproval ? { requiresApproval: true as const } : {}),
+              })),
+            }
+          : {}),
         ...(fields?.length ? { fields } : {}),
         ...(fieldSpecs?.length ? { fieldSpecs } : {}),
       };
@@ -79,5 +111,14 @@ export class ObjectRegistry {
 
   private emit() {
     for (const fn of this.listeners) fn();
+  }
+}
+
+/** A host's dirty check may read state mid-render and throw: treat that as clean. */
+function isDirty(o: RegisterInput): boolean {
+  try {
+    return o.isDirty?.() === true;
+  } catch {
+    return false;
   }
 }

@@ -53,6 +53,10 @@ import { VersionDiffViewer } from './VersionDiffViewer';
 import type { SubAgent, SubAgentConfigVersion, SubAgentStatus } from './types';
 import { totalCountFrom } from '@/api/total-count';
 import { useDebouncedValue } from '@/hooks/use-debounced-value';
+import { NannosForm } from '@/components/nannos/NannosForm';
+import { NannosActions } from '@/components/nannos/NannosActions';
+import type { ActionOutcome } from '@nannos/embed-sdk';
+import { getErrorMessage } from '@/lib/utils';
 
 const VERSION_PAGE_SIZE = 20;
 
@@ -195,6 +199,7 @@ export function VersionSidebar({
       submitVersionForApprovalApiV1SubAgentsSubAgentIdVersionsVersionSubmitPost({
         path: { sub_agent_id: subAgent.id, version },
         body: { change_summary: changeSummary },
+        throwOnError: true,
       }),
     onSuccess: () => {
       toast.success('Version submitted for approval');
@@ -206,10 +211,22 @@ export function VersionSidebar({
     },
     onError: (error) => {
       toast.error('Failed to submit version', {
-        description: error instanceof Error ? error.message : 'Unknown error',
+        description: getErrorMessage(error),
       });
     },
   });
+
+  const submitVersionForApproval = async (): Promise<ActionOutcome> => {
+    if (submitVersion === null) return { ok: false, detail: 'No version selected' };
+    if (!submitChangeSummary.trim()) return { ok: false, detail: 'A change summary is required' };
+    try {
+      await submitMutation.mutateAsync({ version: submitVersion, changeSummary: submitChangeSummary });
+      return true;
+    } catch (error) {
+      // onError already toasted.
+      return { ok: false, detail: getErrorMessage(error) };
+    }
+  };
 
   const deleteMutation = useMutation({
     mutationFn: (version: number) =>
@@ -331,8 +348,67 @@ export function VersionSidebar({
     );
   }
 
+  // The per-version menu items that change which version runs, for the assistant. Both
+  // write at once, so the user approves each on a card (requiresApproval).
+  const canWriteVersions = (isOwner || isAdmin || hasWriteAccess) && !isEmbedBound;
+  const versionArg = { name: 'version', type: 'integer', description: 'The version number, as listed' };
+  const readVersion = async (raw: unknown) => {
+    const version = Number(raw);
+    if (!Number.isInteger(version) || version < 1) return { error: 'version must be a version number' } as const;
+    const config = await fetchVersion(version);
+    return config ? ({ version, config } as const) : ({ error: `There is no version ${version}.` } as const);
+  };
+
   return (
     <>
+      {canWriteVersions && (
+        <NannosActions
+          type="SubAgentVersions"
+          id={subAgent.id}
+          actions={{
+            set_default_version: {
+              label: 'Set as default',
+              description:
+                "Make an approved version the one people run (its 'Set as default' menu item). Saves at once.",
+              requiresApproval: true,
+              params: [versionArg],
+              run: async ({ version: raw }) => {
+                const found = await readVersion(raw);
+                if ('error' in found) return { ok: false, detail: found.error };
+                if (found.config.status !== 'approved')
+                  return { ok: false, detail: `Version ${found.version} is not approved; only approved versions can be the default.` };
+                if (found.version === defaultVersion) return { ok: true, detail: `Version ${found.version} already is the default.` };
+                try {
+                  await setDefaultMutation.mutateAsync(found.version);
+                  return true;
+                } catch (error) {
+                  return { ok: false, detail: getErrorMessage(error) };
+                }
+              },
+            },
+            revert_to_version: {
+              label: 'Revert to version',
+              description:
+                "Create a new draft from an earlier version (its 'Revert' menu item). The draft still needs " +
+                'approval before it runs.',
+              requiresApproval: true,
+              params: [versionArg],
+              run: async ({ version: raw }) => {
+                const found = await readVersion(raw);
+                if ('error' in found) return { ok: false, detail: found.error };
+                if (found.version === currentVersion)
+                  return { ok: false, detail: `Version ${found.version} is the current version already.` };
+                try {
+                  await revertMutation.mutateAsync(found.version);
+                  return { ok: true, detail: `A new draft was created from version ${found.version}; it needs approval.` };
+                } catch (error) {
+                  return { ok: false, detail: getErrorMessage(error) };
+                }
+              },
+            },
+          }}
+        />
+      )}
       <div className="w-72 h-full flex flex-col bg-muted/30 border-l border-border transition-all duration-200 overflow-hidden">
         {/* Header */}
         <div className="flex items-center justify-between px-4 py-3 border-b border-border shrink-0">
@@ -619,6 +695,12 @@ export function VersionSidebar({
       {/* Submit for Approval Dialog */}
       <Dialog open={showSubmitDialog} onOpenChange={setShowSubmitDialog}>
         <DialogContent>
+          <NannosForm
+            type="SubAgentApprovalRequest"
+            id={subAgent.id}
+            fields={{ change_summary: [submitChangeSummary, setSubmitChangeSummary] }}
+            save={submitVersionForApproval}
+          />
           <DialogHeader>
             <DialogTitle>Submit Version {submitVersion} for Approval</DialogTitle>
             <DialogDescription>
@@ -645,11 +727,7 @@ export function VersionSidebar({
               Cancel
             </Button>
             <Button 
-              onClick={() => {
-                if (submitVersion !== null) {
-                  submitMutation.mutate({ version: submitVersion, changeSummary: submitChangeSummary });
-                }
-              }} 
+              onClick={() => void submitVersionForApproval()} 
               disabled={submitMutation.isPending || !submitChangeSummary.trim()}
             >
               {submitMutation.isPending ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Clock className="h-4 w-4 mr-2" />}

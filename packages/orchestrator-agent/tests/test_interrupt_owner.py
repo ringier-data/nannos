@@ -13,12 +13,15 @@ tested against the real graph and checkpointer, not a stubbed snapshot.
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
-from a2a.types import TaskState
+from a2a.server.agent_execution import RequestContext
+from a2a.types import Message, Part, TaskState
+from google.protobuf.json_format import ParseDict
+from google.protobuf.struct_pb2 import Value
 from langchain_core.tools import tool
 
-from app.core.executor import OrchestratorDeepAgentExecutor
+from app.core.executor import STALE_DECISION_MESSAGE, OrchestratorDeepAgentExecutor
 from app.core.interrupt_owner import InterruptOwner, foreign_interrupt_message, interrupt_owner
 from tests.support.extraction import interrupted_tools
 from tests.support.graph_harness import final_response, runtime_context, scripted_graph, tool_call, user_turn
@@ -118,3 +121,131 @@ class TestTheExecutorRefusesAnotherSpeaker:
 def test_the_refusal_names_the_owner_or_says_who_it_means():
     assert "Alice" in foreign_interrupt_message("Alice")
     assert "the person who started it" in foreign_interrupt_message(None)
+
+
+def _clicked(*decisions: dict) -> RequestContext:
+    """A button click: no words, one DataPart of decisions."""
+    context = Mock(spec=RequestContext)
+    context.message = Mock(spec=Message)
+    context.message.parts = [Part(data=ParseDict({"decisions": list(decisions)}, Value()))]
+    return context
+
+
+def _typed() -> RequestContext:
+    context = Mock(spec=RequestContext)
+    context.message = Mock(spec=Message)
+    context.message.parts = []
+    return context
+
+
+def _pending_call_id(state) -> str:
+    return state.interrupts[0].value["action_requests"][0]["args"]["_call_id"]
+
+
+class TestAStaleClickRunsNothing:
+    """A chat card keeps its buttons after it was answered in words or replaced.
+
+    A click on it then arrived as a turn with no words: with nothing pending it
+    ran as an empty turn ("your latest message was empty"), and against a newer
+    card its unmatched call id silently rejected that card.
+    """
+
+    async def test_a_click_with_nothing_pending_is_answered_not_run(self):
+        updater = _recording_updater()
+        idle = SimpleNamespace(interrupts=(), metadata={})
+
+        refused = await OrchestratorDeepAgentExecutor._refuse_stale_decision(
+            idle, _clicked({"type": "approve", "id": "gmail_create_draft:1@a:0"}), updater, _TASK
+        )
+
+        assert refused
+        state, message = updater.update_status.await_args.args
+        assert state == TaskState.TASK_STATE_COMPLETED
+        assert message.parts[0].text == STALE_DECISION_MESSAGE
+
+    async def test_a_click_for_another_call_leaves_the_newer_card_pending(self):
+        graph = scripted_graph(
+            ScriptedChatModel(responses=[tool_call("delete_records", {"target": "prod"}), final_response()])
+        )
+        context = runtime_context(tool_registry={"delete_records": delete_records})
+        config = {"configurable": {"thread_id": "newer-card"}, "metadata": {"user_id": "user-a", "user_name": "A"}}
+        await graph.ainvoke(user_turn("delete the prod records"), config=config, context=context)
+        before = await graph.aget_state(config)
+        assert _pending_call_id(before), "precondition: the pending call carries its id"
+
+        refused = await OrchestratorDeepAgentExecutor._refuse_stale_decision(
+            before, _clicked({"type": "approve", "id": "delete_records:old@card:0"}), _recording_updater(), _TASK
+        )
+
+        assert refused
+        after = await graph.aget_state(config)
+        assert [i.id for i in after.interrupts] == [i.id for i in before.interrupts]
+        assert after.config["configurable"]["checkpoint_id"] == before.config["configurable"]["checkpoint_id"]
+
+    async def test_a_click_for_the_pending_call_goes_through(self):
+        pending = await _paused_by("user-a", "Alice", "matching-click")
+        updater = _recording_updater()
+
+        assert not await OrchestratorDeepAgentExecutor._refuse_stale_decision(
+            pending, _clicked({"type": "approve", "id": _pending_call_id(pending)}), updater, _TASK
+        )
+        updater.update_status.assert_not_awaited()
+
+    async def test_a_blanket_click_still_answers_what_is_pending(self):
+        """Cards posted before buttons named their calls send a bare decision."""
+        pending = await _paused_by("user-a", "Alice", "blanket-click")
+
+        assert not await OrchestratorDeepAgentExecutor._refuse_stale_decision(
+            pending, _clicked({"type": "reject"}), _recording_updater(), _TASK
+        )
+
+    async def test_words_are_never_a_stale_click(self):
+        idle = SimpleNamespace(interrupts=(), metadata={})
+        updater = _recording_updater()
+
+        assert not await OrchestratorDeepAgentExecutor._refuse_stale_decision(idle, _typed(), updater, _TASK)
+        updater.update_status.assert_not_awaited()
+
+    async def test_a_client_action_result_is_never_a_stale_click(self):
+        """The dock answers a client action (read the page) with its result.
+
+        The guard collected only approval call ids, so the dock's result to
+        ``read_current_page`` was refused as "already answered" and the turn ended.
+        """
+        pending = SimpleNamespace(
+            interrupts=(SimpleNamespace(id="i1", value={"client_action_request": {"id": "ca-1"}}),),
+            metadata={},
+        )
+        for decision in (
+            {"type": "approve", "id": "ca-1", "client_action_result": {"ok": True}},
+            {"type": "approve", "id": "other", "client_action_result": {"ok": True}},
+            {"type": "approve", "id": "ca-1"},
+        ):
+            updater = _recording_updater()
+            assert not await OrchestratorDeepAgentExecutor._refuse_stale_decision(
+                pending, _clicked(decision), updater, _TASK
+            ), decision
+            updater.update_status.assert_not_awaited()
+
+    async def test_an_unknown_question_is_left_to_its_reader(self):
+        """An authorization prompt has no call id to compare a click against."""
+        pending = SimpleNamespace(interrupts=(SimpleNamespace(id="i1", value={"task_state": "auth"}),), metadata={})
+        assert not await OrchestratorDeepAgentExecutor._refuse_stale_decision(
+            pending, _clicked({"type": "approve", "id": "x"}), _recording_updater(), _TASK
+        )
+
+    async def test_a_sign_in_answer_with_nothing_pending_runs_as_a_turn(self):
+        """A remote sub-agent's auth-required leaves no orchestrator interrupt.
+
+        "Done, continue" on its sign-in card sends an authorization DataPart and asks to
+        retry; refused as a stale click, the user could never continue after signing in.
+        """
+        context = Mock(spec=RequestContext)
+        context.message = Mock(spec=Message)
+        context.message.parts = [Part(data=ParseDict({"authorization": {"decision": "approved"}}, Value()))]
+        updater = _recording_updater()
+
+        assert not await OrchestratorDeepAgentExecutor._refuse_stale_decision(
+            SimpleNamespace(interrupts=(), metadata={}), context, updater, _TASK
+        )
+        updater.update_status.assert_not_awaited()

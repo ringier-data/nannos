@@ -188,6 +188,23 @@ describe('tool parts in the thread', () => {
     expect(toolBox()).toBeNull();
   });
 
+  it("keeps the user's reason on a rejected call's receipt", () => {
+    // The card's message box sends the reason with the Reject; it reached the
+    // agent, but the receipt dropped it, live and after a reload.
+    mountThread([
+      message({
+        type: 'dynamic-tool',
+        toolName: 'ls',
+        toolCallId: 'call-1',
+        state: 'output-denied',
+        input: TOOL_INPUT,
+        approval: { id: 'call-1', approved: false, reason: JSON.stringify({ v: 1, type: 'reject', message: 'keep it' }) },
+      } as NannosUIMessage['parts'][number]),
+    ]);
+
+    expect(document.querySelector('[data-receipt="rejected"]')?.textContent).toContain('keep it');
+  });
+
   it('keeps a pending approval out of the thread — the card owns it', () => {
     mountThread([
       message({
@@ -220,6 +237,41 @@ describe('tool parts in the thread', () => {
 
     expect(toolBox()).toBeTruthy();
     expect(screen.getByText('dev only')).toBeTruthy();
+  });
+
+  it("labels the dev header with what happened, not the part's raw state", () => {
+    // A typed approval settles the part as output-denied ("Denied" under "Approved"),
+    // and a browser action that failed still read "Completed".
+    mountThread(
+      [
+        message({
+          type: 'dynamic-tool',
+          toolName: 'console_update_sub_agent',
+          toolCallId: 'call-1',
+          state: 'output-denied',
+          input: TOOL_INPUT,
+          approval: { id: 'call-1', approved: false },
+          callProviderMetadata: {
+            nannos: { answeredInChat: true, typedDecision: { id: 'call-1', type: 'approve', intent: 'approve' } },
+          },
+        } as NannosUIMessage['parts'][number]),
+        message({
+          type: 'dynamic-tool',
+          toolName: 'client_action',
+          toolCallId: 'call-2',
+          state: 'output-available',
+          input: { kind: 'invoke', target_type: 'SubAgent', target_id: '9', action: 'save' },
+          output: { approved: true, result: { ok: false, reason: 'unknown-action' } },
+        }),
+      ],
+      true,
+    );
+
+    const badges = [...document.querySelectorAll('[data-slot="nannos-tool"]')].map((b) => b.textContent ?? '');
+    expect(badges[0]).toContain('Approved');
+    expect(badges[0]).not.toContain('Denied');
+    expect(badges[1]).toContain('Failed');
+    expect(badges[1]).not.toContain('Completed');
   });
 
   it('titles a client_action part with its kind, not just the tool name', () => {
@@ -639,7 +691,7 @@ describe('a turn interrupted by an approval', () => {
   });
 
   it('says nothing about a client-action round trip the SDK answered itself', () => {
-    // `allow-edits` settles these to `output-available` without ever asking the
+    // The panel settles these to `output-available` without ever asking the
     // user, so a receipt ("Approved client_action") and a count ("1 approved")
     // both credit them with a decision they never made.
     const roundTrip = {
@@ -665,6 +717,65 @@ describe('a turn interrupted by an approval', () => {
     const rejected = { ...(approved as Record<string, unknown>), state: 'output-denied' };
     mountThread([{ ...before, parts: [ACTIVITY, rejected] } as NannosUIMessage, after]);
     expect(screen.getByText('Rejected github_get_me')).toBeTruthy();
+  });
+});
+
+/**
+ * A card the user answered by TYPING: the panel settles it "answered in chat" at
+ * once, and the server's reading of the words — which arrives with the NEXT
+ * turn — gives it its real receipt.
+ */
+describe('an approval answered by typing', () => {
+  beforeEach(() => {
+    vi.stubGlobal('ResizeObserver', FakeResizeObserver);
+  });
+
+  afterEach(cleanup);
+
+  const card: NannosUIMessage = {
+    id: 'msg-1',
+    role: 'assistant',
+    parts: [
+      {
+        type: 'dynamic-tool',
+        toolCallId: 'call-1',
+        toolName: 'github_get_me',
+        state: 'output-denied',
+        input: {},
+        approval: { id: 'call-1', approved: false },
+        callProviderMetadata: { nannos: { answeredInChat: true } },
+      } as NannosUIMessage['parts'][number],
+    ],
+  };
+  const typed: NannosUIMessage = { id: 'u-2', role: 'user', parts: [{ type: 'text', text: 'sure' }] };
+  const reading = (type: string, intent: string): NannosUIMessage => ({
+    id: 'msg-2',
+    role: 'assistant',
+    parts: [
+      {
+        type: 'data-hitl-decision',
+        id: 'd-1',
+        data: { decisions: [{ id: 'call-1', type, intent }] },
+      } as NannosUIMessage['parts'][number],
+      { type: 'text', text: 'Done.' },
+    ],
+  });
+
+  it('reads "answered in chat" until the server says how the words read', () => {
+    mountThread([card, typed]);
+    expect(screen.getByText('Answered github_get_me in chat')).toBeTruthy();
+  });
+
+  it.each([
+    ['approve', 'approve', 'Approved github_get_me'],
+    ['reject', 'reject', 'Rejected github_get_me'],
+    ['reject', 'change', 'Changes requested for github_get_me'],
+    ['reject', 'question', 'Answered github_get_me in chat'],
+    // A typed "yes" to a save that needs a click did NOT run it.
+    ['reject', 'approve', 'Answered github_get_me in chat'],
+  ])('type %s / intent %s settles to "%s"', (type, intent, receipt) => {
+    mountThread([card, typed, reading(type, intent)]);
+    expect(screen.getByText(receipt)).toBeTruthy();
   });
 });
 

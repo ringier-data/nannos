@@ -97,7 +97,9 @@ export function AgentActionFields({
 
   return (
     <>
-      <div className="grid gap-1.5">
+      {/* data-nannos-field: where the assistant points at a field whose label has no
+          control of its own, or whose label text another field's label also contains. */}
+      <div className="grid gap-1.5" data-nannos-field="sub_agent_mode">
         <Label>Sub-agent</Label>
         <Select
           value={value.sub_agent_mode}
@@ -114,7 +116,7 @@ export function AgentActionFields({
       </div>
 
       {value.sub_agent_mode === 'existing' ? (
-        <div className="grid gap-1.5">
+        <div className="grid gap-1.5" data-nannos-field="sub_agent_id">
           {/* No "None" entry: reaching this panel already means an agent runs. */}
           <SubAgentSelect
             value={value.sub_agent_id}
@@ -128,7 +130,7 @@ export function AgentActionFields({
       ) : (
         <>
           <div className="grid gap-4 sm:grid-cols-2">
-            <div className="grid gap-1.5">
+            <div className="grid gap-1.5" data-nannos-field="automated_name">
               <Label htmlFor="automated_name">Name</Label>
               <Input
                 id="automated_name"
@@ -209,7 +211,7 @@ export function AgentActionFields({
             />
           </div>
 
-          <div className="grid gap-1.5">
+          <div className="grid gap-1.5" data-nannos-field="automated_mcp_tools">
             <Label>
               MCP tools{' '}
               <span className="text-muted-foreground text-xs">
@@ -268,7 +270,7 @@ export function AgentActionFields({
                 </Label>
               </div>
               {value.automated_enable_thinking && (
-                <div className="grid gap-1.5">
+                <div className="grid gap-1.5" data-nannos-field="automated_thinking_level">
                   <Label>Thinking level</Label>
                   <Select
                     value={value.automated_thinking_level}
@@ -292,7 +294,7 @@ export function AgentActionFields({
         </>
       )}
 
-      <div className="grid gap-1.5">
+      <div className="grid gap-1.5" data-nannos-field="prompt">
         <Label htmlFor="agent_prompt">
           {instructionLabel} <span className="text-muted-foreground text-xs">(optional)</span>
         </Label>

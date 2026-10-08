@@ -26,6 +26,7 @@ from agent_common.a2a.base import LocalA2ARunnable
 from agent_common.a2a.client_runnable import A2AClientRunnable
 from agent_common.a2a.threads import local_sub_agent_thread_id
 from agent_common.a2a.models import LocalLangGraphSubAgentConfig
+from agent_common.core.client_action_tool import describe_client_objects
 from agent_common.core.hitl_resume import (
     KIND_AUTH,
     NOT_APPROVED_CLAUSE,
@@ -53,6 +54,7 @@ from .a2a_extensions import (
     ACTIVITY_LOG_EXTENSION,
     CLIENT_ACTION_EXTENSION,
     FEEDBACK_REQUEST_EXTENSION,
+    HITL_DECISION_EXTENSION,
     HUMAN_IN_THE_LOOP_EXTENSION,
     IN_TASK_AUTH_EXTENSION,
     INTERMEDIATE_OUTPUT_EXTENSION,
@@ -62,6 +64,7 @@ from .a2a_extensions import (
     new_client_action_message,
     new_client_action_request_message,
     new_feedback_request_message,
+    new_hitl_decision_message,
     new_hitl_interrupt_message,
     new_work_plan_message,
 )
@@ -70,6 +73,7 @@ from .a2a_extensions import (
 from ..handlers import StreamHandler
 from .agent import OrchestratorDeepAgent
 from .budget_guard import get_budget_guard
+from .discovery import DiscoveryReport
 from .discovery_cache import (
     cache_key,
     get_discovery_cache,
@@ -90,6 +94,26 @@ from .steering_state import (
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def _metadata_keys(metadata: Any) -> list[str] | None:
+    """A request's metadata for a log line: its keys, never the values (form content)."""
+    if metadata is None:
+        return None
+    try:
+        return sorted(str(k) for k in metadata.keys())  # noqa: SIM118 — a protobuf Struct, not only a dict
+    except AttributeError:
+        return [f"<{type(metadata).__name__}>"]
+
+# How long a PARTIAL discovery (a source could not be listed) is cached: well under the
+# default full TTL (AGENT_DISCOVERY_CACHE_TTL, 60 s), and never past it (the cache clamps).
+PARTIAL_DISCOVERY_TTL_S = 15.0
+
+# The reply to a click on a card that no longer waits for an answer.
+STALE_DECISION_MESSAGE = (
+    "That request was already answered or replaced, so this click did nothing and nothing was run. "
+    "If a newer request is waiting, answer that one."
+)
 
 # An authorization answer whose verdict this build cannot read, delivered where a
 # tool APPROVAL was the pending question. Neither yes nor no, so the call must not
@@ -160,6 +184,14 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             default now lives one step further down, in ``decisions_from_resume``,
             which rejects whenever the words cannot be read as a clear yes.
         """
+        data = OrchestratorDeepAgentExecutor._decisions_part(context)
+        if data is None:
+            logger.info("[HITL] No data part with decisions: the user's own words are the answer")
+        return data
+
+    @staticmethod
+    def _decisions_part(context: RequestContext) -> dict | None:
+        """The ``{"decisions": [...]}`` DataPart of the incoming message, if it has one."""
         from google.protobuf.json_format import MessageToDict
 
         if context.message and context.message.parts:
@@ -168,8 +200,6 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     data = MessageToDict(part.data)
                     if isinstance(data, dict) and "decisions" in data:
                         return data
-
-        logger.info("[HITL] No data part with decisions: the user's own words are the answer")
         return None
 
     @staticmethod
@@ -299,6 +329,54 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         await updater.update_status(
             TaskState.TASK_STATE_COMPLETED,
             new_text_message(foreign_interrupt_message(owner.user_name), context_id=task.context_id, task_id=task.id),
+        )
+        return True
+
+    @classmethod
+    async def _refuse_stale_decision(
+        cls, state: Any, context: RequestContext, updater: TaskUpdater, task: Any
+    ) -> bool:
+        """Answer, and report True, when a clicked decision has no pending call to answer.
+
+        A chat card keeps its buttons after the user answered it in words, or after a
+        newer card replaced it. A click on it arrives with no text: with nothing
+        pending it ran as an empty turn ("your message was empty"), and against a
+        newer card its unmatched call id silently rejected that card. The graph is
+        left untouched, so a newer pending card stays answerable.
+        """
+        extracted = cls._decisions_part(context)
+        authorization = cls._extract_authorization_decision(context)
+        if extracted is None and authorization is None:
+            return False
+        interrupts = getattr(state, "interrupts", None) or ()
+        if not interrupts and extracted is None:
+            # A sign-in answer for a REMOTE sub-agent: its auth-required ends the turn
+            # without an orchestrator interrupt, and the message's text asks to retry.
+            return False
+        if interrupts:
+            decisions = [d for d in (extracted or {}).get("decisions", []) if isinstance(d, dict)]
+            ids = {d["id"] for d in decisions if d.get("id")}
+            if not ids:
+                return False  # a blanket decision answers whatever is pending
+            pending: set[Any] = set()
+            for intr in interrupts:
+                value = getattr(intr, "value", intr)
+                if isinstance(value, dict) and "action_requests" in value:
+                    pending.update(cls._action_request_call_id(ar) for ar in value.get("action_requests") or [])
+                elif isinstance(value, dict) and "client_action_request" in value:
+                    # The browser's result to a client action (read the page, fill a form):
+                    # matched by request id, and a result still resolves without one.
+                    if any("client_action_result" in d for d in decisions):
+                        return False
+                    pending.add((value.get("client_action_request") or {}).get("id"))
+                else:
+                    return False  # an authorization prompt or another question: no id to compare
+            if ids & pending:
+                return False
+        logger.info(f"[HITL] A decision arrived for no pending call on context {task.context_id}; nothing was run")
+        await updater.update_status(
+            TaskState.TASK_STATE_COMPLETED,
+            new_text_message(STALE_DECISION_MESSAGE, context_id=task.context_id, task_id=task.id),
         )
         return True
 
@@ -519,9 +597,11 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             )
         else:
             logger.debug(f"[DISCOVERY-CACHE] miss; discovering capabilities for user_sub: {user_config.user_sub}")
+            report = DiscoveryReport()
             sub_agents = await self.agent.agent_discovery_service.register_agents(
                 agent_metadata=user_config.agent_metadata or {},
                 token=user_config.access_token.get_secret_value(),
+                report=report,
             )
             # Discover ALL tools (without whitelist)
             # The whitelist will be applied later in build_runtime_context for orchestrator binding
@@ -532,14 +612,33 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 user_token_value,
                 white_list=None,  # Don't filter here - GP agent needs access to all tools
                 token_provider=token_provider,
+                report=report,
             )
-            cache.put(dkey, (tools, sub_agents, token_provider), user_token_value)
-            logger.info(
-                "[DISCOVERY-CACHE] miss → discovered %d tools, %d sub-agents for user_sub=%s",
-                len(tools),
-                len(sub_agents),
-                user_config.user_sub,
+            # A partial result is cached only briefly: long enough that a source which
+            # keeps failing (a dead server, a dev stack without the gateway) does not
+            # cost a full discovery on every turn, short enough that one timeout does not
+            # hide tools for the whole TTL.
+            cache.put(
+                dkey,
+                (tools, sub_agents, token_provider),
+                user_token_value,
+                ttl_seconds=None if report.complete else PARTIAL_DISCOVERY_TTL_S,
             )
+            if report.complete:
+                logger.info(
+                    "[DISCOVERY-CACHE] miss → discovered %d tools, %d sub-agents for user_sub=%s",
+                    len(tools),
+                    len(sub_agents),
+                    user_config.user_sub,
+                )
+            else:
+                logger.warning(
+                    "[DISCOVERY-CACHE] miss → partial discovery (%s): %d tools for user_sub=%s, cached %ss",
+                    "; ".join(report.reasons),
+                    len(tools),
+                    user_config.user_sub,
+                    PARTIAL_DISCOVERY_TTL_S,
+                )
         logger.debug(f"Discovered {len(sub_agents)} sub-agents: {[agent['name'] for agent in sub_agents]}")
         logger.debug(f"Discovered {len(tools)} total tools (cached or fresh)")
 
@@ -753,8 +852,11 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             logger.info(f"[REGISTRY] Retrieved user from registry: database_id={user.id}, sub={user.sub}")
 
         # Extract metadata from both message-level and params-level (message takes priority)
-        logger.info(f"[EXECUTOR] Params-level metadata: {context.metadata}")
-        logger.info(f"[EXECUTOR] Message-level metadata: {context.message.metadata if context.message else None}")
+        # Keys only: the metadata carries the page's client objects with their form values.
+        logger.info(f"[EXECUTOR] Params-level metadata keys: {_metadata_keys(context.metadata)}")
+        logger.info(
+            f"[EXECUTOR] Message-level metadata keys: {_metadata_keys(context.message.metadata if context.message else None)}"
+        )
         message_metadata = context.message.metadata if context.message and context.message.metadata else {}
         params_metadata = context.metadata or {}
 
@@ -778,7 +880,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             elif isinstance(raw_client_objects, list) and raw_client_objects:
                 client_objects = raw_client_objects
         if client_objects:
-            logger.info(f"[CLIENT-OBJECTS] Manifest received: {client_objects}")
+            logger.info(f"[CLIENT-OBJECTS] Manifest received: {describe_client_objects(client_objects)}")
 
         # Embedded Nannos: the page the user is CURRENTLY on ({key, label?,
         # description?, data?}), published by the host on navigation and sent
@@ -795,7 +897,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             elif isinstance(raw_page_context, dict) and raw_page_context:
                 page_context = raw_page_context
         if page_context:
-            logger.info(f"[PAGE-CONTEXT] Current page received: {page_context}")
+            logger.info(f"[PAGE-CONTEXT] Current page received: {page_context.get('key')!r}")
 
         # Embedded Nannos (execute-only, ADR-0004): the console-backend maps the
         # embedding app-id → a scoped domain sub-agent and passes its id here. When
@@ -1121,6 +1223,8 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             current_state = await graph.aget_state(config)  # type: ignore
 
             if await self._refuse_foreign_interrupt(current_state, user.id, updater, task):
+                return
+            if await self._refuse_stale_decision(current_state, context, updater, task):
                 return
 
             # Check if the graph is currently interrupted and this might be a resume request
@@ -1502,6 +1606,16 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     task.context_id,
                     task.id,
                 ),
+            )
+            return first_chunk_sent, first_intermediate_chunk_sent  # Don't modify flags
+
+        # --- Typed answer to an approval, as the server read it → status-update with DataPart ---
+        if metadata.get("hitl_decision"):
+            if not _ext_active(HITL_DECISION_EXTENSION):
+                return first_chunk_sent, first_intermediate_chunk_sent  # Client didn't request this extension
+            await updater.update_status(
+                TaskState.TASK_STATE_WORKING,
+                new_hitl_decision_message(metadata["hitl_decision"], task.context_id, task.id),
             )
             return first_chunk_sent, first_intermediate_chunk_sent  # Don't modify flags
 

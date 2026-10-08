@@ -72,7 +72,7 @@ from agent_common.backends.attachments_store import ContextScopedAttachmentsBack
 from agent_common.backends.indexing_store import IndexingStoreBackend
 from agent_common.backends.skills_store import SkillsStoreBackend
 from agent_common.core.client_action_tool import CLIENT_ACTION_TOOL_NAME
-from agent_common.core.hitl_resume import HITL_DECISION_TYPES, decisions_from_resume
+from agent_common.core.hitl_resume import HITL_DECISION_TYPES, decisions_from_resume, resume_will_return
 from agent_common.core.model_factory import is_gemini_model
 from agent_common.core.notify_user_tool import NOTIFY_USER_TOOL_NAME
 from agent_common.core.load_skill_tool import LOAD_SKILL_TOOL_NAME
@@ -83,6 +83,7 @@ from agent_common.core.ptc_discovery import (
 )
 from agent_common.core.ptc_signatures import render_tools_namespace
 from agent_common.middleware.continue_on_truncation import ContinueOnTruncationMiddleware
+from agent_common.middleware.premature_final_response import PrematureFinalResponseMiddleware
 from agent_common.middleware.conversation_context_tools_middleware import (
     ContextGatedTool,
     ConversationContextToolsMiddleware,
@@ -106,7 +107,12 @@ from agent_common.middleware.ptc_guard import (
     wrap_tool_for_ptc,
 )
 from agent_common.middleware.storage_paths_middleware import StoragePathsInstructionMiddleware
-from agent_common.middleware.tool_status import ToolStatusMiddleware
+from agent_common.middleware.tool_status import (
+    ToolStatusMiddleware,
+    emit_tool_status,
+    ptc_running_status,
+    tool_status_suppressed,
+)
 from agent_common.models.skill import ResolvedSkill
 
 logger = logging.getLogger(__name__)
@@ -316,7 +322,7 @@ _PTC_SANDBOX_TOOLS: frozenset[str] = frozenset({"execute"})
 #     ``eval``: ``get_stream_writer()`` finds no writer, which kills
 #     ``notify_user`` and ``client_action``'s fire-and-forget kinds
 #     (navigate/highlight); and ``interrupt()`` cannot be raised cleanly, which
-#     kills the awaited round trip (``apply``/``read_current_page``) — the turn
+#     kills the awaited round trip (``apply``/``read_current_page``/``invoke``) — the turn
 #     never parks, so the browser is never asked and never answers. Since every
 #     PTC-exposed tool is also STRIPPED from the model's bound list, exposing
 #     these made them unreachable by any working path: the model could only call
@@ -1303,7 +1309,14 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         ask_round = 0
         while True:
             clear_ptc_pending(thread_id)
-            result = await self._run_eval_with_guidance(request, handler, thread_id)
+            # A run whose question has already been answered (a resume replay, or the
+            # re-run after decisions were applied) is not news to the user: it replays
+            # the snippet, refused calls included. Its "Running <tools>…" label would
+            # announce calls that may never run, so it is silenced here and the calls
+            # actually let through are announced below, once their decisions are known.
+            replay = ask_round > 0 or resume_will_return()
+            with tool_status_suppressed(replay):
+                result = await self._run_eval_with_guidance(request, handler, thread_id)
             pending = take_ptc_pending(thread_id)
             if not pending:
                 return self._with_tool_call_history(result, turn)
@@ -1336,6 +1349,12 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
                 msg = f"Number of PTC human decisions ({n}) does not match number of pending eval tool calls ({m})."
                 raise ValueError(msg)
             self._apply_ptc_decisions(turn, pending, decisions, context, turn.ask_scope, ask_round)
+            # Announced from here, not from inside ``eval``: the bridge runs tools on a
+            # fresh context with no stream writer. Skipped when the NEXT question is
+            # answered too — this round was then announced by the resume that answered it.
+            approved = [p.tool_name for p in pending if turn.decisions.get(p.call_key) == "approve"]
+            if (status := ptc_running_status(approved)) and not resume_will_return():
+                await emit_tool_status(status, self._tool_name)
             ask_round += 1
 
     @staticmethod
@@ -1829,7 +1848,13 @@ def build_common_middleware_stack(
     # Outermost: stamp gateway cost-attribution ContextVars from each model call's
     # own tags, so in-process sub-agent LLM calls are billed to the sub-agent
     # (not the orchestrator) regardless of which dispatch path invoked them.
-    middleware: list = [GatewayAttributionMiddleware(), ContinueOnTruncationMiddleware()]
+    # Then hold back a final response sent alongside tool calls (the run would end
+    # before the model read their results — see premature_final_response).
+    middleware: list = [
+        GatewayAttributionMiddleware(),
+        ContinueOnTruncationMiddleware(),
+        PrematureFinalResponseMiddleware(),
+    ]
     # One loop-detection policy for the stack. It sits near the end of the stack
     # (below) and is also handed to the code interpreter so the PTC guard applies
     # the same rule, with the same history, to the calls a program makes inside
@@ -1845,6 +1870,8 @@ def build_common_middleware_stack(
         # multi-step PTC agent gets blocked mid-task and force-stopped, ending
         # with no structured response). They remain subject to ``max_repeats``
         # (identical-args) detection, which still catches true loops.
+        # ``client_action`` is not exempt: it is counted per ``kind`` instead (see
+        # ``_history_key``), so a run of fills is capped while page reads are not.
         dispatch_tools={"task", PTC_CODE_INTERPRETER_TOOL_NAME},
     )
     if not exclude_deep_agents_middlewares:

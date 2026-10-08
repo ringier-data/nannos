@@ -152,13 +152,12 @@ class UserPreferencesMiddleware(AgentMiddleware[AgentState, GraphRuntimeContext]
     def _apply(self, request: ModelRequest, user_context: GraphRuntimeContext) -> ModelRequest:
         """Inject stable per-user prefs into the system prompt, and the volatile
         Embedded Nannos context (``<current_page>`` + ``<client_objects>``) as a
-        trailing per-call message.
+        per-call message just before the current step.
 
         Stable prefs (language/timezone/formatting/custom_prompt) belong in the
         cached system prefix. The page context and manifest reflect on-screen
-        state that is never checkpointed, so they go AFTER every persisted message
-        (see ``inject_embedded_context``) — the only placement that leaves the
-        cached history byte-stable across turns.
+        state that is never checkpointed (see ``inject_embedded_context`` for
+        where they go, and why).
         """
         addendum = self._build_preferences_addendum(user_context)
         if addendum:

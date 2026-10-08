@@ -725,7 +725,7 @@ requires-dist = [
     { name = "cel-python", specifier = ">=0.5.0" },
     { name = "croniter", specifier = ">=2.0.0" },
     { name = "cryptography", specifier = ">=42.0.0" },
-    { name = "fastapi-mcp", specifier = ">=0.4.0" },
+    { name = "fastapi-mcp", specifier = ">=0.4.0,<0.5" },
     { name = "gatana-client", specifier = "===1.1.4" },
     { name = "google-api-python-client", specifier = ">=2.100.0" },
     { name = "google-auth", specifier = ">=2.25.0" },

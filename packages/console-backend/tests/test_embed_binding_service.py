@@ -9,6 +9,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from console_backend.config import config
+
 from console_backend.models.embed_binding import EmbedBinding, EmbedBindingUpsert
 from console_backend.models.sub_agent import ActivationSource, SubAgentType
 from console_backend.models.audit import AuditAction, AuditEntityType
@@ -359,8 +361,11 @@ async def test_sync_all_isolates_failures_per_binding():
     cm.__aexit__ = AsyncMock(return_value=False)
     service._session_factory = MagicMock(return_value=cm)
     service.sync_binding = AsyncMock(side_effect=[RuntimeError("boom"), make_binding()])
+    service.ensure_console_assistant = AsyncMock(return_value=None)
 
     await service.sync_all()
+
+    service.ensure_console_assistant.assert_awaited_once()
 
     assert [c.args[1] for c in service.sync_binding.await_args_list] == [1, 2]
     db.rollback.assert_awaited_once()
@@ -764,3 +769,129 @@ async def test_bound_sub_agent_for_claims_looks_the_candidate_up():
     assert await svc.bound_sub_agent_for_claims(claims) == ("cockpit-embed", 7)
     assert await svc.sub_agent_id_for_token_claims(claims) == 7
     assert await svc.sub_agent_id_for_token_claims({"azp": "slack-client"}) is None
+
+
+# ------------------------------------------------------------- console self-binding
+
+
+def _self_binding_service(monkeypatch, *, enabled=True, bound=None):
+    monkeypatch.setattr(config, "console_assistant_enabled", enabled)
+    monkeypatch.setattr(config, "frontend_url", "https://console.example.com")
+    monkeypatch.setattr(config.oidc, "client_id", "agent-console")
+    service, sas, users, client = make_service()
+    service.sub_agent_id_for_azp = AsyncMock(return_value=bound)
+    db = make_db()
+    db.rollback = AsyncMock()
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=db)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    service._session_factory = MagicMock(return_value=cm)
+    return service, users, db
+
+
+@pytest.mark.asyncio
+async def test_console_assistant_disabled_does_nothing(monkeypatch):
+    service, _, _ = _self_binding_service(monkeypatch, enabled=False)
+    service.create_bound_sub_agent = AsyncMock()
+    assert await service.ensure_console_assistant() is None
+    service.sub_agent_id_for_azp.assert_not_awaited()
+    service.create_bound_sub_agent.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_console_assistant_existing_binding_is_left_alone(monkeypatch):
+    """Bound before — by an earlier start or by an admin — nothing is written."""
+    service, _, _ = _self_binding_service(monkeypatch, bound=7)
+    service.create_bound_sub_agent = AsyncMock()
+    assert await service.ensure_console_assistant() == 7
+    service.sub_agent_id_for_azp.assert_awaited_once()
+    assert service.sub_agent_id_for_azp.await_args.args[0] == "agent-console"
+    service.create_bound_sub_agent.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_console_assistant_binds_frontend_url_to_console_client(monkeypatch):
+    service, users, db = _self_binding_service(monkeypatch)
+    service.create_bound_sub_agent = AsyncMock(return_value=make_binding(sub_agent_id=31))
+
+    assert await service.ensure_console_assistant() == 31
+
+    users.get_user.assert_awaited_once_with(db, "system")  # the seeded system user signs it
+    args, kwargs = service.create_bound_sub_agent.await_args
+    request = args[2]
+    assert request.base_url == "https://console.example.com"
+    assert request.azps == ["agent-console"]
+    assert kwargs == {"from_config": True}
+    db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_console_assistant_fetch_failure_retries_next_pass(monkeypatch, caplog):
+    """The frontend not serving yet must not wedge the binding behind a cached negative lookup."""
+    service, _, db = _self_binding_service(monkeypatch)
+    service._azp_cache["agent-console"] = (0.0, None)
+    service.create_bound_sub_agent = AsyncMock(side_effect=EmbedBindingError("connection refused"))
+
+    with caplog.at_level("WARNING"):
+        assert await service.ensure_console_assistant() is None
+
+    db.rollback.assert_awaited_once()
+    db.commit.assert_not_awaited()
+    assert "agent-console" not in service._azp_cache
+    assert "retrying next sync pass" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_console_assistant_race_with_another_replica(monkeypatch):
+    from sqlalchemy.exc import IntegrityError
+
+    service, _, db = _self_binding_service(monkeypatch)
+    service.create_bound_sub_agent = AsyncMock(side_effect=IntegrityError("insert", {}, Exception("dup")))
+    service.sub_agent_id_for_azp = AsyncMock(side_effect=[None, 44])
+
+    assert await service.ensure_console_assistant() == 44
+    db.rollback.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_self_binding_skips_the_https_rule(monkeypatch):
+    """FRONTEND_URL is deployment config: an http:// console (a plain-http cluster ingress,
+    a local slot) still binds; admin input keeps the rule."""
+    monkeypatch.setattr(config, "environment", "dev")
+    service, sas, _, _ = make_service()
+    sas.create_managed_sub_agent = AsyncMock(return_value=21)
+    service.get_binding = AsyncMock(return_value=make_binding(sub_agent_id=21, revision=REV))
+    request = EmbedBindingUpsert(base_url="http://console.internal", azps=["agent-console"])
+
+    with pytest.raises(EmbedBindingError):
+        await service.create_bound_sub_agent(make_db(all_rows=[]), make_user(), request)
+    out = await service.create_bound_sub_agent(make_db(all_rows=[]), make_user(), request, from_config=True)
+    assert out.sub_agent_id == 21
+
+
+def test_definition_alias_only_when_it_differs(monkeypatch):
+    from console_backend.services import embed_binding_service as ebs
+
+    monkeypatch.setattr(config, "console_assistant_enabled", True)
+    monkeypatch.setattr(config, "frontend_url", "https://console.example.com")
+    monkeypatch.setattr(config, "console_assistant_definition_url", "http://localhost:8081")
+    assert ebs._console_assistant_aliases() == {"https://console.example.com": "http://localhost:8081"}
+    monkeypatch.setattr(config, "console_assistant_definition_url", None)
+    assert ebs._console_assistant_aliases() == {}
+    monkeypatch.setattr(config, "console_assistant_definition_url", "http://localhost:8081")
+    monkeypatch.setattr(config, "console_assistant_enabled", False)
+    assert ebs._console_assistant_aliases() == {}
+
+
+def test_definition_url_defaults_to_the_pods_frontend_outside_local(monkeypatch):
+    """Deployments read the console's definition from the nginx container in the same pod;
+    local stacks from FRONTEND_URL; the variable overrides both."""
+    from console_backend.config import Config
+
+    monkeypatch.delenv("CONSOLE_ASSISTANT_DEFINITION_URL", raising=False)
+    monkeypatch.setenv("ENVIRONMENT", "prod")
+    assert Config().console_assistant_definition_url == "http://localhost:8081"
+    monkeypatch.setenv("ENVIRONMENT", "local")
+    assert Config().console_assistant_definition_url is None
+    monkeypatch.setenv("CONSOLE_ASSISTANT_DEFINITION_URL", "http://frontend:9000/")
+    assert Config().console_assistant_definition_url == "http://frontend:9000"

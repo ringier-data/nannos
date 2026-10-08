@@ -32,6 +32,18 @@ export const highlightDirective = z.object({
 export const navigateDirective = z.object({
   kind: z.literal('navigate'),
   to: z.string(),
+  /** The user said to leave the page without saving the assistant's unsaved changes;
+   *  without it a navigate away from them is refused (`unsaved-changes`). */
+  discard_changes: z.boolean().optional(),
+});
+
+/** Run an action a registered object offers (`RegisterInput.actions`) — what a click
+ *  on the page would do. Never persists by contract, so no approval. */
+export const invokeDirective = z.object({
+  kind: z.literal('invoke'),
+  target: z.object({ type: z.string(), id: z.string() }),
+  action: z.string(),
+  args: z.record(z.string(), z.unknown()).optional(),
 });
 
 /** The awaited pull: the agent asks what the user currently sees. Answered from
@@ -45,6 +57,7 @@ export const clientActionDirective = z.discriminatedUnion('kind', [
   highlightDirective,
   navigateDirective,
   readCurrentPageDirective,
+  invokeDirective,
 ]);
 
 export type ClientActionDirective = z.infer<typeof clientActionDirective>;

@@ -20,6 +20,7 @@ import {
 import { Textarea } from '../../components/ui/textarea';
 import { cn } from '../../lib/utils';
 import { format, useStrings } from '../../react';
+import { SAVE_ACTION } from '../../core';
 import type { NannosStrings } from '../../i18n/keys';
 import { CLIENT_ACTION_TOOL, clientActionSummaryKey, toolPartTitle } from '../tool-title';
 import { InterruptActions, InterruptCard } from './interrupt-card';
@@ -31,7 +32,7 @@ export interface ApprovalCardProps {
   className?: string;
 }
 
-const HIDDEN_ARG_KEYS = new Set(['reason', '_risk_metadata', '_call_id', '_summary']);
+const HIDDEN_ARG_KEYS = new Set(['reason', '_risk_metadata', '_call_id', '_summary', '_requires_click']);
 
 interface RiskInfo {
   levelKey: keyof NannosStrings;
@@ -67,25 +68,33 @@ function clientActionValues(input: Record<string, unknown>): Record<string, unkn
 /** The rows to show: `client_action` renders its directive values; other tools their args. */
 function argRows(approval: PendingApproval): Array<[string, unknown]> {
   if (approval.toolName === CLIENT_ACTION_TOOL) {
+    // An action that saves is approved for its arguments (which model, which tier).
+    if (actionTarget(approval.input, 'invoke')) {
+      const raw = approval.input.args ?? (approval.input.directive as { args?: unknown } | undefined)?.args;
+      return raw && typeof raw === 'object' ? Object.entries(raw as Record<string, unknown>) : [];
+    }
     const values = clientActionValues(approval.input);
     return values ? Object.entries(values) : [];
   }
   return Object.entries(approval.input).filter(([key]) => !HIDDEN_ARG_KEYS.has(key));
 }
 
-/** The `apply` target behind a `client_action` approval, whichever shape it took:
+/** The target behind a `client_action` approval of `kind`, whichever shape it took:
  *  nested (`{ directive: { kind, target: { type, id } } }`) or the flat risk-gate
  *  args (`{ kind, target_type, target_id }`). Null for every other kind. */
-function applyTarget(input: Record<string, unknown>): { type: string; id: string } | null {
+function actionTarget(
+  input: Record<string, unknown>,
+  kind: 'apply' | 'invoke',
+): { type: string; id: string } | null {
   const directive = input.directive;
   if (typeof directive === 'object' && directive !== null) {
     const d = directive as { kind?: unknown; target?: { type?: unknown; id?: unknown } };
-    if (d.kind !== 'apply') return null;
+    if (d.kind !== kind) return null;
     return typeof d.target?.type === 'string' && typeof d.target?.id === 'string'
       ? { type: d.target.type, id: d.target.id }
       : null;
   }
-  if (input.kind !== 'apply') return null;
+  if (input.kind !== kind) return null;
   return typeof input.target_type === 'string' && typeof input.target_id === 'string'
     ? { type: input.target_type, id: input.target_id }
     : null;
@@ -194,7 +203,22 @@ function ApprovalSection({
   // straight from the handle's getState(). Unregistered target (or a throwing
   // getState mid-render) → null → the plain args table below.
   const engine = useChatEngineOptional();
-  const target = approval.toolName === CLIENT_ACTION_TOOL ? applyTarget(approval.input) : null;
+  const target = approval.toolName === CLIENT_ACTION_TOOL ? actionTarget(approval.input, 'apply') : null;
+  // An action that saves (requiresApproval) says which button it presses.
+  const invokeTarget = approval.toolName === CLIENT_ACTION_TOOL ? actionTarget(approval.input, 'invoke') : null;
+  const invokedName = invokeTarget
+    ? ((approval.input.action ?? (approval.input.directive as { action?: unknown } | undefined)?.action) as
+        | string
+        | undefined)
+    : undefined;
+  const invokedHandle = invokeTarget ? engine?.core.registry.get(invokeTarget.type, invokeTarget.id) : undefined;
+  const invokedAction = invokeTarget
+    ? (invokedName && invokedHandle?.actions?.[invokedName]?.label) || invokedName || null
+    : null;
+  // A form's Save also names the form, as the page labelled it ("Your settings"). Any
+  // other action does not: the object it hangs on can be a list or a create form
+  // whose label would mislead.
+  const saveLabel = invokedName === SAVE_ACTION ? (invokedHandle?.label ?? null) : null;
   let currentState: Record<string, unknown> | null = null;
   if (target && engine && rows.length > 0) {
     try {
@@ -213,9 +237,11 @@ function ApprovalSection({
   const summary =
     typeof approval.input._summary === 'string'
       ? approval.input._summary
-      : clientActionKey
-        ? strings[clientActionKey]
-        : null;
+      : clientActionKey === 'hitl.clientAction.invoke'
+        ? format(strings[clientActionKey], { action: invokedAction ?? '' })
+        : clientActionKey
+          ? strings[clientActionKey]
+          : null;
 
   const decide = (approved: boolean, reason?: string) => {
     setSubmitting(true);
@@ -229,9 +255,11 @@ function ApprovalSection({
       state="approval-requested"
       className={cn(divided && 'border-t')}
     >
-      <ConfirmationTitle className="flex min-w-0 items-baseline gap-1.5">
-        <span className="shrink-0 font-bold text-xs">
+      {/* Wraps: a long title (a save's form label) must not run off a narrow dock. */}
+      <ConfirmationTitle className="flex min-w-0 flex-wrap items-baseline gap-x-1.5">
+        <span className="min-w-0 font-bold text-xs [overflow-wrap:anywhere]">
           {toolPartTitle(approval.toolName, approval.input)}{summary && (`: ${summary}`)}
+          {saveLabel && ` (${saveLabel})`}
         </span>
         {rows.length === 1 && !currentState && (
           <span

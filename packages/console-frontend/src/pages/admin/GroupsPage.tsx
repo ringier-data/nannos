@@ -1,9 +1,11 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from '@tanstack/react-query';
-import { Link } from 'react-router';
+import { Link, useNavigate } from 'react-router';
 import { Search, Plus, MoreHorizontal, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
+import type { ActionOutcome } from '@nannos/embed-sdk';
 import { useAuth } from '@/contexts/AuthContext';
+import { getErrorMessage } from '@/lib/utils';
 import { useDebouncedValue } from '@/hooks/use-debounced-value';
 import { useKeyedPage } from '@/hooks/use-keyed-page';
 import { listMyGroupsApiV1GroupsGet } from '@/api/generated/sdk.gen';
@@ -45,9 +47,12 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { Pagination } from '@/components/admin/Pagination';
 import { ConfirmDialog } from '@/components/admin/ConfirmDialog';
+import { NannosForm } from '@/components/nannos/NannosForm';
+import { NannosActions } from '@/components/nannos/NannosActions';
 
 export function GroupsPage() {
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const { isAdmin, adminMode } = useAuth();
   const [search, setSearch] = useState('');
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
@@ -137,14 +142,24 @@ export function GroupsPage() {
     },
   });
 
+  // createMutation's onError toasts; this only reports the outcome to the assistant.
+  const createGroup = async (): Promise<ActionOutcome> => {
+    if (!newGroupName.trim()) return { ok: false, detail: 'Name is required' };
+    try {
+      await createMutation.mutateAsync({
+        body: {
+          name: newGroupName.trim(),
+          description: newGroupDescription.trim() || undefined,
+        },
+      });
+      return true;
+    } catch (error) {
+      return { ok: false, detail: getErrorMessage(error) };
+    }
+  };
+
   const handleCreateGroup = () => {
-    if (!newGroupName.trim()) return;
-    createMutation.mutate({
-      body: {
-        name: newGroupName.trim(),
-        description: newGroupDescription.trim() || undefined,
-      },
-    });
+    void createGroup();
   };
 
   const handleDeleteGroup = () => {
@@ -158,6 +173,31 @@ export function GroupsPage() {
 
   return (
     <div className="space-y-6 p-4">
+      {/* The create button and the rows, for the assistant: without them the agent could only ask
+          the user to click. Create opens the Group form, which takes this type:id while open. */}
+      {!createDialogOpen && (
+        <NannosActions
+          type="Group"
+          id={undefined}
+          actions={{
+            create: {
+              label: 'Create group',
+              description: 'Open the Create Group dialog with an empty, unsaved form; then fill it and submit.',
+              run: () => setCreateDialogOpen(true),
+            },
+            open: {
+              label: 'Open a group',
+              description: "Go to a listed group's page (members, default agents and jobs), by its name.",
+              params: [{ name: 'name', type: 'string', description: 'The group name as listed' }],
+              run: ({ name }) => {
+                const group = groups.find((g) => g.name === name);
+                if (!group) return { ok: false, detail: `No group named ${String(name)} is listed on this page.` };
+                navigate(isAdminView ? `/app/admin/groups/${group.id}` : `/app/groups/${group.id}`);
+              },
+            },
+          }}
+        />
+      )}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Groups</h1>
@@ -275,6 +315,12 @@ export function GroupsPage() {
       {/* Create Group Dialog - Admin only */}
       <Dialog open={createDialogOpen} onOpenChange={setCreateDialogOpen}>
         <DialogContent>
+          <NannosForm
+            type="Group"
+            id={undefined}
+            fields={{ name: [newGroupName, setNewGroupName], description: [newGroupDescription, setNewGroupDescription] }}
+            save={createGroup}
+          />
           <DialogHeader>
             <DialogTitle>Create Group</DialogTitle>
             <DialogDescription>

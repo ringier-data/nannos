@@ -14,7 +14,7 @@
  * The check runs from here in edit mode only. It is a real tool call with real side
  * effects, so it does not belong on a page whose default state is "just looking".
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type RefObject } from 'react';
 import { AlertCircle, ChevronDown } from 'lucide-react';
 
 import { Badge } from '@/components/ui/badge';
@@ -72,6 +72,13 @@ export interface WatchFieldsValue extends AgentAction, WatchChoices {
   notification_message: string;
 }
 
+/** What "Run check" reports to the assistant. */
+export type CheckOutcome = { ok: boolean; detail?: string };
+
+function clip(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max)}… [${text.length - max} more characters]` : text;
+}
+
 export function WatchFields({
   value,
   onChange,
@@ -85,6 +92,7 @@ export function WatchFields({
   onError,
   onSampleResult,
   sectionOffset = 2,
+  runCheckRef,
 }: {
   value: WatchFieldsValue;
   onChange: (patch: Partial<WatchFieldsValue>) => void;
@@ -113,6 +121,11 @@ export function WatchFields({
   onSampleResult?: (result: Record<string, unknown> | undefined) => void;
   /** Section numbers continue the caller's own numbering. */
   sectionOffset?: number;
+  /**
+   * Receives "Run check" for the assistant (the form's `run_check` action): the same call
+   * the button makes, reporting what came back — or why nothing was called.
+   */
+  runCheckRef?: RefObject<(() => Promise<CheckOutcome>) | undefined>;
 }) {
   const patch = onChange;
   const errors = fieldErrors ?? {};
@@ -253,17 +266,18 @@ export function WatchFields({
    * payload instead of a guess. The call is real; the backend answers 428 for anything it
    * cannot confirm is read-only, which surfaces here as an explicit confirmation.
    */
-  async function runCheck(acknowledgeRisk: boolean) {
+  async function runCheck(acknowledgeRisk: boolean): Promise<CheckOutcome> {
+    if (!value.check_tool) return { ok: false, detail: 'Choose the check tool first.' };
     const { args, exprs, error } = resolveArgs(value);
     if (error) {
       setCheck({ loading: false, error });
-      return;
+      return { ok: false, detail: error };
     }
     const missing = missingRequiredArgs(selectedTool, value, args);
     if (missing.size > 0) {
       setMissingArgs(missing);
       setCheck({ loading: false, error: 'Fill the required arguments first.' });
-      return;
+      return { ok: false, detail: `Required arguments are missing: ${[...missing].join(', ')}.` };
     }
     setMissingArgs(new Set());
     setRiskPrompt(null);
@@ -283,12 +297,9 @@ export function WatchFields({
         });
         if (!dyn.valid) {
           // As on the risk prompt below: nothing was called, so the last response stands.
-          setCheck((last) => ({
-            ...last,
-            loading: false,
-            error: `Dynamic arguments failed: ${dyn.error ?? 'unresolvable'}`,
-          }));
-          return;
+          const message = `Dynamic arguments failed: ${dyn.error ?? 'unresolvable'}`;
+          setCheck((last) => ({ ...last, loading: false, error: message }));
+          return { ok: false, detail: message };
         }
         callArgs = dyn.resolved ?? callArgs;
       }
@@ -305,16 +316,31 @@ export function WatchFields({
         signature: callSignature,
       });
       setShowResponse(!value.cel_expr.trim());
+      return {
+        ok: true,
+        detail:
+          `${response.is_error ? 'The tool answered with an ERROR' : 'The tool answered'} in ${response.elapsed_ms} ms` +
+          `${response.truncated ? ' (response truncated)' : ''}. The form now tests the condition against it — ` +
+          `read the page for the verdict. Response: ${clip(JSON.stringify(response.result), 4000)}`,
+      };
     } catch (e) {
       if (e instanceof McpToolRiskError) {
         // Nothing was called, so the last response still answers the same call.
         setCheck((last) => ({ ...last, loading: false }));
         setRiskPrompt(e.message);
-        return;
+        return {
+          ok: false,
+          detail:
+            `Nothing was called: ${e.message} The form now asks the user to confirm with "Run it anyway" — ` +
+            'only they can run a tool that may change data.',
+        };
       }
-      setCheck({ loading: false, error: e instanceof Error ? e.message : String(e) });
+      const message = e instanceof Error ? e.message : String(e);
+      setCheck({ loading: false, error: message });
+      return { ok: false, detail: message };
     }
   }
+  if (runCheckRef) runCheckRef.current = () => runCheck(false);
 
   if (!editing) return <WatchFieldsRead value={value} tool={selectedTool} subAgents={subAgents} sectionOffset={sectionOffset} />;
 
@@ -353,7 +379,7 @@ export function WatchFields({
               </div>
 
               {value.check_tool && (
-                <div className="grid gap-1.5">
+                <div className="grid gap-1.5" data-nannos-field="check_args">
                   <div className="flex items-center justify-between gap-2">
                     <Label>
                       Arguments
@@ -439,7 +465,7 @@ export function WatchFields({
               {/* Two halves of one condition, at least one required: the expression is
                   the deterministic gate, the judgement the semantic stage the model
                   applies to what the gate matched. */}
-              <div className="grid gap-2">
+              <div className="grid gap-2" data-nannos-field="condition_mode">
                 <ChoiceLabel>Decide with</ChoiceLabel>
                 <Segmented<ConditionMode>
                   label="Decide with"
@@ -460,8 +486,9 @@ export function WatchFields({
                 </p>
               </div>
 
+              {/* Marked for the assistant: "Cron expression" also matches this label's text. */}
               {conditionMode !== 'judge' && (
-              <div className="grid gap-1.5">
+              <div className="grid gap-1.5" data-nannos-field="cel_expr">
                 <Label htmlFor="cel_expr">
                   Expression
                   <span className="text-muted-foreground text-xs font-normal">CEL</span>
@@ -606,7 +633,7 @@ export function WatchFields({
               {/* Exclusive: a sub-agent's reply is delivered instead of the
                   notification, so showing both would leave one of them inert. */}
               <ChoiceLabel>Outcome</ChoiceLabel>
-              <div role="radiogroup" aria-label="Outcome" className="grid gap-2 sm:grid-cols-2">
+              <div role="radiogroup" aria-label="Outcome" className="grid gap-2 sm:grid-cols-2" data-nannos-field="outcome">
                 {/* Nothing is cleared on a flip: the brief and the agent's instruction are
                     separate fields, and the save sends only the chosen outcome's. */}
                 <OptionCard
@@ -624,7 +651,7 @@ export function WatchFields({
               </div>
 
               {value.outcome === 'notify' ? (
-                <div className="grid gap-2">
+                <div className="grid gap-2" data-nannos-field="message_mode">
                   <ChoiceLabel>Message</ChoiceLabel>
                   <Segmented<MessageMode>
                     label="Message"

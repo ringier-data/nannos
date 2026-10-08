@@ -6,12 +6,16 @@ import {
   TriangleAlertIcon,
 } from "lucide-react"
 import { Toaster as Sonner, type ToasterProps } from "sonner"
+import { CONSOLE_DOCK_WIDTH_VAR } from "@/components/nannos/ConsoleAssistant"
 
 const Toaster = ({ ...props }: ToasterProps) => {
   return (
     <Sonner
       theme="light"
       className="toaster group"
+      // Clear of the assistant dock while it is open (see ConsoleAssistantDock):
+      // toasts under the dock cover its composer and take the clicks meant for it.
+      offset={{ right: `calc(var(${CONSOLE_DOCK_WIDTH_VAR}, 0px) + 24px)` }}
       icons={{
         success: <CircleCheckIcon className="size-4" />,
         info: <InfoIcon className="size-4" />,

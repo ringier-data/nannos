@@ -50,7 +50,14 @@ import { useAuth } from '@/contexts/AuthContext';
 import { useSocketEvent } from '@nannos/embed-sdk/panel';
 import { getErrorMessage } from '@/lib/utils';
 
+// Keyed by the route id, like the other detail pages: a direct move between two catalogs
+// must not seed the edit dialog from the first and save it onto the second.
 export function CatalogDetailPage() {
+  const { id } = useParams<{ id: string }>();
+  return <CatalogDetail key={id} />;
+}
+
+function CatalogDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();

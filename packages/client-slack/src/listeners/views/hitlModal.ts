@@ -1,4 +1,5 @@
 import { App } from '@slack/bolt';
+import { forCalls } from '../actions/hitlButton.js';
 import { Logger } from '../../utils/logger.js';
 import { handleIncomingMessage, HandlerDependencies, NormalizedMessage } from '../events/messageHandler.js';
 import { recordDecision } from '../../utils/taskResponseHandler.js';
@@ -42,7 +43,7 @@ export function registerHitlModalHandler(app: App, makeDeps: () => HandlerDepend
       // Send reject decision with user's feedback as the message.
       // The LLM will see this as a ToolMessage(status="error") and re-propose.
       const rejectMessage = `The user requested changes to this tool call. Please revise and try again.\n\nUser feedback: ${feedback}`;
-      const decisions = { decisions: [{ type: 'reject', message: rejectMessage }] };
+      const decisions = { decisions: forCalls({ type: 'reject', message: rejectMessage }, privateMetadata.callIds) };
 
       const syntheticMessage: NormalizedMessage = {
         userId,

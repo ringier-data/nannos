@@ -38,10 +38,12 @@ from dataclasses import dataclass
 from typing import Annotated, Any
 
 from langchain.agents.middleware.types import AgentMiddleware, AgentState, PrivateStateAttr, hook_config
-from langchain_core.messages import AIMessage, ToolCall, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolCall, ToolMessage
 from langgraph.runtime import Runtime
 from langgraph.typing import ContextT
 from typing_extensions import NotRequired
+
+from agent_common.core.turn_stops import BLOCKED_LEAD, STOPPED_SIBLING_LEAD
 
 logger = logging.getLogger(__name__)
 
@@ -49,17 +51,24 @@ logger = logging.getLogger(__name__)
 #: model chooses between — every turn ends in exactly one of them, and the sub-agent
 #: pass-through variant carries byte-identical arguments every time
 #: (``{"task_state": "completed", "message": "", "include_subagent_output": true}``).
-#: ``tool_call_history`` is cumulative for the whole thread, so tracking them makes a
-#: block inevitable on any sufficiently long conversation: ~6 pass-through turns trip
-#: ``max_repeats``, ~11 turns trip ``max_tool_repeats``. Blocking the response tool is
-#: never right — there is no loop to break, only an answer to deliver.
+#: ``tool_call_history`` lives for one turn (reset in ``abefore_agent``), but a turn
+#: resumed many times still accumulates them. Blocking the response tool is never
+#: right — there is no loop to break, only an answer to deliver.
 RESPONSE_TOOLS: frozenset[str] = frozenset({"FinalResponseSchema", "SubAgentResponseSchema"})
 
 #: Result given to a call that never ran because the run was force-stopped over a
 #: *different* looping call on the same turn.
 _STOPPED_BEFORE_EXECUTION = (
-    "BLOCKED: the run was stopped because another tool call on this turn was looping. This call was not executed."
+    f"{STOPPED_SIBLING_LEAD} because another tool call on this turn was looping. This call was not executed."
 )
+
+
+def _previous_turn(messages: list[BaseMessage]) -> list[BaseMessage]:
+    """The messages of the turn before the current one (between the last two user messages)."""
+    human = [i for i, message in enumerate(messages) if isinstance(message, HumanMessage)]
+    if len(human) < 2:
+        return []
+    return messages[human[-2] + 1 : human[-1]]
 
 
 #: Marks a ``tool_call_history`` update as an incremental delta rather than a whole
@@ -175,6 +184,19 @@ class LoopDetectionState(AgentState):
         ...
     }
     """
+
+
+def _history_key(tool_call: ToolCall) -> str:
+    """The name a call's repeats are counted under.
+
+    ``client_action`` multiplexes: its ``kind`` is the real tool (fill a form, open a page,
+    read it). Counted per kind, ten fills in one turn still hit the same-tool cap, while
+    reading the page between fills does not add to it.
+    """
+    name = tool_call["name"]
+    if name == "client_action":
+        return f"{name}[{(tool_call.get('args') or {}).get('kind')}]"
+    return name
 
 
 class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
@@ -351,14 +373,14 @@ class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
         """
         if info["loop_type"] == "same_args":
             return (
-                f"BLOCKED: '{info['tool_name']}' — {info['description']}. "
+                f"{BLOCKED_LEAD}{info['tool_name']}' — {info['description']}. "
                 f"Calling this tool again with the same arguments will produce the same result. "
                 f"Do NOT retry with the same arguments. "
                 f"Either try a substantially different approach or respond to the user with what you have so far."
             )
         else:  # same_tool
             return (
-                f"BLOCKED: '{info['tool_name']}' — {info['description']}. "
+                f"{BLOCKED_LEAD}{info['tool_name']}' — {info['description']}. "
                 f"You have called this tool many times. "
                 f"Stop and respond to the user with the information you have gathered so far, "
                 f"or try a completely different tool/approach."
@@ -411,7 +433,54 @@ class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
 
         return False, 0, ""
 
-    @hook_config(can_jump_to=["end"])
+    async def abefore_agent(
+        self,
+        state: LoopDetectionState,
+        runtime: Runtime[ContextT],
+    ) -> dict[str, Any] | None:
+        """Start every user turn with a fresh history, except for the calls blocked last turn.
+
+        A loop is a run that keeps calling without converging, so the window belongs
+        to one turn. Carried across turns, a tool the agent legitimately uses every
+        turn (``client_action`` in an embedded assistant: read the page, fill, save)
+        fills the window on its own, and from then on the first call of every turn is
+        blocked and force-stopped — the conversation can never recover.
+
+        A call that WAS blocked last turn is carried over, exactly at the threshold: the
+        same call retried right away is refused once more (a force-stopped model must
+        not simply run its loop again one turn later), but the escalation starts over,
+        and every other call runs. A turn that does not retry it starts the next one
+        clean — carrying the whole history instead would re-block, re-carry and brick
+        the conversation for good.
+
+        ``before_agent`` runs once per graph invocation; resuming an interrupt (an
+        approval, a client action's result) continues the same run, so calls on either
+        side of an interrupt still count together.
+        """
+        history = state.get("tool_call_history") or {}
+        if not history:
+            return None
+        previous = _previous_turn(state.get("messages") or [])
+        blocked_ids = {
+            message.tool_call_id
+            for message in previous
+            if isinstance(message, ToolMessage)
+            and isinstance(message.content, str)
+            and message.content.startswith(BLOCKED_LEAD)
+        }
+        carried: dict[str, list[str]] = {}
+        for message in previous:
+            if not isinstance(message, AIMessage):
+                continue
+            for tool_call in message.tool_calls:
+                if tool_call.get("id") in blocked_ids and self.applies_to(tool_call["name"]):
+                    # Under the key ``aafter_model`` reads (per kind for ``client_action``).
+                    carried[_history_key(tool_call)] = [self._hash_args(tool_call.get("args", {}))] * self.max_repeats
+        if carried == history:
+            return None
+        return {"tool_call_history": carried}
+
+    @hook_config(can_jump_to=["model", "end"])
     async def aafter_model(
         self,
         state: LoopDetectionState,
@@ -471,12 +540,11 @@ class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
         blocked_calls: list[dict[str, Any]] = []
 
         for tool_call in last_ai_message.tool_calls:
-            tool_name = tool_call["name"]
-
             # Skip if doesn't match filter
             if not self._matches_tool_filter(tool_call):
                 continue
 
+            tool_name = _history_key(tool_call)
             verdict = self.evaluate(tool_name, tool_call.get("args", {}), history.get(tool_name, []))
             if verdict.blocked:
                 blocked_calls.append(
@@ -580,8 +648,21 @@ class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
             f"{[info['tool_name'] for info in blocked_calls]}"
         )
 
-        # Return updated history and error messages
-        return {
-            "tool_call_history": history,
-            "messages": error_messages,
-        }
+        update: dict[str, Any] = {"tool_call_history": history, "messages": error_messages}
+        # A block is feedback FOR THE MODEL: it must run again and react. LangChain's
+        # routing after this hook does that only by default — when every call already has
+        # a result and ``structured_response`` is in state, it ends the run instead. That
+        # key is a persisted channel, so from the second turn of a conversation on it is
+        # always set (by the previous turn's answer), and a block would end the turn with
+        # no answer at all; the runner then has nothing newer than the previous turn's
+        # response to report. Say where to go. Only when nothing else is pending: a jump
+        # skips the tool node, and an unblocked sibling call would be left dangling.
+        blocked_ids = {info["tool_call"]["id"] for info in blocked_calls}
+        still_pending = [
+            tool_call
+            for tool_call in last_ai_message.tool_calls
+            if tool_call.get("id") not in blocked_ids and tool_call.get("id") not in already_answered
+        ]
+        if not still_pending:
+            update["jump_to"] = "model"
+        return update

@@ -449,6 +449,23 @@ class Config(BaseModel):
         default_factory=lambda: os.getenv("FRONTEND_URL", "http://localhost:5173").rstrip("/")
     )
 
+    # The console's own embedded assistant: console-backend binds the sub-agent the console
+    # publishes under FRONTEND_URL/.well-known/agent-skills/ to the console's OIDC client on
+    # startup (ADR-0006, amendment 1). Off = no self-binding; the dock then runs unbound.
+    console_assistant_enabled: bool = Field(
+        default_factory=lambda: os.getenv("CONSOLE_ASSISTANT_ENABLED", "true").lower() not in ("0", "false", "no")
+    )
+    # Where that definition is read from. The console image pairs its nginx frontend
+    # (listening on 8081, console-frontend/nginx.conf) with this backend in one pod, so
+    # deployments read it from there: no DNS, load balancer or TLS, and always the
+    # frontend this backend was deployed with. Local stacks run the frontend as a separate
+    # dev server, so they read FRONTEND_URL. The binding records FRONTEND_URL either way.
+    # Set CONSOLE_ASSISTANT_DEFINITION_URL for a deployment laid out differently.
+    console_assistant_definition_url: str | None = Field(
+        default_factory=lambda: (os.getenv("CONSOLE_ASSISTANT_DEFINITION_URL") or "").rstrip("/")
+        or (None if os.getenv("ENVIRONMENT", "local").lower() == "local" else "http://localhost:8081")
+    )
+
     oidc: OidcConfig = Field(default_factory=OidcConfig)
     federation: FederationConfig = Field(default_factory=lambda: FederationConfig(idps=FederationConfig._load_idps()))
     broker: BrokerConfig = Field(default_factory=BrokerConfig)

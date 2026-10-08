@@ -16,6 +16,7 @@ from agent_common.a2a.stream_events import (
     ArtifactUpdate,
     ClientActionMeta,
     ErrorEvent,
+    HitlDecisionMeta,
     IntermediateOutputMeta,
     TaskResponseData,
     TaskUpdate,
@@ -118,6 +119,16 @@ async def test_maps_work_plan_client_action_and_activity_log():
     assert items[2].content == "Using cockpit_api…"
     # A mechanical line carries no kind — only a notify_user note does (below).
     assert "kind" not in items[2].metadata
+
+
+@pytest.mark.asyncio
+async def test_maps_a_typed_hitl_decision():
+    """The console dock runs the embedded path: a typed answer's verdict must reach it."""
+    decisions = [{"id": "call-9", "type": "reject", "intent": "reject"}]
+    runnable = _FakeRunnable(events=[TaskUpdate(event_metadata=HitlDecisionMeta(hitl_decision=decisions))])
+    items = await _collect(_agent(), runnable)
+    assert items[0].state == TaskState.TASK_STATE_WORKING
+    assert items[0].metadata == {"hitl_decision": decisions}
 
 
 @pytest.mark.asyncio

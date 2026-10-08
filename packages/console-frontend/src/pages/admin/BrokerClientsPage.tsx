@@ -10,6 +10,7 @@ import {
   updateBrokerClientApiV1AdminBrokerClientsClientPkPatchMutation,
 } from '@/api/generated/@tanstack/react-query.gen';
 import type { BrokerClient, BrokerClientUpdate } from '@/api/generated';
+import type { ActionOutcome } from '@nannos/embed-sdk';
 import { formatApiError } from '@/api/scheduler';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -36,6 +37,8 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { ConfirmDialog } from '@/components/admin/ConfirmDialog';
+import { NannosForm } from '@/components/nannos/NannosForm';
+import { NannosActions } from '@/components/nannos/NannosActions';
 
 /** One entry per line; blank lines are dropped. */
 function splitLines(value: string): string[] {
@@ -123,7 +126,9 @@ export function BrokerClientsPage() {
 
   const closeForm = () => setFormDialog({ open: false, brokerClient: null });
 
-  const handleSave = () => {
+  // The mutations' onError toasts; this only reports the outcome to the assistant.
+  const save = async (): Promise<ActionOutcome> => {
+    if (!canSave) return { ok: false, detail: 'Client ID, name and at least one redirect URI are required' };
     const body = {
       name: name.trim(),
       description: description.trim() || null,
@@ -131,11 +136,20 @@ export function BrokerClientsPage() {
       enabled,
       require_binding_secret: requireBindingSecret,
     } satisfies BrokerClientUpdate;
-    if (editing) {
-      updateMutation.mutate({ path: { client_pk: editing.id }, body });
-    } else {
-      createMutation.mutate({ body: { ...body, client_id: clientId.trim() } });
+    try {
+      if (editing) {
+        await updateMutation.mutateAsync({ path: { client_pk: editing.id }, body });
+      } else {
+        await createMutation.mutateAsync({ body: { ...body, client_id: clientId.trim() } });
+      }
+      return true;
+    } catch (error) {
+      return { ok: false, detail: formatApiError(error) };
     }
+  };
+
+  const handleSave = () => {
+    void save();
   };
 
   const canSave = (editing || clientId.trim()) && name.trim() && splitLines(redirectUris).length > 0;
@@ -145,6 +159,21 @@ export function BrokerClientsPage() {
 
   return (
     <div className="space-y-6 p-4">
+      {/* The create button, for the assistant: without it the agent could only ask the user to
+          click it. It opens the BrokerClient form, which takes this type:id while the dialog is open. */}
+      {!formDialog.open && (
+        <NannosActions
+          type="BrokerClient"
+          id={undefined}
+          actions={{
+            create: {
+              label: 'Add broker client',
+              description: 'Open the Add Broker Client dialog with an empty, unsaved form; then fill it and submit.',
+              run: () => openForm(null),
+            },
+          }}
+        />
+      )}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Broker Clients</h1>
@@ -260,6 +289,20 @@ export function BrokerClientsPage() {
       {/* Register / Edit Dialog */}
       <Dialog open={formDialog.open} onOpenChange={(open) => !open && closeForm()}>
         <DialogContent className="sm:max-w-lg">
+          <NannosForm
+            type="BrokerClient"
+            id={editing?.id}
+            fields={{
+              // The client id is fixed once registered (its input is disabled on edit).
+              ...(editing ? {} : { clientId: [clientId, setClientId] as const }),
+              name: [name, setName],
+              description: [description, setDescription],
+              redirectUris: [redirectUris, setRedirectUris],
+              enabled: [enabled, setEnabled],
+              requireBindingSecret: [requireBindingSecret, setRequireBindingSecret],
+            }}
+            save={save}
+          />
           <DialogHeader>
             <DialogTitle>{editing ? 'Edit Broker Client' : 'Register Broker Client'}</DialogTitle>
             <DialogDescription>

@@ -5,20 +5,28 @@ Shared across the orchestrator and any LOCAL sub-agent (the embedded domain
 agent). The tool does NOT touch any backend — the browser executes every
 directive against host-registered handles. Two delivery modes:
 
-- ``navigate`` / ``highlight`` — fire-and-forget: emitted over the LangGraph
+- ``highlight`` — fire-and-forget: emitted over the LangGraph
   custom stream (same mechanism as the todo/work-plan middleware); the executor
   wraps it in a `urn:nannos:a2a:client-action:1.0` status message. No result
   comes back (the user sees the effect immediately).
 
-- ``apply`` — a ROUND TRIP: the tool ``interrupt()``s with the directive in the
+- ``apply`` / ``read_current_page`` / ``navigate`` / ``invoke`` — a ROUND TRIP: the tool
+  ``interrupt()``s with the directive in the
   interrupt value; the executor emits it as ``input_required`` (same extension,
   ``{"request": ...}`` payload), the SDK executes it and auto-resumes with a
   ``client_action_result`` decision, which this tool returns to the model. The
   agent therefore KNOWS which fields landed and which were rejected, instead of
   assuming success. The directive rides the interrupt value ONLY — nothing is
   emitted before ``interrupt()``, so the resume replay of this handler cannot
-  double-execute (a write-scope ``apply`` still goes through the host's own
-  form layer and the human still submits).
+  double-execute. ``apply`` only writes into the host's form (validated, unsaved).
+  ``invoke`` runs a named action a registered object lists in the manifest (enter
+  edit mode, open a create dialog, start a check the user completes — or save: a form
+  offers its Save as the action ``save``). An action the host marked
+  ``requiresApproval`` persists something, so the risk gate asks the user, and only
+  their click runs it; any other action runs freely. The result carries the page after
+  it settled, so the model sees the form the action opened. ``navigate`` is refused while the
+  assistant has unsaved changes on an open form, unless ``discard_changes`` is set
+  — which the model may only do after the user said to discard.
 
 Register per-turn ONLY when the client sent a non-empty ``clientObjects``
 manifest with the message.
@@ -26,28 +34,113 @@ manifest with the message.
 
 from __future__ import annotations
 
+import json
 import logging
+from collections.abc import Mapping
 from typing import Annotated, Any, Literal, Optional
 
 from langchain_core.tools import InjectedToolCallId, StructuredTool
 from langgraph.config import get_stream_writer
 from langgraph.types import interrupt
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 logger = logging.getLogger(__name__)
 
 CLIENT_ACTION_TOOL_NAME = "client_action"
 
 
+def _as_json_text(value: Any) -> Any:
+    """A native JSON value (42, true, a list) sent where the schema says string, as its text:
+    the schema stays a typed string (Gemini fills that), and models that send the value
+    natively are not turned away by validation."""
+    return value if isinstance(value, str) else json.dumps(value)
+
+
+class FieldValue(BaseModel):
+    """One field an ``apply`` writes."""
+
+    field: str = Field(description="The field's name, exactly as the object's `fields` list it.")
+    value: str = Field(
+        description=(
+            'The new value as JSON: text in quotes ("de", "8001"), a number (42), true/false, null, or a '
+            'list (["a", "b"]). Unquoted text that reads as a number, true/false or null is taken as that.'
+        )
+    )
+
+    _json_text = field_validator("value", mode="before")(lambda v: _as_json_text(v))
+
+
+class ActionArg(BaseModel):
+    """One argument an ``invoke`` passes to the action."""
+
+    name: str = Field(description="The parameter's name, exactly as the action's `params` list it.")
+    value: str = Field(
+        description='The value as JSON: text in quotes ("+41791234567"), a number, true/false or null.'
+    )
+
+    _json_text = field_validator("value", mode="before")(lambda v: _as_json_text(v))
+
+
+def _json_value(value: Any) -> Any:
+    """A pair's value: its JSON when it parses, the text itself when it does not."""
+    if not isinstance(value, str):
+        return value
+    try:
+        # NaN/Infinity stay text: they parse to non-finite floats the browser cannot read.
+        return json.loads(value, parse_constant=lambda _constant: value)
+    except ValueError:
+        return value
+
+
+def pairs_to_object(pairs: Any, key: str) -> dict[str, Any] | None:
+    """``[{key, value}, …]`` as the object the browser expects; an object passes through.
+
+    The model sends ``values``/``args`` as typed pairs: an open object (``dict[str, Any]``)
+    has no named properties, and Gemini sent it empty (``{}``) on every call — the same loss
+    the risk scorer measured and fixed with the same list shape (``tool_risk_scorer``).
+    """
+    if pairs is None or isinstance(pairs, Mapping):
+        return dict(pairs) if pairs is not None else None
+    out: dict[str, Any] = {}
+    for pair in pairs if isinstance(pairs, list) else []:
+        item = pair.model_dump() if isinstance(pair, BaseModel) else pair
+        if isinstance(item, Mapping) and isinstance(item.get(key), str):
+            out[item[key]] = _json_value(item.get("value"))
+    return out
+
+
+def wire_args(args: Mapping[str, Any]) -> dict[str, Any]:
+    """A ``client_action`` call's arguments with ``values``/``args`` as objects.
+
+    For everything that reads the raw call rather than the tool: the approval card and the
+    browser, which builds the directive from it on Approve (``directiveFromToolArgs``).
+    """
+    out = dict(args)
+    if "values" in out:
+        out["values"] = pairs_to_object(out["values"], "field")
+    if "args" in out:
+        out["args"] = pairs_to_object(out["args"], "name")
+    return out
+
+
 class ClientActionInput(BaseModel):
     """Arguments for a client-action directive."""
 
-    kind: Literal["apply", "highlight", "navigate", "read_current_page"] = Field(
+    kind: Literal["apply", "highlight", "invoke", "navigate", "read_current_page"] = Field(
         description=(
             "apply: write field values into a registered on-screen object (e.g. fill a form) — "
-            "returns which fields landed vs. were rejected; "
+            "nothing is saved, the changed fields are marked for the user; returns which fields "
+            "landed vs. were rejected; "
             "highlight: draw the user's attention to a registered object/field; "
-            "navigate: ask the host app to open a path; "
+            "navigate: ask the host app to open a path (refused while you have unsaved changes on "
+            "an open form — see discard_changes); "
+            "invoke: run a named action a registered object offers — only one its manifest entry lists "
+            "under `actions` (e.g. `edit` to put a detail page in edit mode before apply, open a create "
+            "dialog that has no route, run a watch's check, save a form with its `save`). An action marked "
+            '`requires approval` (a form\'s `save`, "run now", "set as default") changes something for '
+            "real: the user approves it with a click, so use it only when they want that done, and send "
+            "it alone after the results of your fills; the result "
+            "carries the page after it ran, including any form it opened; "
             "read_current_page: ask the application for a snapshot of what the user currently "
             "sees (page state the host exposes: rows, filters, unsaved values) — use when "
             "<current_page>/<client_objects> lack the detail you need."
@@ -59,17 +152,89 @@ class ClientActionInput(BaseModel):
     target_id: Optional[str] = Field(
         default=None, description="Instance id of the target object (from the client objects manifest)."
     )
-    values: Optional[dict[str, Any]] = Field(
+    values: Optional[list[FieldValue]] = Field(
         default=None,
-        description="apply only: field values to write. Keys must match the object's fields.",
+        description=(
+            'apply only: the fields to write, one entry each, e.g. [{"field": "language", "value": "\\"de\\""}].'
+        ),
     )
     field: Optional[str] = Field(default=None, description="highlight only: specific field to highlight.")
     to: Optional[str] = Field(default=None, description="navigate only: the path/route to open.")
+    discard_changes: bool = Field(
+        default=False,
+        description=(
+            "navigate only: throw away the unsaved changes you made on an open form. Set it ONLY after "
+            "a navigate was refused for unsaved changes AND the user said to discard them."
+        ),
+    )
+    action: str | None = Field(
+        default=None, description="invoke only: the action name, exactly as the object's `actions` list it."
+    )
+    args: list[ActionArg] | None = Field(
+        default=None,
+        description="invoke only: arguments for the action, one entry per declared param.",
+    )
     confirm: bool = Field(
         default=True,
-        description="apply only: ask the user to confirm before writing (keep true unless trivially safe).",
+        description="apply only: unused, kept for older clients (an apply only fills the form, never saves).",
     )
     tool_call_id: Annotated[str, InjectedToolCallId] = Field(default="")
+
+
+def describe_directive(directive: Mapping[str, Any]) -> str:
+    """The directive for a log line: its shape, never what the user typed.
+
+    ``values`` and ``params`` are form content — a phone number, a secret's description,
+    a system prompt — so only their field names are logged. Everything else (kind, target,
+    action, field, route) says what happened without saying what was entered.
+    """
+    out: dict[str, Any] = {"kind": directive.get("kind")}
+    for key in ("target", "action", "field", "to", "discard_changes"):
+        if key in directive:
+            out[key] = directive[key]
+    for key in ("values", "params"):
+        content = directive.get(key)
+        if isinstance(content, Mapping):
+            out[f"{key}_fields"] = sorted(str(k) for k in content)
+    return str(out)
+
+
+def describe_client_objects(objects: Any) -> str:
+    """A page's client objects for a log line: ``type:id(scope)``, never their values.
+
+    Every console form registers with its values, so the raw manifest carries webhook
+    URLs, system prompts and secret descriptions.
+    """
+    if not isinstance(objects, list):
+        return f"<{type(objects).__name__}>"
+    out = []
+    for obj in objects:
+        if not isinstance(obj, Mapping):
+            out.append(f"<{type(obj).__name__}>")
+            continue
+        flags = "".join(f" {flag}" for flag in ("unsaved",) if obj.get(flag) is True)
+        out.append(f"{obj.get('type')}:{obj.get('id')}({obj.get('scope')}{flags})")
+    return f"{len(out)} object(s): {', '.join(out)}"
+
+
+def describe_result(result: Any) -> str:
+    """The result for a log line: outcome and field names, never page or form content."""
+    if not isinstance(result, Mapping):
+        return f"<{type(result).__name__}>"
+    out: dict[str, Any] = {}
+    for key in ("ok", "reason", "detail", "applied", "discarded"):
+        if key in result:
+            out[key] = result[key]
+    rejected = result.get("rejected")
+    if isinstance(rejected, list):
+        out["rejected"] = [r.get("field") if isinstance(r, Mapping) else r for r in rejected]
+    previous = result.get("previous")
+    if isinstance(previous, Mapping):
+        out["previous_fields"] = sorted(str(k) for k in previous)
+    content = result.get("content")
+    if isinstance(content, str):
+        out["content_chars"] = len(content)
+    return str(out)
 
 
 def render_client_action_result(kind: str, result: Any) -> str:
@@ -90,6 +255,28 @@ def render_client_action_result(kind: str, result: Any) -> str:
             return (
                 "The action FAILED: the target object is no longer on the user's screen "
                 "(they may have navigated away). Check <current_page>/<client_objects> and adjust."
+            )
+        if reason == "unknown-action":
+            if "no form is open" in detail:
+                # A save approved after the form closed (reload, edit mode left): the fill
+                # is gone, so "use the page's own button" would point at nothing.
+                return (
+                    f"The action FAILED: nothing was saved. {detail} Tell the user plainly; to save, "
+                    "open the form again (its `edit`), fill it and ask for approval again."
+                )
+            return (
+                "The action FAILED: the object offers no such action. Only actions listed under the "
+                "object's `actions` in <client_objects> (or the latest page snapshot) can be invoked. " + detail
+            ).strip()
+        if reason == "unsaved-changes":
+            return (
+                "NOT NAVIGATED: an open form holds unsaved changes (your fills, or edits the user "
+                "typed)"
+                + (f" ({detail})" if detail else "")
+                + ". Ask the user whether to save them first or discard them. Never discard on your "
+                "own: call navigate again with discard_changes=true only after the user said to "
+                "discard; if they want them saved, save first (invoke the form's `save` when it "
+                "offers one, otherwise they save it themselves)."
             )
         if reason == "no-result":
             return (
@@ -118,8 +305,54 @@ def render_client_action_result(kind: str, result: Any) -> str:
                 f"Fields REJECTED by the form's validation (NOT written): {rendered}. "
                 "Correct these values and apply again, or tell the user."
             )
-        lines.append("Nothing is persisted — the user still reviews and saves the form themselves.")
+        previous = result.get("previous")
+        if isinstance(previous, dict) and previous:
+            was = "; ".join(
+                f"{field} was {'empty' if value in (None, '') else json.dumps(value, ensure_ascii=False)}"
+                for field, value in previous.items()
+            )
+            lines.append(
+                f"Before this apply: {was}. To undo your fill, apply these values back (each marked field "
+                "also offers the user an Undo link). A Page `refresh` does NOT discard unsaved form values."
+            )
+        lines.append(
+            "Nothing is saved yet — the changed fields are marked for the user. If they want it "
+            "saved, invoke the object's `save` (alone, next step) when it offers one; otherwise they "
+            "save it themselves."
+        )
         return " ".join(lines)
+    if kind == "navigate":
+        content = result.get("content")
+        landed = (
+            f" The user is now on this page, with these objects open (newer than <current_page> and "
+            f"<client_objects> from the start of this turn — act on these): {content}"
+            if isinstance(content, str) and content.strip()
+            else " The application reported no details about the new page."
+        )
+        discarded = result.get("discarded")
+        lost = (
+            f" The unsaved changes on the page you left were DISCARDED ({discarded}) — tell the user they "
+            "were not saved and are gone."
+            if isinstance(discarded, str) and discarded.strip()
+            else ""
+        )
+        return "Navigation done — do not navigate there again." + lost + landed
+    if kind == "invoke":
+        detail = result.get("detail") or result.get("message") or ""
+        content = result.get("content")
+        landed = (
+            f" The page after the action (newer than <current_page> and <client_objects> from the "
+            f"start of this turn — act on these objects): {content}"
+            if isinstance(content, str) and content.strip()
+            else " The application reported no details about the page afterwards."
+        )
+        if result.get("saved") is True:
+            # An action the host marked as saving, approved by the user's click.
+            return (
+                "The application ran the action and it SAVED the change (the user approved it). It is "
+                "done: do not run it again." + (f" {detail}" if detail else "") + landed
+            )
+        return "The application ran the action — nothing was saved by it." + (f" {detail}" if detail else "") + landed
     return f"The client executed '{kind}' successfully."
 
 
@@ -127,20 +360,29 @@ async def _client_action_handler(
     kind: str,
     target_type: str | None = None,
     target_id: str | None = None,
-    values: dict[str, Any] | None = None,
+    values: list[Any] | dict[str, Any] | None = None,
     field: str | None = None,
     to: str | None = None,
     confirm: bool = True,
+    discard_changes: bool = False,
+    action: str | None = None,
+    args: list[Any] | dict[str, Any] | None = None,
     tool_call_id: str = "",
-) -> str:
+) -> str | tuple[str, dict[str, Any] | None]:
     directive: dict[str, Any] = {"kind": kind}
-    if kind in ("apply", "highlight"):
+    if kind in ("apply", "highlight", "invoke"):
         if not target_type or not target_id:
-            return "Error: apply/highlight require target_type and target_id from the client objects manifest."
+            return "Error: apply/highlight/invoke require target_type and target_id from the client objects manifest."
         directive["target"] = {"type": target_type, "id": target_id}
+    values = pairs_to_object(values, "field")
+    args = pairs_to_object(args, "name")
     if kind == "apply":
         if not values:
-            return "Error: apply requires non-empty values."
+            return (
+                "Error: apply needs `values`: one entry per field to write, e.g. "
+                '[{"field": "language", "value": "\\"de\\""}, {"field": "timezone", "value": '
+                '"\\"Europe/Zurich\\""}]. It arrived empty.'
+            )
         directive["values"] = values
         directive["confirm"] = confirm
     if kind == "highlight" and field:
@@ -149,18 +391,31 @@ async def _client_action_handler(
         if not to:
             return "Error: navigate requires 'to'."
         directive["to"] = to
+        # Only when set: the browser refuses a navigate that would drop the
+        # assistant's unsaved form changes unless this rides the directive.
+        if discard_changes:
+            directive["discard_changes"] = True
+    if kind == "invoke":
+        if not action:
+            return "Error: invoke requires 'action' — a name from the object's `actions` in the manifest."
+        directive["action"] = action
+        if args:
+            directive["args"] = args
 
-    if kind in ("apply", "read_current_page"):
+    # ``navigate`` too: the page context and open objects the model sees were taken
+    # when the turn began, so without the landed page in the result it cannot tell a
+    # navigation happened — and navigates again until loop detection stops it.
+    if kind in ("apply", "read_current_page", "navigate", "invoke"):
         # ROUND TRIP: pause the graph until the browser reports what happened.
         # The directive rides the interrupt value (NOT the custom stream): the
         # resume replays this handler from the top, and anything emitted before
         # ``interrupt()`` would fire twice. ``tool_call_id`` is injected and
         # stable across that replay — it is the id the client echoes back on
         # its ``client_action_result`` decision.
-        logger.info(f"[CLIENT-ACTION] Awaiting result for directive: {directive}")
+        logger.info(f"[CLIENT-ACTION] Awaiting result for directive: {describe_directive(directive)}")
         result = interrupt({"client_action_request": {"id": tool_call_id, "directive": directive}})
-        logger.info(f"[CLIENT-ACTION] Result received: {result}")
-        return render_client_action_result(kind, result)
+        logger.info(f"[CLIENT-ACTION] Result received: {describe_result(result)}")
+        return render_client_action_result(kind, result), client_action_artifact(result)
 
     try:
         writer = get_stream_writer()
@@ -172,23 +427,52 @@ async def _client_action_handler(
     # Custom stream events are (event_type, event_data) tuples (see the executor's
     # consumer loop and TodoStatusMiddleware for the canonical shape).
     writer(("client_action", {"directive": directive}))
-    logger.info(f"[CLIENT-ACTION] Emitted directive: {directive}")
+    logger.info(f"[CLIENT-ACTION] Emitted directive: {describe_directive(directive)}")
     return "Directive sent to the client."
+
+
+def client_action_artifact(result: Any) -> dict[str, Any] | None:
+    """The objects of the page a navigate/invoke landed on, as the ToolMessage's artifact.
+
+    The browser reports the landed page (``{"page", "objects"}``) with every navigate and
+    invoke. The model reads it as prose; the approval layer reads it here, so an action
+    marked ``requiresApproval`` on a page opened mid-turn still gets its card — the
+    per-turn object list only knows the page the turn started on.
+    """
+    content = result.get("content") if isinstance(result, dict) else None
+    if not isinstance(content, str):
+        return None
+    try:
+        objects = json.loads(content).get("objects")
+    except (ValueError, AttributeError):
+        return None
+    return {"objects": objects} if isinstance(objects, list) else None
+
+
+async def _client_action_tool(**kwargs: Any) -> tuple[str, dict[str, Any] | None]:
+    """``content_and_artifact`` shape: every early refusal is plain text, no artifact."""
+    answer = await _client_action_handler(**kwargs)
+    return answer if isinstance(answer, tuple) else (answer, None)
 
 
 def create_client_action_tool() -> StructuredTool:
     """Create the per-turn client-action tool (only when a manifest is present)."""
     return StructuredTool.from_function(
-        coroutine=_client_action_handler,
+        coroutine=_client_action_tool,
+        response_format="content_and_artifact",
         name=CLIENT_ACTION_TOOL_NAME,
         description=(
             "Act on the user's application. Use kind='apply' to fill/update a registered "
-            "on-screen form with values (listed in <client_objects>; the user reviews and "
-            "saves — nothing is persisted directly; the result tells you which fields "
-            "landed vs. were rejected), kind='highlight' to point at an object/field, "
-            "kind='navigate' to open a path, kind='read_current_page' to get a sanitized "
-            "snapshot of what the user currently sees. apply/highlight only target objects "
-            "present in the manifest."
+            "on-screen form with values (listed in <client_objects>; nothing is saved — the "
+            "changed fields are marked for the user; the result tells you which fields "
+            "landed vs. were rejected), kind='invoke' to run an action an object lists under "
+            "`actions` (enter edit mode, open a dialog, start a check, or save a form with its "
+            "`save` — an action marked `requires approval` changes something for real, so the user "
+            "approves it first; only when they want it done), "
+            "kind='highlight' to point at an "
+            "object/field, kind='navigate' to open a path, kind='read_current_page' to get a "
+            "sanitized snapshot of what the user currently sees. apply/highlight/invoke only "
+            "target objects present in the manifest."
         ),
         args_schema=ClientActionInput,
     )

@@ -104,3 +104,23 @@ async def test_rename_conversation_returns_false_when_nothing_matched():
     """Missing or someone else's — indistinguishable, and a 404 either way."""
     cs, _ = _service_with_captured_session(rowcount=0)
     assert await cs.rename_conversation("c1", "user-1", title="Q3 pacing") is False
+
+
+@pytest.mark.asyncio
+async def test_list_filters_before_the_limit():
+    """Filtered after the LIMIT, a user whose newest conversations were in the main chat
+    got an empty assistant history: the scopes belong in the WHERE clause."""
+    cs, executed = _service_with_captured_session(rowcount=0)
+    await cs.get_conversations_by_user_id("user-1", embedded_sub_agent_id="20", exclude_playground=True)
+    sql, params = executed[0]
+    where = sql[: sql.index("LIMIT")]
+    assert "metadata->>'embedded_sub_agent_id' = :embedded_sub_agent_id" in where
+    assert "sub_agent_config_hash IS NULL" in where
+    assert params["embedded_sub_agent_id"] == "20"
+
+    cs, executed = _service_with_captured_session(rowcount=0)
+    await cs.get_conversations_by_user_id("user-1", sub_agent_config_hash="abc", exclude_playground=True)
+    sql, params = executed[0]
+    assert "sub_agent_config_hash = :sub_agent_config_hash" in sql
+    assert "IS NULL" not in sql
+    assert params["sub_agent_config_hash"] == "abc"

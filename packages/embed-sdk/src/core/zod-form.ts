@@ -9,7 +9,7 @@
 // `.shape[f].safeParse`.
 
 import { z } from 'zod';
-import type { ApplyResult, FieldSpec, RegisterInput, Scope } from './types';
+import type { ApplyResult, FieldSpec, RegisterInput, Scope, ActionOutcome } from './types';
 
 /** Minimal read/write view of the host's form, by field name. Framework-free:
  *  react-hook-form → `{ get: f => form.getValues(f), set: (f,v) => form.setValue(f,v,opts), snapshot: () => form.getValues() }`. */
@@ -18,6 +18,11 @@ export interface FormAdapter {
   set: (field: string, value: unknown) => void;
   /** All current field values (for includeValues / getState). */
   snapshot: () => Record<string, unknown>;
+  /** Whether the form currently carries `field`. Omitted = every schema field.
+   *  A form that maps only what the user may edit (a permission split, a host-
+   *  locked field) answers false for the rest, so they are neither advertised
+   *  nor writable. */
+  has?: (field: string) => boolean;
 }
 
 /** Bridge for a field with no clean 1:1 form key (e.g. two ISO dates ↔ a
@@ -26,6 +31,24 @@ export interface FormAdapter {
 export interface FieldBridge {
   read: (adapter: FormAdapter) => unknown;
   write: (value: unknown, adapter: FormAdapter) => void;
+  /** Whether the bridged field is currently available (e.g. the form fields it
+   *  writes are mapped). Omitted = always. */
+  available?: (adapter: FormAdapter) => boolean;
+}
+
+/** The contract fields the form serves right now: schema fields ∪ bridge keys,
+ *  minus what the adapter (or the field's bridge) says is not there. */
+export function availableFields(
+  schema: ZodObjectLike,
+  adapter: Pick<FormAdapter, 'has'> & Partial<FormAdapter>,
+  overrides: Record<string, FieldBridge> = {},
+): string[] {
+  const all = [...new Set([...Object.keys(schema.shape), ...Object.keys(overrides)])];
+  return all.filter((field) => {
+    const bridge = overrides[field];
+    if (bridge) return bridge.available ? bridge.available(adapter as FormAdapter) : true;
+    return adapter.has ? adapter.has(field) : true;
+  });
 }
 
 /** Structural view of a Zod object — just what we call on it (its own methods),
@@ -97,6 +120,13 @@ export interface ZodFormRegistrationInput<TState> {
   adapter: FormAdapter;
   /** Bridges for fields with no 1:1 form key (keyed by schema field name). */
   overrides?: Record<string, FieldBridge>;
+  /** The form's own Save (its button's handler). Offered as the action `save`, marked
+   *  `requiresApproval`: the agent asks, the user clicks Approve, then it runs. */
+  save?: () => ActionOutcome | Promise<ActionOutcome>;
+  /** What the agent may `invoke` on this form — see RegisterInput.actions. */
+  actions?: RegisterInput['actions'];
+  /** See `RegisterInput.isDirty`. */
+  isDirty?: RegisterInput['isDirty'];
 }
 
 /**
@@ -108,12 +138,36 @@ export interface ZodFormRegistrationInput<TState> {
  *
  *   nannos.register(zodFormRegistration({ type, id, scope, schema, adapter, overrides }))
  */
+/** What a form's Save is offered as. Approval-gated: it persists the form. */
+export const SAVE_ACTION = 'save';
+
+function withSave(
+  actions: RegisterInput['actions'],
+  save: (() => ActionOutcome | Promise<ActionOutcome>) | undefined,
+): RegisterInput['actions'] {
+  if (!save) return actions;
+  return {
+    ...actions,
+    [SAVE_ACTION]: {
+      label: 'Save',
+      description:
+        "Save this form through its own Save button. Send it alone, after the results of your fills; the " +
+        'user approves it with a click.',
+      requiresApproval: true,
+      run: () => save(),
+    },
+  };
+}
+
 export function zodFormRegistration<TState = Record<string, unknown>>(
   input: ZodFormRegistrationInput<TState>,
 ): RegisterInput<TState> {
   const overrides = input.overrides ?? {};
-  // The contract = the schema's fields ∪ any bridge keys (normally a subset).
-  const fields = [...new Set([...Object.keys(input.schema.shape), ...Object.keys(overrides)])];
+  // The contract = the schema's fields ∪ any bridge keys (normally a subset),
+  // narrowed to what the form serves at registration time.
+  const fields = availableFields(input.schema, input.adapter, overrides);
+  const served = new Set(fields);
+  const fieldSpecs = (input.fieldSpecs ?? zodToFieldSpecs(input.schema)).filter((spec) => served.has(spec.name));
 
   return {
     type: input.type,
@@ -122,8 +176,18 @@ export function zodFormRegistration<TState = Record<string, unknown>>(
     label: input.label,
     schema: input.schema,
     fields,
-    fieldSpecs: input.fieldSpecs ?? zodToFieldSpecs(input.schema),
+    fieldSpecs,
     includeValues: input.includeValues,
+    ...(input.save || input.actions ? { actions: withSave(input.actions, input.save) } : {}),
+    ...(input.isDirty ? { isDirty: input.isDirty } : {}),
+    restore: (values) => {
+      for (const [field, value] of Object.entries(values as Record<string, unknown>)) {
+        if (!served.has(field)) continue;
+        const bridge = overrides[field];
+        if (bridge) bridge.write(value, input.adapter);
+        else input.adapter.set(field, value);
+      }
+    },
     getState: () => {
       // Project to the CONTRACT (declared fields + bridge reads) — never the raw
       // form snapshot. The schema is the agent-settable boundary; sending
@@ -146,6 +210,10 @@ export function zodFormRegistration<TState = Record<string, unknown>>(
       const rejected: ApplyResult['rejected'] = [];
       for (const [field, fieldSchema] of Object.entries(input.schema.shape)) {
         if (!(field in source)) continue;
+        if (!served.has(field)) {
+          rejected.push({ field, reason: 'not editable in this form' });
+          continue;
+        }
         const result = fieldSchema.safeParse(source[field]);
         if (!result.success || result.data === undefined) {
           rejected.push({ field, reason: 'failed schema validation' });
@@ -155,6 +223,12 @@ export function zodFormRegistration<TState = Record<string, unknown>>(
         if (bridge) bridge.write(result.data, input.adapter);
         else input.adapter.set(field, result.data);
         applied.push(field);
+      }
+      // A field the form does not have (the agent guessed a name, or aimed at a value the
+      // host deliberately keeps away from it, like a secret) is reported, not dropped: a
+      // silently missing field reads as "written" to the agent, which then says so.
+      for (const field of Object.keys(source)) {
+        if (!(field in input.schema.shape)) rejected.push({ field, reason: 'no such field in this form' });
       }
       return { applied, rejected };
     },

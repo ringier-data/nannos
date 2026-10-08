@@ -1,0 +1,106 @@
+import { describe, expect, it } from 'vitest';
+import { NannosCore } from './index';
+
+const core = () =>
+  new NannosCore({ backendUrl: 'http://x', agentUrl: 'http://y' }, () => ({
+    connect: () => {},
+    disconnect: () => {},
+    on: () => () => {},
+    emit: () => true,
+    get connected() {
+      return false;
+    },
+  }) as never);
+
+function form(c: NannosCore) {
+  let state: Record<string, unknown> = { name: '' };
+  return c.register({
+    type: 'Job',
+    id: 'new',
+    scope: 'create',
+    getState: () => state,
+    apply: (patch) => {
+      state = { ...state, ...patch };
+    },
+  });
+}
+
+// What the assistant's fill leaves behind: a mark with its undo.
+const mark = (c: NannosCore) =>
+  c.changes.record({ type: 'Job', id: 'new' }, { name: '' }, ['name'], async (v) => Object.keys(v));
+
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+describe('change marks across a re-registration', () => {
+  it('keep their marks when the form is disposed and registered again in one go', async () => {
+    const c = core();
+    const first = form(c);
+    mark(c);
+    expect(c.changes.pending()).toHaveLength(1);
+    // A host effect re-running: cleanup disposes, setup registers the same key again.
+    first.dispose();
+    form(c);
+    await settle();
+    expect(c.changes.pending()).toHaveLength(1);
+  });
+
+  it('go away when the form is swapped for a view of the same object', async () => {
+    // Leaving edit mode (cancel, the user's own Save) replaces the form with a view
+    // registration under the same type:id in one commit.
+    const c = core();
+    const handle = form(c);
+    mark(c);
+    handle.dispose();
+    c.register({ type: 'Job', id: 'new', scope: 'view', getState: () => ({}), apply: () => {} });
+    await settle();
+    expect(c.changes.pending()).toEqual([]);
+  });
+
+  it('go away with a form that leaves the screen', async () => {
+    const c = core();
+    const handle = form(c);
+    mark(c);
+    handle.dispose();
+    await settle();
+    expect(c.changes.pending()).toEqual([]);
+  });
+});
+
+describe('undo', () => {
+  it('reports a write that throws as a failed undo and keeps the mark', async () => {
+    const c = core();
+    const [change] = c.changes.record({ type: 'Job', id: 'new' }, { name: '' }, ['name'], async () => {
+      throw new Error('bridge write failed');
+    });
+    expect(await change.undo()).toBe(false);
+    expect(c.changes.pending()).toHaveLength(1);
+  });
+});
+
+describe('dispose', () => {
+  it("removes only its own registration, not a newer one under the same key", () => {
+    // A dialog's form disposes after its exit animation; the page has registered its
+    // create action under the same key by then.
+    const c = core();
+    const dialogForm = form(c);
+    c.register({ type: 'Job', id: 'new', scope: 'view', getState: () => ({}), apply: () => {} });
+    dialogForm.dispose();
+    expect(c.registry.get('Job', 'new')?.scope).toBe('view');
+  });
+});
+
+describe('one key, page and dialog', () => {
+  it("brings the page's view back when the dialog's form, registered over it, disposes", () => {
+    // Edit dialog closing: the form leaves `X:5`, the page's view registers `X:new`,
+    // the form's effect re-runs onto `X:new`, then the exit animation unmounts it.
+    const c = core();
+    const edit = c.register({ type: 'Job', id: '5', scope: 'update', getState: () => ({}), apply: () => {} });
+    edit.dispose();
+    c.register({ type: 'Job', id: 'new', scope: 'view', getState: () => ({}), apply: () => {} });
+    const closing = c.register({ type: 'Job', id: 'new', scope: 'create', getState: () => ({}), apply: () => {} });
+    expect(c.registry.get('Job', 'new')?.scope).toBe('create');
+    closing.dispose();
+    expect(c.registry.get('Job', 'new')?.scope).toBe('view');
+    expect(c.registry.keys()).toEqual(['Job:new']);
+  });
+});

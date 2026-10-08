@@ -6,7 +6,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, create_model, field_validator, model_validator
+from pydantic import BaseModel, Field, computed_field, create_model, field_validator, model_validator
 
 from ..services.cel_condition import CEL_SYNTAX_HINT, CelSyntaxError, validate_cel_expression
 from pydantic.fields import FieldInfo
@@ -434,6 +434,18 @@ class ScheduledJob(BaseModel):
                     "timezone": data.get("timezone"),
                 }
         return data
+
+    @computed_field(
+        description=(
+            "The console page that shows this job. After changing it from another page, tell the user "
+            "and offer to open it."
+        )
+    )
+    @property
+    def console_path(self) -> str:
+        # Handed back with every job a tool returns, so the assistant knows where a change it
+        # made with a server tool shows — it never offered to open the job otherwise.
+        return f"/app/scheduler/{self.id}"
 
 
 class AutomatedSubAgentConfig(BaseModel):

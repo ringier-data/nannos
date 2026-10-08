@@ -46,7 +46,7 @@ import {
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { SubAgentSelect } from '@/components/SubAgentSelect';
-import { WatchFields, type WatchFieldsValue } from '@/components/WatchFields';
+import { WatchFields, type CheckOutcome, type WatchFieldsValue } from '@/components/WatchFields';
 import { AiComposer, HintTip } from '@/components/formChrome';
 import { LastCheckPanel } from '@/components/LastCheckPanel';
 import { argsView, resolveArgs } from '@/lib/watchArgs';
@@ -90,6 +90,10 @@ import { DetailSkeleton } from '@/components/skeletons';
 import { io } from 'socket.io-client';
 import { toast } from 'sonner';
 import { DeliveryChannelOptions, DeliveryReachabilityNote } from '@/components/scheduler/DeliveryChannelOptions';
+import { NannosForm } from '@/components/nannos/NannosForm';
+import { NannosActions } from '@/components/nannos/NannosActions';
+import { AssistantChangesBar } from '@/components/nannos/AssistantChangesBar';
+import type { ObjectAction, StateField, ActionOutcome } from '@nannos/embed-sdk';
 
 interface SchedulerNotification {
   job_id: number;
@@ -637,12 +641,17 @@ function EditForm({
   editing,
   setEditing,
   actionsSlot,
+  onRunNow,
+  isRunningNow,
 }: {
   job: ScheduledJob;
   editing: boolean;
   setEditing: (editing: boolean) => void;
   /** The header's action area; the form's buttons render there, not at the form's top. */
   actionsSlot: HTMLElement | null;
+  /** The header's "Run now", offered to the assistant too (with the user's approval). */
+  onRunNow: () => void;
+  isRunningNow: boolean;
 }) {
   const qc = useQueryClient();
 
@@ -680,6 +689,7 @@ function EditForm({
   const [aiSample, setAiSample] = useState<Record<string, unknown> | undefined>();
   /** The form as it is now, for a handler that resumes after an await. */
   const watchRef = useRef(watch);
+  const runCheckRef = useRef<(() => Promise<CheckOutcome>) | undefined>(undefined);
   useEffect(() => {
     watchRef.current = watch;
   }, [watch]);
@@ -858,10 +868,15 @@ function EditForm({
   // Holds the built body so the answer costs one click rather than a re-submit.
   const [pendingSave, setPendingSave] = useState<Record<string, unknown> | null>(null);
 
-  function handleSave() {
+  // Also the assistant's `submit`: resolves only once the save is stored, and says why
+  // when it is not (the same message the form shows).
+  async function handleSave(): Promise<ActionOutcome> {
+    // What the disabled Save button refuses; the assistant can still call this.
+    if (!dirty) return { ok: false, detail: 'No changes to save.' };
+    if (mutation.isPending) return { ok: false, detail: 'A save is already in progress.' };
     if (job.schedule_kind === 'cron' && cronExpr.trim() && !describeCron(cronExpr).ok) {
       setError('Cron expression is invalid');
-      return;
+      return { ok: false, detail: 'Cron expression is invalid' };
     }
 
     // Arguments are resolved the same way the fields read them, so a JSON editor left
@@ -875,14 +890,15 @@ function EditForm({
       const { error: argsError } = resolveArgs(watch);
       if (argsError) {
         setError(argsError);
-        return;
+        return { ok: false, detail: argsError };
       }
       // Both halves are sent as explicit nulls, so emptying both would ask the backend
       // for a watch with nothing to decide with. It refuses; say so here, against the
       // fields the user is looking at.
       if (!chosen.cel_expr && !chosen.llm_condition) {
-        setError('Write an expression, a condition for the model to judge, or both.');
-        return;
+        const detail = 'Write an expression, a condition for the model to judge, or both.';
+        setError(detail);
+        return { ok: false, detail };
       }
       // The same standard the create dialog holds an agent outcome to. Without it,
       // outcome "agent" with nothing selected saved silently as notify-only — the
@@ -892,7 +908,7 @@ function EditForm({
         const agentError = agentActionError(watch);
         if (agentError) {
           setError(agentError);
-          return;
+          return { ok: false, detail: agentError };
         }
       }
     }
@@ -973,16 +989,24 @@ function EditForm({
     const releasesHold =
       (job.pause_code === 'unreachable' || job.pause_code === 'undelivered') &&
       deliveryChannel !== String(job.delivery_channel_id ?? '');
-    if (releasesHold) {
-      mutation.mutate({ body, resume: true });
-      return;
-    }
-    if (!job.enabled) {
+    // A paused job's save waits on the user's answer in the dialog: nothing is stored yet.
+    if (!releasesHold && !job.enabled) {
       setPendingSave(body);
-      return;
+      return {
+        ok: false,
+        detail:
+          'Not saved yet: the job is paused, so the user must choose "Save, keep paused" or "Save and resume" in the dialog that opened.',
+      };
     }
 
-    mutation.mutate({ body, resume: false });
+    // onSuccess/onError still run (closing the editor, showing the error); the rejection
+    // is caught here only to report it.
+    try {
+      await mutation.mutateAsync({ body, resume: releasesHold });
+      return true;
+    } catch (e) {
+      return { ok: false, detail: e instanceof Error ? e.message : String(e) };
+    }
   }
 
   // Who each part of the page belongs to, stated once per section. Only on a job
@@ -1023,6 +1047,81 @@ function EditForm({
           ? `You run on your own schedule; the job's default is ${defaultScheduleLabel(job)}.`
           : `This is your own schedule. The job's default is ${defaultScheduleLabel(job)}.`;
 
+  // ── What the assistant may fill in ───────────────────────────────────────
+  // The same split as the fieldsets below: the definition for a writer, the schedule
+  // when the trigger is the viewer's to move, the delivery channel for anyone editing.
+  // Every write goes through touch(), or Save would stay disabled on "No changes yet".
+  const assisted = <V,>(value: V, set: (next: V) => void): StateField<V> => [
+    value,
+    (next) => {
+      set(next);
+      touch();
+    },
+  ];
+  const watchField = <K extends keyof WatchFieldsValue>(key: K): StateField<WatchFieldsValue[K]> =>
+    assisted(watch[key], (next) => setWatch((w) => ({ ...w, [key]: next })));
+  const nannosFields: Record<string, StateField> = {
+    delivery_channel: assisted(deliveryChannel, setDeliveryChannel),
+  };
+  if (canWrite) {
+    Object.assign(nannosFields, {
+      name: assisted(name, setName),
+      max_failures: assisted(maxFailures, setMaxFailures),
+      voice_call: assisted(voiceCall, setVoiceCall),
+    });
+    if (job.job_type === 'task') {
+      Object.assign(nannosFields, {
+        sub_agent_id: assisted(subAgentId, setSubAgentId),
+        prompt: assisted(taskPrompt, setTaskPrompt),
+      });
+    } else {
+      // check_args is bridged onto the three argument copies plus the editor mode
+      // (see objects/scheduler.ts), so all four are handed over.
+      for (const key of [
+        'check_tool',
+        'check_args',
+        'check_args_text',
+        'check_args_exprs',
+        'args_mode',
+        'condition_mode',
+        'cel_expr',
+        'llm_condition',
+        'destroy_after_trigger',
+        'outcome',
+        'message_mode',
+        'notification_brief',
+        'notification_message',
+        'sub_agent_mode',
+        'sub_agent_id',
+        'automated_name',
+        'automated_description',
+        'automated_system_prompt',
+        'automated_model',
+        'automated_mcp_tools',
+        'automated_enable_thinking',
+        'automated_thinking_level',
+        'prompt',
+      ] as const) {
+        nannosFields[key] = watchField(key);
+      }
+    }
+  }
+  if (canEditTrigger) {
+    if (job.schedule_kind === 'cron') nannosFields.cron_expr = assisted(cronExpr, setCronExpr);
+    if (job.schedule_kind === 'interval')
+      nannosFields.interval_seconds = assisted(intervalSeconds, setIntervalSeconds);
+    if (job.schedule_kind === 'once') nannosFields.run_at = assisted(runAt, setRunAt);
+  }
+
+  // "Run check" for the assistant: the watch section's own call (see WatchFields).
+  const runCheckAction: ObjectAction = {
+    label: 'Run check',
+    description:
+      "Call the check tool once with the form's arguments and show its response, so the condition is " +
+      'tested against a real payload. Read-only tools only; for others the user must confirm.',
+    run: () => runCheckRef.current?.() ?? { ok: false, detail: 'The check section is not on screen.' },
+  };
+
   const controls = editing ? (
     <>
       <Button
@@ -1037,10 +1136,12 @@ function EditForm({
         <Undo2 className="mr-1.5 h-4 w-4" />
         Discard
       </Button>
-      <Button size="sm" onClick={handleSave} disabled={!dirty || mutation.isPending}>
+      <Button size="sm" onClick={() => void handleSave()} disabled={!dirty || mutation.isPending}>
         <Save className="mr-1.5 h-4 w-4" />
         {mutation.isPending ? 'Saving…' : dirty ? 'Save changes' : 'No changes yet'}
       </Button>
+      {/* What the assistant changed, by the Save that would store it — the fields can be off screen. */}
+      <AssistantChangesBar type="ExistingScheduledJob" id={job.id} className="basis-full" />
       {/* Here and not by the fields: Save is pressed from the header, wherever the
           page is scrolled, so the reason it refused has to be where the click was. */}
       {error && <p className="text-destructive basis-full text-right text-sm">{error}</p>}
@@ -1055,6 +1156,41 @@ function EditForm({
   return (
     <>
       {actionsSlot && createPortal(controls, actionsSlot)}
+      {editing ? (
+        <NannosForm
+          type="ExistingScheduledJob"
+          id={job.id}
+          fields={nannosFields}
+          dirty={dirty}
+          save={handleSave}
+          actions={job.job_type === 'watch' && canWrite ? { run_check: runCheckAction } : undefined}
+        />
+      ) : (
+        <NannosActions
+          type="ExistingScheduledJob"
+          id={job.id}
+          actions={{
+            edit: {
+              label: 'Edit configuration',
+              description: 'Switch the job page to edit mode, so its fields can be filled.',
+              run: () => setEditing(true),
+            },
+            // A real run — the agent, the condition, the delivery — so the user approves it.
+            run_now: {
+              label: 'Run now',
+              description:
+                'Trigger one run of the saved job right now, exactly as the schedule would (it delivers its ' +
+                'notification). The result shows in the Activity section when it finishes.',
+              requiresApproval: true,
+              run: () => {
+                if (isRunningNow) return { ok: false, detail: 'A run started from this page is still in progress.' };
+                onRunNow();
+                return { ok: true, detail: 'The run started; its result appears on the page when it finishes.' };
+              },
+            },
+          }}
+        />
+      )}
 
       <fieldset disabled={!editing} className="m-0 grid min-w-0 gap-6 border-0 p-0">
         {/* ── What the job does: the definition ─────────────────────────────── */}
@@ -1090,7 +1226,7 @@ function EditForm({
                 the same shape — a reader may change nothing on the definition at all. */}
             <fieldset disabled={!canWrite} className="m-0 grid min-w-0 gap-4 border-0 p-0">
               <div className="grid gap-4 sm:grid-cols-[1fr_12rem]">
-                <div className="grid gap-1.5">
+                <div className="grid gap-1.5" data-nannos-field="name">
                   <Label>Name</Label>
                   <Input
                     value={name}
@@ -1100,7 +1236,7 @@ function EditForm({
                     }}
                   />
                 </div>
-                <div className="grid gap-1.5">
+                <div className="grid gap-1.5" data-nannos-field="max_failures">
                   <Label>
                     Max failures
                     <HintTip>The job pauses itself after this many failed runs in a row.</HintTip>
@@ -1121,7 +1257,7 @@ function EditForm({
               {/* Sub-agent picker (task jobs) */}
               {job.job_type === 'task' && (
                 <>
-                  <div className="grid gap-1.5">
+                  <div className="grid gap-1.5" data-nannos-field="sub_agent_id">
                     <Label>Sub-agent</Label>
                     <SubAgentSelect
                       value={subAgentId}
@@ -1140,7 +1276,7 @@ function EditForm({
                   </div>
 
                   {/* Task instruction - always shown for task jobs */}
-                  <div className="grid gap-1.5">
+                  <div className="grid gap-1.5" data-nannos-field="prompt">
                     <Label>
                       Task instruction <span className="text-muted-foreground text-xs">(optional)</span>
                     </Label>
@@ -1203,6 +1339,7 @@ function EditForm({
                     onSampleResult={setAiSample}
                     onError={setError}
                     sectionOffset={1}
+                    runCheckRef={runCheckRef}
                   />
                 </>
               )}
@@ -1293,7 +1430,7 @@ function EditForm({
               )}
 
               {job.schedule_kind === 'interval' && (
-                <div className="grid gap-1.5">
+                <div className="grid gap-1.5" data-nannos-field="interval_seconds">
                   <Label>Interval (seconds)</Label>
                   <Input
                     type="number"
@@ -1308,7 +1445,7 @@ function EditForm({
               )}
 
               {job.schedule_kind === 'once' && (
-                <div className="grid gap-1.5">
+                <div className="grid gap-1.5" data-nannos-field="run_at">
                   <Label>Run at</Label>
                   <Input
                     type="datetime-local"
@@ -1348,7 +1485,7 @@ function EditForm({
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <div className="grid gap-1.5">
+            <div className="grid gap-1.5" data-nannos-field="delivery_channel">
               <Label>Delivery channel</Label>
               {/* "_none" is a sentinel: a SelectItem cannot carry an empty value, so the
                   absence of a channel needs a value of its own to be selectable at all. */}
@@ -1673,7 +1810,14 @@ function RunHistoryTable({ runs, filtered }: { runs: ScheduledJobRun[]; filtered
 
 const RUNS_PAGE_SIZE = 50;
 
+// Keyed by the route id, like the sub-agent and group pages: going from one job to
+// another must not carry the first job's form into the second, where Save writes it.
 export function SchedulerJobDetailPage() {
+  const { id } = useParams<{ id: string }>();
+  return <SchedulerJobDetail key={id} />;
+}
+
+function SchedulerJobDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const qc = useQueryClient();
@@ -1898,6 +2042,8 @@ export function SchedulerJobDetailPage() {
             editing={editing}
             setEditing={setEditing}
             actionsSlot={actionsSlot}
+            onRunNow={handleRunNow}
+            isRunningNow={runNowLoading}
           />
 
           {/* What the job has done, as opposed to what it is: the bookkeeping, the last

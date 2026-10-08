@@ -25,6 +25,9 @@ import { Separator } from '@/components/ui/separator';
 import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
+import { NannosForm } from '@/components/nannos/NannosForm';
+import type { ActionOutcome } from '@nannos/embed-sdk';
+import { getErrorMessage } from '@/lib/utils';
 
 /** "personal" or a group ID string */
 type ScopeSelection = string;
@@ -143,12 +146,22 @@ export function PlaybooksPage() {
     onError: () => toast.error('Failed to save playbook'),
   });
 
+  const savePlaybook = async (): Promise<ActionOutcome> => {
+    try {
+      await updatePlaybookMutation.mutateAsync({
+        path: { agent_name: selectedAgent, scope: apiScope },
+        query: { group_id: groupIdParam },
+        body: { content: displayContent },
+      });
+      return true;
+    } catch (err) {
+      // onError has already toasted.
+      return { ok: false, detail: getErrorMessage(err) };
+    }
+  };
+
   const handleSavePlaybook = () => {
-    updatePlaybookMutation.mutate({
-      path: { agent_name: selectedAgent, scope: apiScope },
-      query: { group_id: groupIdParam },
-      body: { content: displayContent },
-    });
+    void savePlaybook();
   };
 
   const scopeLabel = isPersonalScope ? 'Personal' : selectedGroupName ?? 'Group';
@@ -232,12 +245,19 @@ export function PlaybooksPage() {
             </Badge>
           </CardHeader>
           <CardContent className="flex flex-col gap-3">
+            <NannosForm
+              type="Playbook"
+              id={`${selectedAgent}/${selectedScope}`}
+              fields={{ content: [displayContent, setEditedContent] }}
+              save={savePlaybook}
+            />
             <p className="text-xs text-muted-foreground">
               {isPersonalScope
                 ? 'Your personal instructions. These override group playbooks when they conflict.'
                 : `Applies to all members of ${selectedGroupName ?? 'this group'}. Requires write role.`}
             </p>
             <Textarea
+              data-nannos-field="content"
               value={displayContent}
               onChange={(e) => setEditedContent(e.target.value)}
               placeholder={

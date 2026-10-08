@@ -44,6 +44,7 @@ from agent_common.core.step_budget import recursion_limit_for
 from agent_common.core.tool_risk_scorer import score_tool_risk
 from agent_common.middleware.conditional_hitl import ConditionalHumanInTheLoopMiddleware
 from agent_common.middleware.continue_on_truncation import ContinueOnTruncationMiddleware
+from agent_common.middleware.premature_final_response import PrematureFinalResponseMiddleware
 from agent_common.middleware.conversation_context_tools_middleware import ConversationContextToolsMiddleware
 from agent_common.middleware.prompt_caching import LiteLLMPromptCachingMiddleware
 from agent_common.middleware.ptc_guard import PTC_CODE_INTERPRETER_TOOL_NAME
@@ -212,7 +213,8 @@ class GraphFactory:
             # from the per-tool-name ``max_tool_repeats`` cap (otherwise a normal
             # multi-step PTC agent gets blocked mid-task and force-stopped). They
             # remain subject to ``max_repeats`` (identical-args) detection, which
-            # still catches true loops.
+            # still catches true loops. ``client_action`` is counted per ``kind``
+            # instead of exempt (see ``_history_key`` in loop detection).
             dispatch_tools={"task", PTC_CODE_INTERPRETER_TOOL_NAME},
         )
         self._retry_middleware = ToolRetryMiddleware(
@@ -761,6 +763,9 @@ class GraphFactory:
             # ordering below. Must live here too — the orchestrator's own graph does not
             # go through build_common_middleware_stack (which only reaches sub-agents).
             ContinueOnTruncationMiddleware(),
+            # A final response sent together with tool calls is held back until the
+            # model has read their results (otherwise the run ends first).
+            PrematureFinalResponseMiddleware(),
             context_gate_middleware,
             dynamic_tool_middleware,
             storage_paths_middleware,

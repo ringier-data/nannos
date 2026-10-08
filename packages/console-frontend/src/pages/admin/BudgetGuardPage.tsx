@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Loader2, Lock, AlertTriangle, ShieldCheck } from 'lucide-react';
 import { toast } from 'sonner';
+import type { ActionOutcome } from '@nannos/embed-sdk';
 
 import {
   getBudgetSettings,
@@ -15,6 +16,7 @@ import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { Progress } from '@/components/ui/progress';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { NannosForm } from '@/components/nannos/NannosForm';
 
 // The openapi client rejects with the parsed error body (e.g. {detail: "..."}), so
 // String(e) yields "[object Object]". Pull out a human-readable message instead.
@@ -71,11 +73,12 @@ export function BudgetGuardPage() {
     onError: (e) => toast.error(errMsg(e)),
   });
 
-  const handleSave = () => {
+  // The mutation's onError toasts; this only reports the outcome to the assistant.
+  const save = async (): Promise<ActionOutcome> => {
     const limitNum = Number(limit);
     if (!Number.isFinite(limitNum) || limitNum <= 0) {
       toast.error('Monthly limit must be a positive number');
-      return;
+      return { ok: false, detail: 'Monthly limit must be a positive number' };
     }
     // Accept "80, 90, 95" (percentages) and store as fractions in (0, 1].
     const parsed = thresholds
@@ -85,13 +88,22 @@ export function BudgetGuardPage() {
       .map((s) => Number(s) / 100);
     if (parsed.some((t) => !Number.isFinite(t) || t <= 0 || t > 1)) {
       toast.error('Warning thresholds must be percentages between 1 and 100');
-      return;
+      return { ok: false, detail: 'Warning thresholds must be percentages between 1 and 100' };
     }
-    mutation.mutate({
-      enabled,
-      monthly_limit_usd: limitNum,
-      warning_thresholds: parsed,
-    });
+    try {
+      await mutation.mutateAsync({
+        enabled,
+        monthly_limit_usd: limitNum,
+        warning_thresholds: parsed,
+      });
+      return true;
+    } catch (e) {
+      return { ok: false, detail: errMsg(e) };
+    }
+  };
+
+  const handleSave = () => {
+    void save();
   };
 
   const status = statusQuery.data;
@@ -163,6 +175,15 @@ export function BudgetGuardPage() {
           <CardDescription>Changes apply within one poll interval (~5 min).</CardDescription>
         </CardHeader>
         <CardContent className="space-y-6">
+          {/* Only once the fetched settings have seeded the fields — the seed would overwrite earlier writes. */}
+          {settingsQuery.data && (
+            <NannosForm
+              type="BudgetGuard"
+              id="settings"
+              fields={{ enabled: [enabled, setEnabled], limit: [limit, setLimit], thresholds: [thresholds, setThresholds] }}
+              save={save}
+            />
+          )}
           <div className="flex items-center justify-between">
             <div>
               <Label htmlFor="budget-enabled">Enforcement enabled</Label>

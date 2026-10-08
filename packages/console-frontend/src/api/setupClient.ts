@@ -36,3 +36,22 @@ client.interceptors.request.use((request) => {
 });
 
 export { client };
+
+/**
+ * Keep the HTTP status on a thrown error. The generated client throws the response
+ * body (`{detail}`), so nothing could tell a 404 from a dropped request: a missing
+ * sub-agent was retried with backoff before its "not found" showed. Non-enumerable,
+ * so the error's visible shape is unchanged.
+ */
+client.interceptors.error.use((error, response) => {
+  if (response && error && typeof error === 'object' && !('status' in error)) {
+    Object.defineProperty(error, 'status', { value: response.status, enumerable: false });
+  }
+  return error;
+});
+
+/** The HTTP status a client call failed with, if it got a response. */
+export function httpStatusOf(error: unknown): number | undefined {
+  const status = (error as { status?: unknown } | null)?.status;
+  return typeof status === 'number' ? status : undefined;
+}

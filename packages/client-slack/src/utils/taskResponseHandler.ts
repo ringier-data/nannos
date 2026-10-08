@@ -396,9 +396,11 @@ export async function finalizeStreamedTask(params: {
   const fileLinks = parts.filesWithUri.map((f) => `• <${f.uri}|${f.name || 'file'}>`);
   const trailingMarkdown = fileLinks.length > 0 ? `\n\n*Attached files:*\n${fileLinks.join('\n')}` : undefined;
 
-  // Settle the (collapsed) plan disclosure to a finished label on success —
-  // otherwise it stays "Working" after completion.
-  const planTitle = isTerminatedState(task.status.state) ? 'Thinking' : undefined;
+  // Settle the (collapsed) plan disclosure to a finished label — otherwise it stays
+  // "Working". That includes a turn that ends asking the user something
+  // (input-required): the turn is over. An approval or sign-in card never gets here
+  // (it pauses the stream with its own label instead).
+  const planTitle = 'Thinking';
   await streamer.finish({ trailingMarkdown, planTitle });
 
   // File (byte) artifacts upload as separate Slack files, as before.
@@ -542,6 +544,67 @@ export async function recordDecision(
   await replaceInterruptWithDecision(slackClient, channelId, approvalMessageTs, title, detail);
 }
 
+/** One call's typed answer, as the server read it (hitl-decision extension). */
+export interface TypedDecision {
+  id?: string;
+  type?: string;
+  intent?: string;
+}
+
+/** The card title for a call answered in words rather than with a button. */
+export function typedDecisionTitle(decision: TypedDecision): string {
+  if (decision.type === 'approve') return 'Approved in your reply';
+  if (decision.intent === 'reject') return 'Rejected in your reply';
+  if (decision.intent === 'change') return 'Changes requested in your reply';
+  return 'Not run — your reply was not an answer to this request';
+}
+
+/**
+ * Settle the approval cards a TYPED answer just decided, so their buttons stop
+ * being clickable. A click strips its own card; words reach the server without
+ * touching it, and the card stayed live — a later click on it answered a request
+ * that no longer existed. Cards are found in the thread by the call ids their
+ * buttons carry. Best-effort: a card it cannot find or update is left as it is,
+ * and the server refuses a click on it anyway.
+ */
+export async function settleTypedDecisions(
+  slackClient: WebClient,
+  channelId: string,
+  threadTs: string,
+  decisions: TypedDecision[]
+): Promise<void> {
+  const byId = new Map(decisions.filter((d) => d?.id).map((d) => [d.id as string, d]));
+  if (byId.size === 0) return;
+  try {
+    const replies = await slackClient.conversations.replies({ channel: channelId, ts: threadTs, limit: 200 });
+    for (const message of replies.messages || []) {
+      const callIds = approvalCardCallIds(message.blocks as any[] | undefined);
+      const decided = callIds.map((id) => byId.get(id)).filter((d): d is TypedDecision => !!d);
+      if (decided.length === 0 || !message.ts) continue;
+      await replaceInterruptWithDecision(slackClient, channelId, message.ts, typedDecisionTitle(decided[0]));
+    }
+  } catch (err) {
+    logger.debug({ err }, `could not settle approval cards answered in words`);
+  }
+}
+
+/** The call ids an approval card's buttons answer, or [] for any other message. */
+export function approvalCardCallIds(blocks: any[] | undefined): string[] {
+  for (const block of blocks || []) {
+    if (block?.type !== 'actions') continue;
+    for (const element of block.elements || []) {
+      if (!String(element?.action_id || '').startsWith('hitl_') || !element.value) continue;
+      try {
+        const payload = JSON.parse(Buffer.from(element.value, 'base64').toString());
+        if (Array.isArray(payload?.callIds)) return payload.callIds.filter((id: unknown) => typeof id === 'string');
+      } catch {
+        // not one of our payloads
+      }
+    }
+  }
+  return [];
+}
+
 /**
  * Handle error case - update reactions and post error message
  */
@@ -607,8 +670,10 @@ export function buildHitlInterruptWidget(data: HitlInterruptWidgetData): any[] {
   const contentKey = CONTENT_KEYS.find((k) => k in toolArgs);
   const proposedContent = contentKey ? String(toolArgs[contentKey] || '') : '';
   const metaEntries = Object.entries(toolArgs).filter(
-    ([k]) => !CONTENT_KEYS.includes(k) && !HIDDEN_KEYS.includes(k)
+    ([k]) => !CONTENT_KEYS.includes(k) && !HIDDEN_KEYS.includes(k) && !isInternalArg(k)
   );
+  // The server's one-line plain-language summary of the call, shown as text.
+  const callSummary = typeof toolArgs._summary === 'string' ? toolArgs._summary : '';
 
   // Extract risk metadata for bypass buttons
   const riskMeta = toolArgs._risk_metadata as { source?: string; score?: number; threshold?: number; matched_pattern?: string | null } | undefined;
@@ -619,7 +684,7 @@ export function buildHitlInterruptWidget(data: HitlInterruptWidgetData): any[] {
     .map(([, v]) => String(v))
     .join(' ')
     .substring(0, 200);
-  const decisionSummary = `${toolLabel}${argSummary ? ` ${argSummary}` : ''}`;
+  const decisionSummary = callSummary || `${toolLabel}${argSummary ? ` ${argSummary}` : ''}`;
 
   // Button payload includes routing info + matched pattern for bypass
   const payload = {
@@ -630,6 +695,9 @@ export function buildHitlInterruptWidget(data: HitlInterruptWidgetData): any[] {
     threadTs: data.threadTs,
     allowedDecisions,
     summary: decisionSummary,
+    // The calls this card answers: a click names them, so a click on a card that
+    // was already answered (in words) or replaced cannot answer a newer one.
+    callIds: callIdsOf(data.actionRequests),
     ...(data.planMessageTs ? { planMessageTs: data.planMessageTs } : {}),
     ...(data.streamMessageTs ? { streamMessageTs: data.streamMessageTs } : {}),
     ...(data.ownerUserId ? { ownerUserId: data.ownerUserId } : {}),
@@ -704,7 +772,7 @@ export function buildHitlInterruptWidget(data: HitlInterruptWidgetData): any[] {
     type: 'section',
     text: {
       type: 'mrkdwn',
-      text: `*Approval required — ${toolLabel}*\n${data.reason.substring(0, 2000)}`,
+      text: `*Approval required — ${toolLabel}*\n${callSummary ? `${callSummary.substring(0, 1000)}\n` : ''}${data.reason.substring(0, 2000)}`,
     },
   };
   if (metaEntries.length > 0) {
@@ -735,9 +803,23 @@ export function buildHitlInterruptWidget(data: HitlInterruptWidgetData): any[] {
   return blocks;
 }
 
+/**
+ * Args the server adds to an action request for itself: routing and display data,
+ * never the call's own arguments. An explicit list — a tool may have a real `_id`.
+ */
+const SERVER_ARGS = new Set(['_call_id', '_summary', '_risk_metadata', '_requires_click']);
+function isInternalArg(key: string): boolean {
+  return SERVER_ARGS.has(key);
+}
+
 /** Stable per-call id the server uses to align decisions (top-level args._call_id). */
 export function callIdOf(action: any): string | undefined {
   return action?.args?._call_id;
+}
+
+/** The call ids of a card's pending calls, in order; calls without one are skipped. */
+export function callIdsOf(actions: any[] | undefined): string[] {
+  return (actions || []).map(callIdOf).filter((id): id is string => typeof id === 'string' && id.length > 0);
 }
 
 /**
@@ -776,10 +858,12 @@ function buildActionDetailBlocks(action: any): any[] {
   const HIDDEN_KEYS = ['reason', '_risk_metadata'];
   const contentKey = CONTENT_KEYS.find((k) => k in args);
   const proposedContent = contentKey ? String(args[contentKey] || '') : '';
-  const metaEntries = Object.entries(args).filter(([k]) => !CONTENT_KEYS.includes(k) && !HIDDEN_KEYS.includes(k));
+  const metaEntries = Object.entries(args).filter(
+    ([k]) => !CONTENT_KEYS.includes(k) && !HIDDEN_KEYS.includes(k) && !isInternalArg(k)
+  );
   const riskMeta = args._risk_metadata as { source?: string; score?: number; matched_pattern?: string | null } | undefined;
   const isRiskScored = riskMeta?.source === 'risk_score';
-  const reason = String((args.description ?? args.reason) || '');
+  const reason = String((args.description ?? args.reason ?? args._summary) || '');
 
   const section: any = {
     type: 'section',
@@ -834,7 +918,7 @@ export function buildMultiHitlInterruptWidget(data: HitlInterruptWidgetData): an
     const riskMeta = args._risk_metadata as { source?: string; matched_pattern?: string | null } | undefined;
     const isRiskScored = riskMeta?.source === 'risk_score';
     const argSummary = Object.entries(args)
-      .filter(([k]) => !CONTENT_KEYS.includes(k) && !HIDDEN_KEYS.includes(k))
+      .filter(([k]) => !CONTENT_KEYS.includes(k) && !HIDDEN_KEYS.includes(k) && !isInternalArg(k))
       .map(([k, v]) => `${k}: ${String(v)}`)
       .join(', ');
     const detail = (argSummary || String((args.description ?? args.reason) || '')).substring(0, 180);
@@ -858,6 +942,7 @@ export function buildMultiHitlInterruptWidget(data: HitlInterruptWidgetData): an
     channelId: data.channelId,
     threadTs: data.threadTs,
     summary: decisionSummary,
+    callIds: callIdsOf(actions),
     ...(data.planMessageTs ? { planMessageTs: data.planMessageTs } : {}),
     ...(data.streamMessageTs ? { streamMessageTs: data.streamMessageTs } : {}),
     ...(data.ownerUserId ? { ownerUserId: data.ownerUserId } : {}),

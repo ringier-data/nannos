@@ -173,8 +173,9 @@ async def score_tool_risk(
     """
     # Embedded Nannos: the client_action tool is the SINGLE HITL path for on-screen
     # actions (the SDK no longer has its own approval card). Score it deterministically
-    # by `kind` — never via the LLM/cache — so an ``apply`` (writes into the user's form)
-    # always interrupts for approval while ``highlight``/``navigate`` (benign) never do.
+    # by `kind` — never via the LLM/cache. No kind saves by itself (an ``apply`` only
+    # fills the on-screen form); an ``invoke`` of an action the host marked
+    # ``requiresApproval`` is lifted to a click-only card by conditional_hitl.
     # notify_user only writes one sentence onto the user's own screen: it touches no
     # backend, returns no data to the model, and cannot be made risky by its args.
     # Score it deterministically at 0 so an approval card can never appear in front of
@@ -433,15 +434,24 @@ async def _score_tool_via_llm(
 _HARD_DESTRUCTIVE_KEYWORDS: tuple[str, ...] = ("delete", "remove", "drop", "destroy")
 _DESTRUCTIVE_FLOOR_SCORE = 0.9
 
-# Deterministic risk per client_action `kind` (Embedded Nannos). Mutating kinds
-# gate for approval; benign ones never do. Unknown/new kinds default to gating
-# (fail safe). ``refresh``/``invalidate`` are listed ahead of that kind landing.
+# Deterministic risk per client_action `kind` (Embedded Nannos). No kind persists by
+# itself: saving is an ``invoke`` of an action the host marked ``requiresApproval`` (a
+# form's ``save``), which conditional_hitl raises to a card from the page's object list
+# — it is the action, not the kind, that saves. ``apply`` only writes into the on-screen form — validated per field,
+# marked as changed, saved by nobody — so it runs without a card, like typing would.
+# Unknown/new kinds default to gating (fail safe).
 _CLIENT_ACTION_KIND_SCORES: dict[str | None, float] = {
-    "apply": 0.9,
-    "refresh": 0.9,
-    "invalidate": 0.9,
+    "apply": 0.1,
     "highlight": 0.1,
+    # Also with ``discard_changes``: it drops only the unsaved values the ASSISTANT
+    # typed (never a saved record), and the tool contract lets the model set it only
+    # after the browser refused the navigate AND the user said "discard" in words. A
+    # card on top would ask the same question twice; the user's data is unaffected.
     "navigate": 0.1,
+    # An unmarked action never persists — it opens a dialog, enters edit mode or starts
+    # a check the user completes — so it gates like ``apply``. A marked one is lifted to
+    # a card by conditional_hitl (see ``_invoke_requires_approval``).
+    "invoke": 0.1,
     # Read-only by construction: the SDK answers from host-registered readers
     # through the same sanitizer as the page snapshot (deny list + caps).
     "read_current_page": 0.1,

@@ -278,3 +278,22 @@ def test_rename_conversation_rejects_unusable_names(title):
 
     assert resp.status_code == 422
     mock_service.rename_conversation.assert_not_awaited()
+
+
+def test_get_conversations_passes_every_scope_to_the_query():
+    """The scopes are filtered in SQL, before the LIMIT — not on the page that came back."""
+    mock_service = MagicMock()
+    mock_service.get_conversations_by_user_id = AsyncMock(return_value=[])
+    app.state.conversation_service = mock_service
+
+    resp = client.get(
+        "/api/v1/conversations/?user_id=0490f8d6-67ee-439b-8178-6ed66a72b0c9"
+        "&embedded_sub_agent_id=42&exclude_playground=true&limit=5"
+    )
+
+    assert resp.status_code == 200
+    kwargs = mock_service.get_conversations_by_user_id.await_args.kwargs
+    assert kwargs["embedded_sub_agent_id"] == "42"
+    assert kwargs["exclude_playground"] is True
+    assert kwargs["sub_agent_config_hash"] is None
+    assert kwargs["limit"] == 5

@@ -282,6 +282,54 @@ class TestDynamicLocalAgentRunnable:
         assert notes[0].event_metadata.kind == "note"
         assert not notes[0].data.is_complete  # a note never ends the turn
 
+    @pytest.mark.asyncio
+    async def test_typed_hitl_decision_is_relayed(self, basic_config, mock_model):
+        """How a typed answer to the sub-agent's approval card was read must leave the
+        graph as a typed event — the embedded console dock only sees what is relayed."""
+        from agent_common.a2a.stream_events import HitlDecisionMeta
+        from agent_common.core.hitl_resume import HITL_DECISION_EVENT
+
+        runnable = DynamicLocalAgentRunnable(config=basic_config, model=mock_model)
+        mock_graph = AsyncMock()
+        mock_graph.with_config = MagicMock(return_value=mock_graph)
+        decisions = [{"id": "call-9", "type": "approve", "intent": "approve"}]
+
+        async def decision_stream(*args, **kwargs):
+            yield {"type": "custom", "ns": (), "data": (HITL_DECISION_EVENT, {"decisions": decisions})}
+
+        mock_graph.astream = decision_stream
+        mock_state = MagicMock()
+        mock_state.interrupts = []
+        mock_graph.aget_state = AsyncMock(return_value=mock_state)
+        final_state = {
+            "messages": [MagicMock(content="Done.")],
+            "structured_response": SubAgentResponseSchema(task_state="completed", message="Done."),
+        }
+        with (
+            patch("agent_common.agents.dynamic_agent.build_sub_agent_graph", return_value=mock_graph),
+            patch("agent_common.agents.dynamic_agent.retrieve_final_state", return_value=final_state),
+        ):
+            events = [
+                event
+                async for event in runnable._astream_impl(
+                    input_data=SubAgentInput(a2a_tracking={}, messages=[HumanMessage(content="yes")]),
+                    config={"configurable": {"thread_id": "test", "checkpoint_ns": ""}},
+                )
+            ]
+        relayed = [e for e in events if isinstance(e, TaskUpdate) and isinstance(e.event_metadata, HitlDecisionMeta)]
+        assert [e.event_metadata.hitl_decision for e in relayed] == [decisions]
+
+    def test_hitl_decision_round_trips_through_the_a2a_extension(self):
+        """The delegated path: the in-process server's message reads back as the same meta."""
+        from agent_common.a2a.event_translation import metadata_from_status_message
+        from agent_common.a2a.extensions import new_hitl_decision_message
+        from agent_common.a2a.stream_events import HitlDecisionMeta
+
+        decisions = [{"id": "call-9", "type": "reject", "intent": "question"}]
+        meta = metadata_from_status_message(new_hitl_decision_message(decisions, "ctx", "task"))
+        assert isinstance(meta, HitlDecisionMeta)
+        assert meta.hitl_decision == decisions
+
     def test_inherits_orchestrator_tools(self, basic_config, mock_model):
         """Test that no tool is inherited when no MCP tools specified."""
 

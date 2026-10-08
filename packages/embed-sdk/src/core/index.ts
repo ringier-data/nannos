@@ -7,9 +7,11 @@ import {
 } from './client-action';
 import { ClientActionLog } from './client-action-log';
 import { ObjectRegistry } from './registry';
+import { ChangeStore } from './change-store';
 import type { NannosAuth, NannosConfig, NannosErrorEvent, NannosStatus, ObjectHandle, RegisterInput } from './types';
 
 export * from './types';
+export { ChangeStore, type AppliedChange, type ChangeTarget } from './change-store';
 export * from './page-context';
 export * from './page-read';
 export * from './screen-outline';
@@ -24,6 +26,7 @@ export {
   directiveFromToolArgs,
   executeClientAction,
   extractClientActionDirective,
+  settleRegistrations,
 } from './client-action';
 export {
   ClientActionLog,
@@ -34,7 +37,9 @@ export {
 export { createPkceAuth, handleAuthCallback, type PkceAuth, type PkceAuthConfig } from './auth';
 export { decodeJwt, jwtExpMs, type DecodedJwt } from './jwt';
 export {
+  SAVE_ACTION,
   zodFormRegistration,
+  availableFields,
   zodToFieldSpecs,
   jsonSchemaToFieldSpecs,
   type FormAdapter,
@@ -65,6 +70,8 @@ interface BackendConfig {
 
 export class NannosCore {
   readonly registry = new ObjectRegistry();
+  /** Fields the assistant wrote that are not saved yet — marks, undo, review bars. */
+  readonly changes = new ChangeStore();
   /** What every directive did — read by the dev inspector, never by the agent. */
   readonly clientActions = new ClientActionLog();
   readonly transport: TransportClient;
@@ -86,6 +93,24 @@ export class NannosCore {
   readonly config: NannosConfig;
 
   constructor(rawConfig: NannosConfig, ioFactory?: IoFactory) {
+    // A form that leaves the screen takes its unsaved-change entries along. Checked a
+    // microtask later: a host re-registering a form (its React effect re-running when its
+    // actions or schema change, e.g. after the assistant's own fill) disposes and registers
+    // it again in one commit, and must keep its marks and undo.
+    let pruneQueued = false;
+    this.registry.onChange(() => {
+      if (pruneQueued) return;
+      pruneQueued = true;
+      queueMicrotask(() => {
+        pruneQueued = false;
+        // A view registration under the same key (edit mode left: cancel, the user's own
+        // Save, a dialog closed) holds no form, so its marks go too.
+        this.changes.prune((t) => {
+          const handle = this.registry.get(t.type, t.id);
+          return !!handle && handle.scope !== 'view';
+        });
+      });
+    });
     // Auth resolution: `getToken` (host-token) and `auth` (self-login) are
     // mutually exclusive. If both are given, the host-token path wins (it's the
     // recommended zero-login path) and `auth` is ignored with a warning.
@@ -303,28 +328,42 @@ export class NannosCore {
   bindClientActions(deps: Omit<ClientActionDeps, 'registry'>) {
     this.clientActionBindings++;
     this.clientActionDeps = deps;
-    const off = this.transport.onAgentResponse((data) => {
-      // Directives ride status-update events, nested in a DataPart — unwrap the
-      // envelope first (also skips streaming chunks cheaply); the Zod guard inside
-      // executeClientAction then validates the directive itself.
-      const directive = extractClientActionDirective(data);
-      if (directive == null) return;
-      // Logged before execution: this path leaves NO trace in the thread, so the
-      // dev inspector is the only place a navigate/highlight is ever visible.
-      const logged = this.clientActions.start('fire-and-forget', directive, this.registry.keys());
-      void executeClientAction(directive, { registry: this.registry, ...deps })
-        .then((result) => this.clientActions.settle(logged, result))
-        .catch((err) => {
-          this.clientActions.fail(logged, err);
-          // An apply/highlight/navigate handler threw — surface it (rejections that
-          // don't throw are already reported via onApplyResult).
-          this.emitError({ type: 'apply', message: 'client-action handler threw', cause: err });
-        });
-    });
+    const off = this.transport.onAgentResponse((data) => this.runFireAndForget(data));
     return () => {
       this.clientActionBindings--;
       off();
     };
+  }
+
+  /**
+   * Route a chat scope's OWN socket into the bound client-action hooks. A scope with
+   * its own `TransportClient` (playground, the console's embedded assistant) receives
+   * its turns' `navigate`/`highlight` directives there, never on `core.transport`.
+   * No-op until `bindClientActions` is live; returns the unsubscribe.
+   */
+  routeClientActions(client: Pick<TransportClient, 'onAgentResponse'>): () => void {
+    return client.onAgentResponse((data) => {
+      if (this.clientActionBindings > 0) this.runFireAndForget(data);
+    });
+  }
+
+  private runFireAndForget(data: unknown): void {
+    // Directives ride status-update events, nested in a DataPart — unwrap the
+    // envelope first (also skips streaming chunks cheaply); the Zod guard inside
+    // executeClientAction then validates the directive itself.
+    const directive = extractClientActionDirective(data);
+    if (directive == null || !this.clientActionDeps) return;
+    // Logged before execution: this path leaves NO trace in the thread, so the
+    // dev inspector is the only place a navigate/highlight is ever visible.
+    const logged = this.clientActions.start('fire-and-forget', directive, this.registry.keys());
+    void executeClientAction(directive, { registry: this.registry, changes: this.changes, ...this.clientActionDeps })
+      .then((result) => this.clientActions.settle(logged, result))
+      .catch((err) => {
+        this.clientActions.fail(logged, err);
+        // An apply/highlight/navigate handler threw — surface it (rejections that
+        // don't throw are already reported via onApplyResult).
+        this.emitError({ type: 'apply', message: 'client-action handler threw', cause: err });
+      });
   }
 
   private clientActionBindings = 0;
@@ -345,12 +384,14 @@ export class NannosCore {
    * with the returned result. Never throws (a thrown handler becomes an
    * `{ok:false}` result the agent can read).
    */
-  async runClientAction(directive: unknown): Promise<ClientActionResult> {
+  async runClientAction(directive: unknown, opts?: { approved?: boolean }): Promise<ClientActionResult> {
     const logged = this.clientActions.start('round-trip', directive, this.registry.keys());
     try {
       const result = await executeClientAction(directive, {
         registry: this.registry,
+        changes: this.changes,
         ...(this.clientActionDeps ?? {}),
+        ...(opts?.approved ? { approved: true } : {}),
       });
       this.clientActions.settle(logged, result);
       return result;

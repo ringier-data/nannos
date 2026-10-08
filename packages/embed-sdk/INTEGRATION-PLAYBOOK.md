@@ -21,7 +21,7 @@ anything; every later decision maps to one of them.
 | **Ontology (domain model)** | Your business entities, their relationships, and the operations over them — `Customer → Order → LineItem`, "a Campaign has Targetings", "an Order can be canceled but not after fulfillment". This is what the agent reasons about; it's your app's domain, not a Nannos artifact. | Your app's business logic (backend models, domain services, code). |
 | **Client objects** | The **on-screen projection** of the ontology the agent can read and change *directly* — the specific records/forms/selections currently in view, each registered with a schema. A slice of the ontology, surfaced client-side. | Host app frontend, via `useNannosZodForm` / `core.register`. |
 | **Tools (MCP)** | Server-side operations over the ontology beyond what's on screen — fetch/list/mutate other entities. The agent calls these. | Your app's MCP server (backend), registered on the sub-agent. |
-| **Client-actions** | Widget-side effects the agent invokes on the client objects: `apply` (write values into a form, human approves), `highlight` (point at a field), `navigate` (go to a page). No backend needed for in-form `apply`. | SDK; host supplies `navigate`/`highlight` hooks + the registered objects for `apply`. |
+| **Client-actions** | Widget-side effects the agent invokes on the client objects: `apply` (write values into a form; nothing is saved, changed fields are marked), `invoke` (press a button the object lists under `actions` — no approval, unless the action is declared `requiresApproval: true`: a form's `save` (registered from the form hook's `save` handler) or any button that changes something on its own, e.g. "Set as default"; those get a click-only approval card), `highlight` (point at a field), `navigate` (go to a page; the host's `navigate` may return a reason string to refuse a route). No backend needed for in-form `apply`. | SDK; host supplies `navigate`/`highlight` hooks + the registered objects, their `save` and `actions`. |
 | **The brain** | What tells the agent how *your ontology* works — the entities, relationships, rules — and how to compose operations over it: the sub-agent's **system prompt**, optional **skills**, optional **knowledge base**. | The Nannos sub-agent config. |
 
 So: the **ontology** is your business domain; **client objects** are the on-screen
@@ -123,7 +123,7 @@ STEP 1 — INVENTORY (do this once, cite files):
    Enumerate the operations the agent would need (method, path, purpose, key
    params) and flag which SHOULD be exposed as MCP tools — the subset in this
    assistant's scope, NOT the whole API. Built-in client-actions exist regardless:
-   apply (write form values, human-approved), highlight (point at a field),
+   apply (fill form values, marked as changed, never saved), invoke (press an action the page offers; one marked `requiresApproval`, like a form's `save`, runs only after the user clicks Approve), highlight (point at a field),
    navigate (go to a route).
 4. Domain rules: validation, required-together fields, status transitions,
    units/formats, uniqueness — from schemas, form validation, and backend models.

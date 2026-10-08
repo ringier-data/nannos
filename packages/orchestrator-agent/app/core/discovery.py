@@ -7,6 +7,7 @@ including caching and error handling.
 import asyncio
 import json
 import logging
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -35,6 +36,23 @@ from agent_common.core.catalogue_ingest import fetch_with_retry
 from agent_common.core.tool_catalogue import ServerCatalogue, build_lazy_tools
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class DiscoveryReport:
+    """Whether a discovery saw every source it should have.
+
+    A source that could not be listed (the gateway timed out, a server failed) leaves
+    a PARTIAL toolset. Cached like a full one, it stood for the user's catalogue for
+    the whole cache TTL: "Gmail isn't available" for five minutes after one timeout.
+    """
+
+    complete: bool = True
+    reasons: list[str] = field(default_factory=list)
+
+    def mark_incomplete(self, reason: str) -> None:
+        self.complete = False
+        self.reasons.append(reason)
 
 async def _console_attribution_interceptor(request, handler):
     """Stamp the caller's cost-attribution (user_sub, conversation_id, sub_agent_id, …) on every
@@ -82,12 +100,15 @@ class AgentDiscoveryService:
         self,
         agent_metadata: dict[str, dict[str, Any]],
         token: str,
+        report: "DiscoveryReport | None" = None,
     ) -> List[CompiledSubAgent]:
         """Discover available sub-agents by fetching their agent cards.
 
         Args:
             agent_metadata: Metadata map from agent_url -> {sub_agent_id, name, description}
             token: User's access token for authentication and token exchange
+            report: Marked incomplete when an agent's card could not be fetched, so the
+                shortened list is not cached as the user's full set of sub-agents
 
         Returns:
             List of discovered sub-agents
@@ -112,6 +133,8 @@ class AgentDiscoveryService:
             except Exception as e:
                 logger.warning(f"Failed to discover agent at {base_url}: {type(e).__name__}: {e}")
                 self._log_discovery_error(e, base_url)
+                if report is not None:
+                    report.mark_incomplete(f"sub-agent card unavailable ({type(e).__name__})")
 
         logger.debug(f"Agent discovery complete. Found {len(sub_agents)} agents")
 
@@ -220,7 +243,7 @@ class ToolDiscoveryService:
         # Strip the trailing slash first: removesuffix("/mcp") is a no-op on ".../mcp/".
         return self.config.MCP_GATEWAY_URL.rstrip("/").removesuffix("/mcp")
 
-    async def fetch_available_servers(self, token: str) -> List[Dict[str, Any]]:
+    async def fetch_available_servers(self, token: str, report: "DiscoveryReport | None" = None) -> List[Dict[str, Any]]:
         """Fetch list of available MCP servers from the gateway.
 
         Args:
@@ -261,6 +284,8 @@ class ToolDiscoveryService:
                 log_mcp_gateway_error(logger, e, context="Failed to fetch MCP servers ")
             else:
                 logger.error(f"Failed to fetch MCP servers: {e}", exc_info=True)
+            if report is not None:
+                report.mark_incomplete(f"gateway servers could not be listed ({type(e).__name__})")
             return []
 
     async def _ingest_server(
@@ -384,6 +409,7 @@ class ToolDiscoveryService:
         white_list: Optional[List[str]] = None,
         include_server_slugs: Optional[List[str]] = None,
         token_provider: UserTokenProvider | None = None,
+        report: "DiscoveryReport | None" = None,
     ) -> List[BaseTool]:
         """Discover available MCP tools with optional server filtering.
 
@@ -400,6 +426,8 @@ class ToolDiscoveryService:
             include_server_slugs: Optional list of server slugs to include tools from
             token_provider: The user's provider (created here when not given; the executor
                 passes the one it keeps across turns)
+            report: Marked incomplete when a source could not be listed, so the caller
+                does not cache a partial toolset as if it were the user's whole catalogue
 
         Returns:
             List of discovered tools with server_name in metadata
@@ -425,7 +453,7 @@ class ToolDiscoveryService:
                 logger.info("Successfully exchanged token for gatana")
 
                 # Fetch available servers to create per-server connections
-                servers = await self.fetch_available_servers(mcp_gateway_token)
+                servers = await self.fetch_available_servers(mcp_gateway_token, report)
 
                 # Identify compression-enabled servers (Gatana-specific, always active).
                 # Gateway returns isOutputCompressionEnabled and isOutputCompressionTransformEnabled
@@ -462,6 +490,8 @@ class ToolDiscoveryService:
                     )
                     call_connections[server_slug] = StreamableHttpConnection(transport="streamable_http", url=url)
             except Exception as gateway_error:
+                if report is not None:
+                    report.mark_incomplete(f"gateway unavailable ({type(gateway_error).__name__})")
                 # Only tolerable in the dev shape (direct servers configured, no
                 # Gatana). In production a swallowed gateway failure would return a
                 # console-only toolset that the executor caches for the discovery
@@ -607,6 +637,8 @@ class ToolDiscoveryService:
                 slow,
             )
 
+            if failed_servers and report is not None:
+                report.mark_incomplete(f"{len(failed_servers)} server(s) failed to list tools")
             if failed_servers:
                 logger.warning(
                     f"Tool discovery completed with failures from {len(failed_servers)} server(s): {failed_servers}"
@@ -643,6 +675,8 @@ class ToolDiscoveryService:
 
         except Exception as e:
             logger.error(f"Failed to discover tools with token exchange: {e}", exc_info=True)
+            if report is not None:
+                report.mark_incomplete(f"discovery failed ({type(e).__name__})")
             return []
         # finally:
         #     await self.oauth2_client.close()

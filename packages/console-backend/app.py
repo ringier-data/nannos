@@ -796,6 +796,40 @@ _pending_interactions: dict[str, dict[str, Any]] = {}
 _tracer = otel_trace.get_tracer("console-backend.chat")
 
 
+def _describe_agent_response(response_data: dict) -> str:
+    """One log line per agent event: ids, state and the SHAPE of its parts, never their content.
+
+    The full JSON used to be logged here, which put tool arguments and form values the
+    assistant handled (a phone number, a secret's name and description) in the log.
+    """
+    status = response_data.get("status") or {}
+    message = status.get("message") or {}
+    parts = list(message.get("parts") or [])
+    for artifact in [response_data.get("artifact")] + list(response_data.get("artifacts") or []):
+        if isinstance(artifact, dict):
+            parts += list(artifact.get("parts") or [])
+    kinds: dict[str, int] = {}
+    text_chars = 0
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        if "text" in part:
+            kind = "text"
+        elif "data" in part:
+            kind = "data"
+        else:
+            kind = "file" if ("file" in part or "url" in part or "raw" in part) else "other"
+        kinds[kind] = kinds.get(kind, 0) + 1
+        if kind == "text":
+            text_chars += len(part.get("text") or "")
+    shape = ",".join(f"{k}:{n}" for k, n in sorted(kinds.items())) or "none"
+    return (
+        f"kind={response_data.get('kind')} id={response_data.get('id')} context={response_data.get('contextId')} "
+        f"state={status.get('state')} parts={shape} text_chars={text_chars} "
+        f"validation_errors={len(response_data.get('validation_errors') or [])}"
+    )
+
+
 def _xray_trace_id(span: otel_trace.Span) -> str | None:
     """OTel trace id in the form X-Ray search expects: ``1-<8 hex>-<24 hex>``.
 
@@ -1170,10 +1204,7 @@ async def _process_a2a_response(
     validation_errors = validate_message(response_data)
     response_data["validation_errors"] = validation_errors
 
-    try:
-        logger.info("Agent response full JSON: %s", json.dumps(response_data, default=str))
-    except Exception:
-        logger.info("Agent response (sid=%s) id=%s", sid, response_id)
+    logger.info("Agent response: %s", _describe_agent_response(response_data))
 
     effective_context_id = context_id or response_data.get("contextId")
     # Deliver to the conversation room (keyed by conversation_id) so a reconnected or
@@ -1744,6 +1775,40 @@ async def _resolve_socket_user_via_token(token: str) -> _SocketTokenAuth | None:
     return _SocketTokenAuth(http_session_id=http_session_id, embedded_sub_agent_id=embedded_sub_agent_id)
 
 
+async def _bind_console_assistant(user_id: str) -> int | None:
+    """The console's own assistant (a cookie socket that asked for embed scope): bind it
+    like an embedded host, through the binding whose client ids include the console's OIDC
+    client. The console is the host, so its client id is the azp of its cookie session's
+    token — the same identity fact the bearer path reads from the token (ADR-0006).
+
+    Only an explicit opt-in binds: the console's main chat connects with the same cookie
+    and must keep running the full orchestrator. Never raises — a binding problem
+    connects the socket unbound, like the token path.
+    """
+    embed_service = getattr(sio.app_instance.state, "embed_binding_service", None)  # type: ignore[attr-defined]
+    if embed_service is None:
+        return None
+    azp = config.oidc.client_id
+    try:
+        session_factory = get_async_session_factory()
+        async with session_factory() as db:
+            user = await sio.app_instance.state.user_service.get_user(db, user_id)  # type: ignore[attr-defined]
+            if user is None:
+                return None
+            bound = await embed_service.bind_connection(db, user=user, azp=azp)
+            if bound is None:
+                logger.warning(
+                    f"Console assistant socket asked for embed scope but client id {azp!r} has no "
+                    "embed binding; connecting unbound (full orchestrator)"
+                )
+                return None
+            await db.commit()
+            return bound
+    except Exception:  # noqa: BLE001 — a binding hiccup must not reject the login
+        logger.exception(f"Console assistant embed binding failed for {azp!r}; connecting unbound")
+        return None
+
+
 # StoredSession ids minted per-connection by the token path, keyed by socket id, so
 # handle_disconnect can delete them (the disconnect always lands on the replica that
 # holds the socket, so process-local state suffices).
@@ -1755,7 +1820,9 @@ async def handle_connect(sid: str, environ: dict[str, Any], auth: dict[str, Any]
     """Handle the 'connect' socket.io event with authentication.
 
     Two accepted credentials:
-    - the signed session cookie (same-origin console — primary path), and
+    - the signed session cookie (same-origin console — primary path); with
+      ``auth = {"embedScope": true}`` it is the console's own embedded assistant and is
+      bound like a host (``_bind_console_assistant``), and
     - a nannos bearer token in the socket.io ``auth`` payload (embedded/cross-origin
       hosts — see ADR-0002 Amendments 2 and 4). Accepted in EVERY environment: the
       token is validated against the nannos issuer's JWKS like the HTTP bearer paths
@@ -1766,6 +1833,7 @@ async def handle_connect(sid: str, environ: dict[str, Any], auth: dict[str, Any]
     """
     http_session_id = await _resolve_socket_user_via_cookie(environ)
     embedded_sub_agent_id: int | None = None
+    wants_embed_scope = isinstance(auth, dict) and auth.get("embedScope") is True
 
     if not http_session_id:
         token = auth.get("token") if isinstance(auth, dict) else None
@@ -1788,6 +1856,10 @@ async def handle_connect(sid: str, environ: dict[str, Any], auth: dict[str, Any]
     if not stored_session:
         logger.warning(f"Socket.IO connection rejected for {sid}: session vanished after auth")
         return False
+
+    # The token path decided its binding from the token; a cookie socket only on request.
+    if wants_embed_scope and sid not in _socket_owned_sessions:
+        embedded_sub_agent_id = await _bind_console_assistant(stored_session.user_id)
 
     # Create socket session (links to the StoredSession that carries the access_token).
     await sio.app_instance.state.socket_session_service.create_session(  # type: ignore[attr-defined]

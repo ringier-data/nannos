@@ -631,6 +631,28 @@ def _inject_for_inner(
     return enriched
 
 
+#: What a program reads back from a call that succeeded with nothing to say.
+EMPTY_RESULT_PAYLOAD = {"status": "done", "detail": "The call succeeded and returned no content."}
+
+
+def _non_empty(result: Any) -> Any:
+    """An empty text result, made readable inside ``eval``.
+
+    The QuickJS bridge never settles the promise of a host call that returned an
+    empty string (or only empty text blocks): ``eval`` then fails with "Deadlock …
+    promise is pending" although the call ran. A route answering 204 is exactly
+    that (``scheduler_share_job``), so the agent took a successful share for a
+    failure and repeated it until loop detection stopped it.
+    """
+    if result == "" or (
+        isinstance(result, list)
+        and result
+        and all(isinstance(b, dict) and b.get("type") == "text" and not b.get("text") for b in result)
+    ):
+        return EMPTY_RESULT_PAYLOAD
+    return result
+
+
 def wrap_tool_for_ptc(
     inner: BaseTool,
     *,
@@ -694,7 +716,7 @@ def wrap_tool_for_ptc(
             if verdict.blocked:
                 return repeated_call_payload(tool_name, loop_detection.blocked_message(tool_name, verdict))
         try:
-            return await inner.arun(_inject_for_inner(inner, kwargs, runtime))
+            return _non_empty(await inner.arun(_inject_for_inner(inner, kwargs, runtime)))
         except ToolException as exc:
             # A quota error is terminal for this run: the model cannot wait inside
             # ``eval`` and every immediate retry fails the same way. Return it, like

@@ -113,6 +113,21 @@ describe('TransportClient handshake', () => {
     await expect(init).resolves.toBe(false);
   });
 
+  it('a handshake superseded before its reply leaves no timer behind to de-initialize the client', async () => {
+    const { client, fake } = makeClient();
+    await client.connect();
+    const first = client.initializeClient({ agentUrl: 'u', model: 'm' }, 's');
+    const second = client.initializeClient({ agentUrl: 'u', model: 'm' }, 's');
+    fake.fire('client_initialized', { status: 'success', agent: { name: 'Nannos' } });
+    await expect(first).resolves.toBe(true);
+    await expect(second).resolves.toBe(true);
+
+    // The first call's 15 s timer used to survive, fire, and flip `initialized`
+    // back to false — which re-ran the handshake on a working connection.
+    vi.advanceTimersByTime(20_000);
+    expect(client.getState().initialized).toBe(true);
+  });
+
   it('resolves false when connect() was never called', async () => {
     const { client } = makeClient();
     await expect(client.initializeClient({ agentUrl: 'u', model: 'm' }, 's')).resolves.toBe(false);
@@ -373,5 +388,59 @@ describe('TransportClient server error event', () => {
     expect(errors).toEqual([
       expect.objectContaining({ type: 'connection', message: 'authentication failed' }),
     ]);
+  });
+});
+
+describe('cookie-session embed scope', () => {
+  it('asks the server to bind the socket when embedScope is set without a token', async () => {
+    const { client, ioOpts } = makeClient({ embedScope: true });
+    await client.connect();
+    expect(ioOpts[0].auth).toEqual({ embedScope: true });
+  });
+
+  it('sends no auth for a plain cookie socket', async () => {
+    const { client, ioOpts } = makeClient({});
+    await client.connect();
+    expect(ioOpts[0].auth).toBeUndefined();
+  });
+});
+
+describe('NannosCore.routeClientActions', () => {
+  const navigateEvent = {
+    kind: 'status-update',
+    status: {
+      message: {
+        extensions: [CLIENT_ACTION_EXT],
+        parts: [{ kind: 'data', data: { directive: { kind: 'navigate', to: '/app/scheduler' } } }],
+      },
+    },
+  };
+
+  it("routes an own-socket scope's directives into the bound hooks", async () => {
+    const core = createNannos({}, () => new FakeSocket() as unknown as Socket);
+    const own = makeClient();
+    await own.client.connect();
+    const navigate = vi.fn();
+    core.bindClientActions({ navigate });
+    const off = core.routeClientActions(own.client);
+
+    own.fake.fire('agent_response', navigateEvent);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(navigate).toHaveBeenCalledWith('/app/scheduler');
+
+    off();
+    own.fake.fire('agent_response', navigateEvent);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(navigate).toHaveBeenCalledTimes(1);
+  });
+
+  it('does nothing while no hooks are bound', async () => {
+    const core = createNannos({}, () => new FakeSocket() as unknown as Socket);
+    const own = makeClient();
+    await own.client.connect();
+    core.routeClientActions(own.client);
+    own.fake.fire('agent_response', navigateEvent);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(core.clientActions.getSnapshot()).toHaveLength(0);
   });
 });

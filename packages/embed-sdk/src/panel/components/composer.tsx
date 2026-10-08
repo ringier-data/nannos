@@ -11,7 +11,7 @@
  *   row 0 — attachments (absent while nothing is attached);
  *   row 1 — the textarea, with the mic as its only trailing button;
  *   row 2 — attach (left) · bound agent + current context (stretch, left-aligned) ·
- *           apply mode · stop/send (right).
+ *           send mode · stop/send (right).
  */
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import type { ChangeEvent, DragEvent, ClipboardEvent, KeyboardEvent } from 'react';
@@ -28,7 +28,6 @@ import { useAttachments } from '../hooks/use-attachments';
 import { useEmbeddedAgent } from '../hooks/use-embedded-agent';
 import type { UseNannosChatValue } from '../hooks/use-nannos-chat';
 import type { EmbeddedAgentInfo } from '../../core/wire';
-import { ApplyModeSwitch } from './apply-mode-switch';
 import { SendModeSwitch } from './send-mode-switch';
 import { useSendMode } from '../send-mode';
 import { AudioRecorderButton } from './audio-recorder';
@@ -272,8 +271,8 @@ export function Composer({ chat, className }: ComposerProps) {
           <AudioRecorderButton disabled={isReadOnly} onRecorded={(file) => addFiles([file])} />
         </div>
 
-        {/* Row 2 — attach · context · apply mode · send. `relative` anchors the
-            apply-mode menu, which hangs ABOVE this row: positioning against the
+        {/* Row 2 — attach · context · send mode · send. `relative` anchors the
+            send-mode menu, which hangs ABOVE this row: positioning against the
             row (rather than portalling) keeps it inside the shadow root and
             bounds its width to the panel. The composer box has no overflow clip,
             so it is free to overhang upward. */}
@@ -334,12 +333,6 @@ export function Composer({ chat, className }: ComposerProps) {
           </div>
 
           {embeddedAgent && <AgentChip agent={embeddedAgent} />}
-
-          {/* Directly left of send: whether a form fill asks first is answered
-              where the user is when they ask for one. Absent when the host
-              fixed the mode, or on a full-page chat — a surface with no forms
-              to fill has no choice to make. */}
-          <ApplyModeSwitch />
 
           {/* While a turn runs, what the NEXT send does to it — steer it, or
               stop it and start over. Gone when nothing runs: both are then the

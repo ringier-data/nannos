@@ -10,12 +10,14 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { parseAzps } from '@/components/subagents/embedBinding';
+import { NannosForm } from '@/components/nannos/NannosForm';
 import {
   createEmbedBoundSubAgentApiV1SubAgentsEmbedBindingsPostMutation,
   probeEmbedAuthorityApiV1SubAgentsEmbedBindingsProbePostMutation,
 } from '@/api/generated/@tanstack/react-query.gen';
 import type { EmbedBindingProbe } from '@/api/generated/types.gen';
 import { getErrorMessage } from '@/lib/utils';
+import type { ActionOutcome } from '@nannos/embed-sdk';
 import { Link } from 'react-router';
 
 interface EmbeddedAgentFormProps {
@@ -69,14 +71,32 @@ export function EmbeddedAgentForm({ onCancel, onCreated }: EmbeddedAgentFormProp
     setProbe(null);
   };
 
+  const save = async (): Promise<ActionOutcome> => {
+    if (busy) return { ok: false, detail: 'A test or save is already in progress' };
+    if (!trimmedUrl) return { ok: false, detail: 'The base URL is required' };
+    if (azps.length === 0) return { ok: false, detail: 'At least one OAuth client id is required' };
+    try {
+      await createMutation.mutateAsync({ body: { base_url: trimmedUrl, azps } });
+      return true;
+    } catch (err) {
+      // onError already toasted.
+      return { ok: false, detail: getErrorMessage(err) };
+    }
+  };
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!canCreate) return;
-    createMutation.mutate({ body: { base_url: trimmedUrl, azps } });
+    void save();
   };
 
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
+      <NannosForm
+        type="EmbeddedAgent"
+        id={undefined}
+        fields={{ base_url: [baseUrl, changeBaseUrl], azps: [azps, (next: string[]) => setAzpsText(next.join('\n'))] }}
+        save={save}
+      />
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Main Form Column */}
         <div className="lg:col-span-2 space-y-6">

@@ -51,6 +51,7 @@ export function clientActionSummaryKey(
   | 'hitl.clientAction.highlight'
   | 'hitl.clientAction.navigate'
   | 'hitl.clientAction.readCurrentPage'
+  | 'hitl.clientAction.invoke'
   | null {
   switch (clientActionKind(input)) {
     case 'apply':
@@ -61,6 +62,9 @@ export function clientActionSummaryKey(
       return 'hitl.clientAction.navigate';
     case 'read_current_page':
       return 'hitl.clientAction.readCurrentPage';
+    // Only an action the host marked requiresApproval ever reaches a card.
+    case 'invoke':
+      return 'hitl.clientAction.invoke';
     default:
       return null;
   }

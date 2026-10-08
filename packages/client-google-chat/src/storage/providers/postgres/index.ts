@@ -5,4 +5,5 @@ export { PgPendingRequestStore, type PendingRequest } from './pgPendingRequestSt
 export { PgInFlightTaskStore, type InFlightTask } from './pgInFlightTaskStore.js';
 export { PgOAuthStateStore, type OAuthStateData } from './pgOAuthStateStore.js';
 export { PgScheduledRunStore } from './pgScheduledRunStore.js';
+export { PgHitlCardStore } from './pgHitlCardStore.js';
 
