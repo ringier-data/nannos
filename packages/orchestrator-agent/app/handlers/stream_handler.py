@@ -8,6 +8,7 @@ import logging
 from typing import Any, Dict, Optional
 
 from a2a.types import TaskState
+from agent_common.a2a.event_translation import strip_state_label
 from agent_common.a2a.structured_response import unanswered_turn_reply
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from ringier_a2a_sdk.utils.streaming import extract_text_from_content
@@ -219,7 +220,7 @@ class StreamHandler:
 
     @staticmethod
     def _build_blocked_agent_response(
-        agent_name: str, tracking_data: Dict[str, Any], messages: list
+        agent_name: str, tracking_data: Dict[str, Any], messages: list, answer: str = ""
     ) -> AgentStreamResponse:
         """Build response for a blocked agent (auth, input, failed, or incomplete).
 
@@ -227,6 +228,8 @@ class StreamHandler:
             agent_name: Name of the blocked agent
             tracking_data: A2A tracking data for the agent
             messages: Conversation messages for context
+            answer: The model's own final answer, when it gave one: shown instead of the
+                last message, which may be the structured-response tool message
 
         Returns:
             AgentStreamResponse with appropriate state (auth_required, input_required, or failed)
@@ -249,6 +252,12 @@ class StreamHandler:
         is_failed = ("failed" in str(state).lower()) or (state == "TaskState.TASK_STATE_FAILED")
 
         if is_failed:
+            if answer:
+                return AgentStreamResponse(
+                    state=TaskState.TASK_STATE_FAILED,
+                    content=answer,
+                    metadata={"agent_name": agent_name, "tracking_data": tracking_data},
+                )
             # Extract failure message from the last tool message
             if messages:
                 last_message = messages[-1]
@@ -264,7 +273,12 @@ class StreamHandler:
             )
 
         elif tracking_data.get("requires_input"):
-            if messages:
+            if answer:
+                # The model's own final answer. messages[-1] is the structured-response
+                # tool message LangChain appends, whose content is the schema's repr:
+                # users read "task_state='completed' message=… include_subagent_output=False".
+                content = answer
+            elif messages:
                 last_message = messages[-1]
                 content = getattr(last_message, "content", "Additional input required to complete the task.")
                 content = (extract_text_from_content(content) or [""])[0]
@@ -453,7 +467,8 @@ class StreamHandler:
 
                             extracted_str = extracted if isinstance(extracted, str) else ""
                             if extracted_str:
-                                subagent_content = extracted_str
+                                # Shown to the user as-is: drop the label meant for the model.
+                                subagent_content = strip_state_label(extracted_str)
                                 logger.info(
                                     f"[STREAM HANDLER] Found sub-agent ToolMessage (tool_call_id={msg.tool_call_id}, "
                                     f"subagent={tool_call.get('args', {}).get('subagent_type')}, "
@@ -563,7 +578,9 @@ class StreamHandler:
                         )
 
                         messages = final_state.get("messages", [])
-                        return StreamHandler._build_blocked_agent_response(agent_name, tracking_data, messages)
+                        return StreamHandler._build_blocked_agent_response(
+                            agent_name, tracking_data, messages, answer=message
+                        )
 
                 # No override needed - return LLM's completed response
                 return AgentStreamResponse(

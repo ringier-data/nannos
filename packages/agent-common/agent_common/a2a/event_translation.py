@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Dict, Optional, Sequence
 
 from a2a.types import (
@@ -193,14 +194,32 @@ def synthetic_content(status: Any, artifacts: Optional[Sequence[Any]], app_metad
     if status.state == TaskState.TASK_STATE_FAILED:
         lower_content = content.lower()
         if "failed" not in lower_content and "error" not in lower_content:
-            content = f"ERROR: Task failed - {content}"
+            content = f"{_FAILED_PREFIX}{content}"
         else:
-            content = f"Task execution failed: {content}"
+            content = f"{_FAILED_ERROR_PREFIX}{content}"
     elif status.state == TaskState.TASK_STATE_WORKING:
-        content = f"INCOMPLETE: Agent is still working - {content}"
+        content = f"{_WORKING_PREFIX}{content}"
     elif status.state not in TERMINAL_STATES:
         content = f"Agent status: {TaskState.Name(status.state)} - {content}"
     return content
+
+
+# The state labels above are for the ORCHESTRATOR's model, which reads a sub-agent's
+# result as a tool message. They must not reach the user when that result is shown
+# as-is (the final answer's include_subagent_output): Gemini relayed "ERROR: Task
+# failed - …" and "Agent status: TASK_STATE_INPUT_REQUIRED - …" verbatim.
+_FAILED_PREFIX = "ERROR: Task failed - "
+_FAILED_ERROR_PREFIX = "Task execution failed: "
+_WORKING_PREFIX = "INCOMPLETE: Agent is still working - "
+_STATE_LABEL_RE = re.compile(
+    rf"^(?:{re.escape(_FAILED_PREFIX)}|{re.escape(_FAILED_ERROR_PREFIX)}|{re.escape(_WORKING_PREFIX)}"
+    r"|Agent status: TASK_STATE_[A-Z_]+ - )"
+)
+
+
+def strip_state_label(content: str) -> str:
+    """A sub-agent result without the state label added for the orchestrator's model."""
+    return _STATE_LABEL_RE.sub("", content, count=1)
 
 
 def task_response(
