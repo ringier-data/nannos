@@ -341,6 +341,14 @@ CLICKED_REJECT_LEAD = "The user clicked Reject"
 TYPED_REFUSAL_LEAD = "The user REFUSED this call"
 REFUSAL_LEADS = (CLICKED_REJECT_LEAD, TYPED_REFUSAL_LEAD)
 
+#: How a refusal must be REPORTED. Reported in the passive ("the request was
+#: rejected"), the orchestrator's model filled in who did it, and told the user
+#: "Gmail rejected the creation request" or "it was not authorized".
+REPORT_REFUSAL_CLAUSE = (
+    "When you report this, say plainly that the user declined it at the approval prompt — "
+    "never that the service, the tool or an authorization rejected it. "
+)
+
 
 def _framed_rejections(decisions: list[Any]) -> list[Any]:
     """A clicked Reject, worded so the agent cannot read it as "not THIS call".
@@ -366,7 +374,9 @@ def _framed_rejections(decisions: list[Any]) -> list[Any]:
                 "message": (
                     f"{CLICKED_REJECT_LEAD}, so this call was NOT executed.{reason} Respect that decision: do "
                     "not retry it, and do not make the same change another way (through a form on the page, "
-                    "another tool or code). If what they want instead is unclear, ask. " + NOT_APPROVED_CLAUSE
+                    "another tool or code). If what they want instead is unclear, ask. "
+                    + REPORT_REFUSAL_CLAUSE
+                    + NOT_APPROVED_CLAUSE
                 ),
             }
         )
@@ -455,7 +465,7 @@ def _from_intent(intent: str | None, reply: str, action_requests: list[Any]) -> 
             action_requests,
             f"{TYPED_REFUSAL_LEAD}, so it was NOT executed.{said} "
             f"Do not retry it. Take their answer into account and continue from there. "
-            f"{NOT_APPROVED_CLAUSE}",
+            f"{REPORT_REFUSAL_CLAUSE}{NOT_APPROVED_CLAUSE}",
         )
     if intent == "change":
         logger.info("[HITL] The user asked to change the pending call")

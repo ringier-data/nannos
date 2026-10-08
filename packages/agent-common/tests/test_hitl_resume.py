@@ -486,3 +486,26 @@ def test_the_counter_probe_matches_the_real_langgraph_scratchpad():
     scratchpad.interrupt_counter()
     scratchpad.interrupt_counter()
     assert _next_interrupt_index(scratchpad) == 2
+
+
+class TestRefusalsAreReportedAsTheUsers:
+    """Reported in the passive, a refusal was blamed on the service: "Gmail rejected it"."""
+
+    @pytest.mark.asyncio
+    async def test_a_clicked_reject_says_the_user_declined_it(self):
+        decisions = await decisions_from_resume({"decisions": [{"type": "reject"}]}, ACTION_REQUESTS)
+        message = decisions[0]["message"]
+        assert "the user declined it at the approval prompt" in message
+        assert "never that the service, the tool or an authorization rejected it" in message
+
+    @pytest.mark.asyncio
+    async def test_a_typed_refusal_says_so_too(self):
+        with _classification("reject"):
+            decisions = await decisions_from_resume("no, don't", ACTION_REQUESTS)
+        assert "the user declined it at the approval prompt" in decisions[0]["message"]
+
+    @pytest.mark.asyncio
+    async def test_a_non_answer_is_not_reported_as_a_refusal(self):
+        with _classification("unclear"):
+            decisions = await decisions_from_resume("what's the weather?", ACTION_REQUESTS)
+        assert "declined it" not in decisions[0]["message"]
