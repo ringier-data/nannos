@@ -144,3 +144,57 @@ class TestVolatileContextIsSkipped:
 
         msgs = place_volatile_context_message([], "BLOCK")
         assert _tag_last_message(msgs, CC) is msgs
+
+
+class TestABreakpointInFrontOfThePageContext:
+    """The page-context block sits just before the current step, so the entry written at
+    the last message contains it, and it moves by the next step. Anthropic/Bedrock read
+    only at a prefix a breakpoint wrote, so a second one ends before the block."""
+
+    @staticmethod
+    def _call(call_id):
+        return AIMessage(content="", tool_calls=[{"name": "t", "args": {}, "id": call_id}])
+
+    def _steps(self):
+        h = HumanMessage(content="q")
+        c1, t1 = self._call("c1"), ToolMessage(content="r1", tool_call_id="c1")
+        c2, t2 = self._call("c2"), ToolMessage(content="r2", tool_call_id="c2")
+        return h, c1, t1, c2, t2
+
+    def test_mid_loop_the_message_before_the_step_is_tagged_too(self):
+        from agent_common.middleware.prompt_caching import _tag_before_current_step
+
+        h, c1, t1, c2, t2 = self._steps()
+        out = _tag_before_current_step(_tag_last_message([h, c1, t1, c2, t2], CC), CC)
+        assert _last_block_cache_control(out[4]) == CC  # the last message, as before
+        assert _last_block_cache_control(out[2]) == CC  # t1: ends before the block
+
+    def test_the_tagged_prefix_never_contains_the_block(self):
+        """Orchestrator order: caching runs, then the block is placed."""
+        from agent_common.middleware.prompt_caching import _tag_before_current_step
+        from agent_common.middleware.utils import place_volatile_context_message
+
+        h, c1, t1, c2, t2 = self._steps()
+        tagged = _tag_before_current_step(_tag_last_message([h, c1, t1, c2, t2], CC), CC)
+        sent = place_volatile_context_message(tagged, "PAGE")
+        clean = next(i for i, m in enumerate(sent) if isinstance(m, ToolMessage) and m.tool_call_id == "c1")
+        assert _last_block_cache_control(sent[clean]) == CC
+        assert all(not (m.additional_kwargs or {}).get("volatile_context") for m in sent[: clean + 1])
+
+    def test_with_the_block_already_placed_it_skips_it(self):
+        """Sub-agent order: the block is in the request when caching runs."""
+        from agent_common.middleware.prompt_caching import _tag_before_current_step
+        from agent_common.middleware.utils import place_volatile_context_message
+
+        h, c1, t1, c2, t2 = self._steps()
+        placed = place_volatile_context_message([h, c1, t1, c2, t2], "PAGE")
+        out = _tag_before_current_step(placed, CC)
+        assert out[3].content == "PAGE"
+        assert _last_block_cache_control(out[2]) == CC
+
+    def test_a_turns_first_step_has_one_conversation_breakpoint(self):
+        from agent_common.middleware.prompt_caching import _tag_before_current_step
+
+        msgs = [HumanMessage(content="q")]
+        tagged = _tag_last_message(msgs, CC)
+        assert _tag_before_current_step(tagged, CC) is tagged

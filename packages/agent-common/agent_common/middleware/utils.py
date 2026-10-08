@@ -52,7 +52,8 @@ def place_volatile_context_message(
     message, every step that changed it and every next turn re-sent the whole tool
     loop past the provider prompt cache. Before the current step, a call re-sends one
     step (the previous call and its results); a new turn, only the last step of the
-    previous one.
+    previous one. On Anthropic/Bedrock that needs a breakpoint in front of the block,
+    which ``LiteLLMPromptCachingMiddleware`` writes (``_tag_before_current_step``).
 
     Role validity: ``[..., Tool, Human(block), AI, Tool]`` and ``[..., Human,
     Human(block)]`` are valid chat-completions requests, and the Anthropic/Bedrock
@@ -60,11 +61,11 @@ def place_volatile_context_message(
     into one turn.
     """
     block = HumanMessage(content=text, additional_kwargs={VOLATILE_CONTEXT_KEY: True})
-    at = _current_step_start(messages)
+    at = current_step_start(messages)
     return [*messages[:at], block, *messages[at:]]
 
 
-def _current_step_start(messages: list[AnyMessage]) -> int:
+def current_step_start(messages: list[AnyMessage]) -> int:
     """The index of the last tool-calling model call when no user message follows it,
     else the end (a call that only answered is not a step in progress)."""
     for i in range(len(messages) - 1, -1, -1):

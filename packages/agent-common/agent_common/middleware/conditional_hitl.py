@@ -127,7 +127,7 @@ def _client_action_tool_message(decision: dict[str, Any], tool_call: ToolCall) -
     )
 
 
-def _answered(last_ai_msg: AIMessage, tool_messages: list[ToolMessage]) -> dict[str, Any]:
+def _answered(last_ai_msg: AIMessage, tool_messages: list[ToolMessage], *, end: bool = False) -> dict[str, Any]:
     """The state update for tool calls this middleware answered itself.
 
     When every call of the turn has its ToolMessage here (an approved client_action
@@ -137,11 +137,14 @@ def _answered(last_ai_msg: AIMessage, tool_messages: list[ToolMessage]) -> dict[
     holds the PREVIOUS turn's structured response. The run then ended without the
     model ever reading the answers, and the stream replayed the stale reply. Jumping
     back to the model explicitly is what the edge would do absent that stale state.
+
+    ``end`` ends the turn instead: the reply then says the call was not done
+    (``unanswered_turn_reply``), never the stale answer.
     """
     update: dict[str, Any] = {"messages": [last_ai_msg, *tool_messages]}
     answered = {m.tool_call_id for m in tool_messages}
     if tool_messages and all(call["id"] in answered for call in last_ai_msg.tool_calls):
-        update["jump_to"] = "model"
+        update["jump_to"] = "end" if end else "model"
     return update
 
 
@@ -230,6 +233,26 @@ def _refused_this_turn(messages: list[BaseMessage]) -> set[str]:
         and m.tool_call_id in calls
         and isinstance(m.content, str)
         and m.content.startswith(REFUSAL_LEADS)
+    }
+
+
+def _refused_again_this_turn(messages: list[BaseMessage]) -> set[str]:
+    """The calls already answered :data:`_REFUSED_AGAIN` since the user's last message.
+
+    A model that re-sends one of those a second time will not stop: answered and sent
+    back to the model, it looped until the turn's step budget, unseen by loop detection
+    (its ``after_model`` runs after this one's jump on the orchestrator).
+    """
+    start = next((i for i in range(len(messages) - 1, -1, -1) if isinstance(messages[i], HumanMessage)), -1)
+    turn = messages[start + 1 :]
+    calls = {call["id"]: call for m in turn if isinstance(m, AIMessage) for call in m.tool_calls}
+    return {
+        _call_signature(calls[m.tool_call_id])
+        for m in turn
+        if isinstance(m, ToolMessage)
+        and m.tool_call_id in calls
+        and isinstance(m.content, str)
+        and m.content.startswith(REFUSED_AGAIN_LEAD)
     }
 
 
@@ -522,7 +545,7 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
 
         return _answered(last_ai_msg, artificial_tool_messages)
 
-    @hook_config(can_jump_to=["model"])
+    @hook_config(can_jump_to=["model", "end"])
     async def aafter_model(self, state: AgentState[Any], runtime: Runtime[ContextT]) -> dict[str, Any] | None:
         """Async handler: combines static guards + dynamic risk scoring.
 
@@ -558,6 +581,9 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         # _unresolvable_tool_message.
         corrective_messages: dict[int, ToolMessage] = {}
         refused = _refused_this_turn(messages)
+        refused_again = _refused_again_this_turn(messages) if refused else set()
+        # A refused call sent a third time ends the turn (see _refused_again_this_turn).
+        end_turn = False
         # The step's first ``client_action`` invoke, if any — see 1c below.
         step_context: Any = getattr(runtime, "context", None)
         # The step's first invoke that changes the screen (``edit``, a dialog) — not one
@@ -618,6 +644,7 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
             #      retry instead of putting the same question to them again.
             if refused and _call_signature(tool_call) in refused:
                 logger.info("Tool call '%s' repeats a call the user refused this turn; not asking again", tool_name)
+                end_turn = end_turn or _call_signature(tool_call) in refused_again
                 corrective_messages[idx] = ToolMessage(
                     content=_REFUSED_AGAIN, name=tool_name, tool_call_id=tool_call["id"], status="error"
                 )
@@ -794,7 +821,7 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         if not action_requests:
             if not corrective_messages:
                 return None
-            return _answered(last_ai_msg, list(corrective_messages.values()))
+            return _answered(last_ai_msg, list(corrective_messages.values()), end=end_turn)
 
         # Attach a plain-language summary to each action request so the client
         # can show non-technical users what the tool would do. Display-only

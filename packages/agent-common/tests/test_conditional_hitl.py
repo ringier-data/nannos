@@ -799,3 +799,48 @@ def test_a_steering_message_after_a_reject_lets_the_user_ask_again():
     assert _refused_this_turn(messages)
     steer = HumanMessage(content="actually yes, save it", additional_kwargs={"steering": True})
     assert not _refused_this_turn([*messages, steer])
+
+
+class TestARefusedCallSentAgainAndAgain:
+    """The first retry of a refused call is answered NOT RUN and goes back to the model;
+    a second one ends the turn. Sent back again, it looped to the step budget on the
+    orchestrator, where loop detection never sees calls this middleware answered."""
+
+    SAVE = {"kind": "invoke", "target_type": "Settings", "target_id": "me", "action": "save"}
+
+    @staticmethod
+    def _call(call_id: str) -> AIMessage:
+        call = {"name": "client_action", "args": dict(TestARefusedCallSentAgainAndAgain.SAVE), "id": call_id}
+        return AIMessage(content="", tool_calls=[{**call, "type": "tool_call"}])
+
+    async def _after(self, monkeypatch, messages):
+        def never(request):
+            raise AssertionError("a refused call must not be put to the user again")
+
+        monkeypatch.setattr("agent_common.middleware.conditional_hitl.interrupt", never)
+
+        async def scorer(name, args, *, tool=None, cache=None, server_slug=None):
+            return 0.9, None
+
+        mw = ConditionalHumanInTheLoopMiddleware(interrupt_on={}, risk_scorer=scorer, default_risk_threshold=0.8)
+        monkeypatch.setattr(mw, "_get_server_slug", lambda *_: "embed")
+        context = types.SimpleNamespace(
+            tool_bypass_rules={}, tool_risk_cache=None, _pending_bypass_rules=[], client_objects=[]
+        )
+        return await mw.aafter_model({"messages": messages}, types.SimpleNamespace(context=context))
+
+    async def test_the_first_retry_goes_back_to_the_model_the_second_ends_the_turn(self, monkeypatch):
+        from agent_common.core.hitl_resume import CLICKED_REJECT_LEAD
+        from agent_common.middleware.conditional_hitl import _REFUSED_AGAIN
+
+        rejected = ToolMessage(content=f"{CLICKED_REJECT_LEAD}, no", tool_call_id="c1", status="error")
+        turn = [HumanMessage(content="save it"), self._call("c1"), rejected]
+
+        first = await self._after(monkeypatch, [*turn, self._call("c2")])
+        assert first["jump_to"] == "model"
+        assert first["messages"][-1].content == _REFUSED_AGAIN
+
+        again = ToolMessage(content=_REFUSED_AGAIN, tool_call_id="c2", status="error")
+        second = await self._after(monkeypatch, [*turn, self._call("c2"), again, self._call("c3")])
+        assert second["jump_to"] == "end"
+        assert second["messages"][-1].content == _REFUSED_AGAIN
