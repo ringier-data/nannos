@@ -233,3 +233,19 @@ class TestAStaleClickRunsNothing:
         assert not await OrchestratorDeepAgentExecutor._refuse_stale_decision(
             pending, _clicked({"type": "approve", "id": "x"}), _recording_updater(), _TASK
         )
+
+    async def test_a_sign_in_answer_with_nothing_pending_runs_as_a_turn(self):
+        """A remote sub-agent's auth-required leaves no orchestrator interrupt.
+
+        "Done, continue" on its sign-in card sends an authorization DataPart and asks to
+        retry; refused as a stale click, the user could never continue after signing in.
+        """
+        context = Mock(spec=RequestContext)
+        context.message = Mock(spec=Message)
+        context.message.parts = [Part(data=ParseDict({"authorization": {"decision": "approved"}}, Value()))]
+        updater = _recording_updater()
+
+        assert not await OrchestratorDeepAgentExecutor._refuse_stale_decision(
+            SimpleNamespace(interrupts=(), metadata={}), context, updater, _TASK
+        )
+        updater.update_status.assert_not_awaited()

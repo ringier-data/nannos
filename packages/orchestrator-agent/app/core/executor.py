@@ -105,6 +105,9 @@ def _metadata_keys(metadata: Any) -> list[str] | None:
     except AttributeError:
         return [f"<{type(metadata).__name__}>"]
 
+# How long a PARTIAL discovery (a source could not be listed) is cached.
+PARTIAL_DISCOVERY_TTL_S = 60.0
+
 # The reply to a click on a card that no longer waits for an answer.
 STALE_DECISION_MESSAGE = (
     "That request was already answered or replaced, so this click did nothing and nothing was run. "
@@ -345,6 +348,10 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         if extracted is None and authorization is None:
             return False
         interrupts = getattr(state, "interrupts", None) or ()
+        if not interrupts and extracted is None:
+            # A sign-in answer for a REMOTE sub-agent: its auth-required ends the turn
+            # without an orchestrator interrupt, and the message's text asks to retry.
+            return False
         if interrupts:
             decisions = [d for d in (extracted or {}).get("decisions", []) if isinstance(d, dict)]
             ids = {d["id"] for d in decisions if d.get("id")}
@@ -589,24 +596,34 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             )
         else:
             logger.debug(f"[DISCOVERY-CACHE] miss; discovering capabilities for user_sub: {user_config.user_sub}")
+            report = DiscoveryReport()
             sub_agents = await self.agent.agent_discovery_service.register_agents(
                 agent_metadata=user_config.agent_metadata or {},
                 token=user_config.access_token.get_secret_value(),
+                report=report,
             )
             # Discover ALL tools (without whitelist)
             # The whitelist will be applied later in build_runtime_context for orchestrator binding
             # Server info is stored in tool.metadata["server_name"] by MultiServerMCPClient
             discovery = self.agent.tool_discovery_service
             token_provider = discovery.make_token_provider(user_token_value) if discovery.oauth2_client else None
-            report = DiscoveryReport()
             tools = await discovery.discover_tools(
                 user_token_value,
                 white_list=None,  # Don't filter here - GP agent needs access to all tools
                 token_provider=token_provider,
                 report=report,
             )
+            # A partial result is cached only briefly: long enough that a source which
+            # keeps failing (a dead server, a dev stack without the gateway) does not
+            # cost a full discovery on every turn, short enough that one timeout does not
+            # hide tools for the whole TTL.
+            cache.put(
+                dkey,
+                (tools, sub_agents, token_provider),
+                user_token_value,
+                ttl_seconds=None if report.complete else PARTIAL_DISCOVERY_TTL_S,
+            )
             if report.complete:
-                cache.put(dkey, (tools, sub_agents, token_provider), user_token_value)
                 logger.info(
                     "[DISCOVERY-CACHE] miss → discovered %d tools, %d sub-agents for user_sub=%s",
                     len(tools),
@@ -614,12 +631,12 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     user_config.user_sub,
                 )
             else:
-                # A partial toolset serves this turn only; the next turn discovers again.
                 logger.warning(
-                    "[DISCOVERY-CACHE] miss → partial discovery (%s): %d tools for user_sub=%s, not cached",
+                    "[DISCOVERY-CACHE] miss → partial discovery (%s): %d tools for user_sub=%s, cached %ss",
                     "; ".join(report.reasons),
                     len(tools),
                     user_config.user_sub,
+                    PARTIAL_DISCOVERY_TTL_S,
                 )
         logger.debug(f"Discovered {len(sub_agents)} sub-agents: {[agent['name'] for agent in sub_agents]}")
         logger.debug(f"Discovered {len(tools)} total tools (cached or fresh)")
