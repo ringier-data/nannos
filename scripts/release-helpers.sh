@@ -333,7 +333,10 @@ get_bump_action() {
     echo "major"
   elif [[ $(echo "$commits" | grep -c "BREAKING CHANGE:") -gt 0 ]]; then
     echo "major"
-  elif echo "$commits" | grep -iq "^feat"; then
+  # A here-string, not `echo | grep -q`: grep -q exits at the first match, the echo
+  # then dies of SIGPIPE once the log outgrows the pipe buffer (64 KB), and under the
+  # callers' `pipefail` the whole test fails, so a feat release came out a patch.
+  elif grep -iq "^feat" <<< "$commits"; then
     echo "minor"
   else
     echo "patch"
