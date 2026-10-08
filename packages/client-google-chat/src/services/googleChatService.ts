@@ -3,6 +3,7 @@ import { Readable } from 'stream';
 import { Logger } from '../utils/logger.js';
 import { Config } from '../config/config.js';
 import { FileWithBytes } from '@a2a-js/sdk';
+import { callIdsOf, isInternalArg } from '../utils/hitlDecisions.js';
 
 const logger = Logger.getLogger('GoogleChatService');
 
@@ -18,12 +19,17 @@ function extractCallDisplay(args: Record<string, any>): {
   metaEntries: [string, unknown][];
   riskMeta: RiskMeta | undefined;
   isRiskScored: boolean;
+  summary: string;
 } {
   const contentKey = HITL_CONTENT_KEYS.find((k) => k in args);
   const proposedContent = contentKey ? String(args[contentKey] || '') : '';
-  const metaEntries = Object.entries(args).filter(([k]) => !HITL_CONTENT_KEYS.includes(k) && !HITL_HIDDEN_KEYS.includes(k));
+  const metaEntries = Object.entries(args).filter(
+    ([k]) => !HITL_CONTENT_KEYS.includes(k) && !HITL_HIDDEN_KEYS.includes(k) && !isInternalArg(k)
+  );
   const riskMeta = args._risk_metadata as RiskMeta | undefined;
-  return { proposedContent, metaEntries, riskMeta, isRiskScored: riskMeta?.source === 'risk_score' };
+  // The server's one-line plain-language summary of the call, shown as text.
+  const summary = typeof args._summary === 'string' ? args._summary : '';
+  return { proposedContent, metaEntries, riskMeta, isRiskScored: riskMeta?.source === 'risk_score', summary };
 }
 
 /** Format the risk badge line for a risk-scored call, e.g. "🛡️ Risk: High (82%) — matched: <code>…</code>". */
@@ -495,11 +501,14 @@ export class GoogleChatService {
     config: Config,
     toolName: string,
     reason: string,
-    parameters: Record<string, string>,
+    cardParameters: Record<string, unknown>,
     allowedDecisions: string[] = ['approve', 'reject'],
     actionRequests?: any[],
   ): chat_v1.Schema$CardWithId {
     const toolLabel = toolName.replace(/_/g, ' ');
+    // The calls this card answers: a click names them, so a click on a card that was
+    // already answered (in words) or replaced cannot answer a newer one.
+    const parameters = { ...cardParameters, callIds: callIdsOf(actionRequests) };
     const buttonClickHandlerUrl = new URL(`/api/v1/chat/events`, config.baseUrl).toString();
     const editAllowed = allowedDecisions.includes('edit');
     const approveAllowed = allowedDecisions.includes('approve');
@@ -507,7 +516,7 @@ export class GoogleChatService {
     // Extract proposed args + risk metadata for display and bypass buttons.
     const firstAction = actionRequests?.[0];
     const toolArgs = firstAction?.args || {};
-    const { proposedContent, metaEntries, riskMeta, isRiskScored } = extractCallDisplay(toolArgs);
+    const { proposedContent, metaEntries, riskMeta, isRiskScored, summary } = extractCallDisplay(toolArgs);
 
     const buttons: any[] = [
       {
@@ -606,7 +615,7 @@ export class GoogleChatService {
             widgets: [
               {
                 textParagraph: {
-                  text: `<b>Reason:</b>\n${reason}`,
+                  text: `${summary ? `${summary.substring(0, 1000)}\n` : ''}<b>Reason:</b>\n${reason}`,
                 },
               } as any,
               // Show risk score indicator for risk-scored tools
@@ -762,14 +771,14 @@ export class GoogleChatService {
       const isRisk = rm?.source === 'risk_score';
       return { id: a?.args?._call_id, pattern: isRisk ? (rm?.matched_pattern || undefined) : undefined };
     });
-    const params = { ...parameters, calls };
+    const params = { ...parameters, calls, callIds: callIdsOf(actionRequests) };
     const paramsJson = JSON.stringify(params);
 
     const widgets: any[] = [];
     actionRequests.forEach((action, i) => {
       const args = action?.args || {};
       const toolLabel = String(action?.name || 'unknown').replace(/_/g, ' ');
-      const reason = String((args.description ?? args.reason) || '');
+      const reason = String((args.description ?? args.reason ?? args._summary) || '');
       const { proposedContent, metaEntries, riskMeta, isRiskScored } = extractCallDisplay(args);
 
       if (i > 0) widgets.push({ divider: {} });
@@ -849,7 +858,7 @@ export class GoogleChatService {
   buildHitlFeedbackCard(
     config: Config,
     toolName: string,
-    parameters: Record<string, string>,
+    parameters: Record<string, unknown>,
   ): chat_v1.Schema$CardWithId {
     const toolLabel = toolName.replace(/_/g, ' ');
     const buttonClickHandlerUrl = new URL(`/api/v1/chat/events`, config.baseUrl).toString();

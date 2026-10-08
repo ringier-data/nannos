@@ -4,6 +4,7 @@ import type {
   IInFlightTaskStore,
   IUserAuthStorage,
   IScheduledRunStore,
+  IHitlCardStore,
 } from '../storage/types.js';
 
 import { A2AClientService } from "../services/a2aClientService.js";
@@ -30,6 +31,12 @@ export interface HandlerDependencies {
   fileStorageService: FileStorageService;
   userAuthStorage: IUserAuthStorage;
   scheduledRunStore: IScheduledRunStore;
+  /**
+   * Remembers which card asks about which call, so a typed answer can settle it.
+   * Optional: without it a card answered in words keeps its buttons, and the server
+   * refuses a later click on it.
+   */
+  hitlCardStore?: IHitlCardStore;
   feedbackService?: FeedbackService;
   config: Config;
   /**

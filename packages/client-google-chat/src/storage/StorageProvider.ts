@@ -6,6 +6,7 @@ import type {
   IOAuthStateStore,
   IInstallationSecretStore,
   IScheduledRunStore,
+  IHitlCardStore,
 } from './types.js';
 
 /**
@@ -20,6 +21,7 @@ export abstract class StorageProvider {
   abstract readonly oauthState: IOAuthStateStore;
   abstract readonly installationSecret: IInstallationSecretStore;
   abstract readonly scheduledRun: IScheduledRunStore;
+  abstract readonly hitlCard: IHitlCardStore;
 
   /**
    * Gracefully shutdown the storage provider.

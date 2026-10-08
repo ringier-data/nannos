@@ -51,4 +51,5 @@ export type {
   IInstallationSecretStore,
   ScheduledRunRecord,
   IScheduledRunStore,
+  IHitlCardStore,
 } from './types.js';

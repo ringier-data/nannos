@@ -7,7 +7,8 @@ import type { IUserAuthService } from '../services/userAuthService.js';
 import { A2AGoogleChatBasedRequest } from '../services/a2aClientService.js';
 import { GoogleChatService } from '../services/googleChatService.js';
 import type { Message, Task, TaskStatusUpdateEvent } from '@a2a-js/sdk';
-import type { ContextRecord, IInFlightTaskStore, IPendingRequestStore } from '../storage/types.js';
+import type { ContextRecord, IHitlCardStore, IInFlightTaskStore, IPendingRequestStore } from '../storage/types.js';
+import { callIdsOf, typedDecisionText, type TypedDecision } from '../utils/hitlDecisions.js';
 import { handleTask, handleError, isInterruptedOrTerminated } from '../utils/taskResponseHandler.js';
 import { HandlerDependencies } from './types.js';
 import { FileStorageService } from '../services/fileStorageService.js';
@@ -446,6 +447,37 @@ async function processAuthRequiredEvent(
   }
 }
 
+const HITL_DECISION_EXTENSION = 'urn:nannos:a2a:hitl-decision:1.0';
+
+/**
+ * Settle the approval cards a TYPED answer just decided, so their buttons stop being
+ * clickable. A click updates its own card; words reach the server without touching
+ * it. Best-effort: a card it cannot find or update keeps its buttons, and the server
+ * refuses a later click on it anyway.
+ */
+export async function settleTypedDecisions(
+  chatService: GoogleChatService,
+  hitlCardStore: IHitlCardStore,
+  projectId: string,
+  decisions: TypedDecision[],
+  logger: Logger
+): Promise<void> {
+  const byId = new Map(decisions.filter((d) => d?.id).map((d) => [d.id as string, d]));
+  if (byId.size === 0) return;
+  try {
+    const cards = await hitlCardStore.take(projectId, [...byId.keys()]);
+    // One verdict per card is enough to title it; a card's calls share one answer.
+    const text = typedDecisionText(byId.values().next().value as TypedDecision);
+    for (const messageName of cards) {
+      await chatService.updateMessage({ projectId, messageName, text, cardsV2: [] }).catch((err) => {
+        logger.debug({ err }, `Could not settle approval card ${messageName}`);
+      });
+    }
+  } catch (err) {
+    logger.debug({ err }, `Could not settle approval cards answered in words`);
+  }
+}
+
 async function processHumanInTheLoopEvent(
   logger: Logger,
   chatService: GoogleChatService,
@@ -456,7 +488,8 @@ async function processHumanInTheLoopEvent(
   userId: string,
   accumulatedTask: Task,
   statusEvent: TaskStatusUpdateEvent,
-  config: Config
+  config: Config,
+  hitlCardStore?: IHitlCardStore
 ) {
   logger.info({ taskId: accumulatedTask?.id }, `Received HITL interrupt via extension`);
 
@@ -508,7 +541,14 @@ async function processHumanInTheLoopEvent(
 
     logger.info({ taskId: accumulatedTask?.id, toolNames }, `Posting HITL interrupt card to Google Chat`);
 
-    await chatService.sendPrivateCardMessage(projectId, spaceId, userId, [hitlCard], threadId);
+    const posted = await chatService.sendPrivateCardMessage(projectId, spaceId, userId, [hitlCard], threadId);
+
+    // Remember which card asks about which call, so a typed answer can settle it.
+    if (hitlCardStore && posted?.name) {
+      await hitlCardStore.set(projectId, posted.name, callIdsOf(actionRequests)).catch((err) => {
+        logger.warn({ err }, `Could not remember the approval card for later settling`);
+      });
+    }
 
     // Store the interrupt context
     await inFlightTaskStore.touch(accumulatedTask.id).catch((err) => {
@@ -585,6 +625,7 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
     fileStorageService,
     feedbackService,
     scheduledRunStore,
+    hitlCardStore,
     config,
   } = deps;
 
@@ -793,8 +834,19 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
               userId,
               accumulatedTask,
               statusEvent,
-              config
+              config,
+              hitlCardStore
             );
+          }
+
+          // A typed answer to an approval card was read: settle that card, which a
+          // click would have done itself.
+          if (hitlCardStore && statusEvent.status.message?.extensions?.includes(HITL_DECISION_EXTENSION)) {
+            const decisionPart = statusEvent.status.message.parts?.find((p) => p.kind === 'data') as
+              | { kind: 'data'; data: { decisions?: unknown } }
+              | undefined;
+            const typed = Array.isArray(decisionPart?.data?.decisions) ? (decisionPart.data.decisions as TypedDecision[]) : [];
+            await settleTypedDecisions(chatService, hitlCardStore, projectId, typed, logger);
           }
 
           if (statusEvent.status.state === 'auth-required' && !authCardPosted) {

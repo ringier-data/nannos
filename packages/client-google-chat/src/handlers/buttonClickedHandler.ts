@@ -7,6 +7,7 @@ import { handleIncomingMessage, NormalizedMessage } from './messageHandler.js';
 import { HandlerDependencies } from "./types.js";
 import { GoogleChatService } from '../services/googleChatService.js';
 import { AuthDecision, authResumeText, authorizationDataPart } from '../utils/inTaskAuth.js';
+import { forCalls } from '../utils/hitlDecisions.js';
 
 export interface ButtonClickedPayload {
   cardId: string,
@@ -30,6 +31,8 @@ interface ButtonHitlCardClickedParameters {
   taskId: string;
   toolName?: string;
   matchedPattern?: string;
+  /** The calls the card answers; absent on cards posted before they were carried. */
+  callIds?: string[];
 }
 
 async function handleFeedbackCardClick(
@@ -93,7 +96,7 @@ async function handleHitlCardClick(payload: ButtonClickedPayload, deps: HandlerD
     const feedbackCard = deps.chatService.buildHitlFeedbackCard(
       deps.config,
       toolLabel,
-      { taskId: actionParameters.taskId },
+      { taskId: actionParameters.taskId, callIds: actionParameters.callIds },
     );
 
     await deps.chatService.updateMessage({
@@ -110,18 +113,20 @@ async function handleHitlCardClick(payload: ButtonClickedPayload, deps: HandlerD
 
   if (payload.action === 'approve') {
     confirmText = '✅ Approved';
-    decisions = { decisions: [{ type: 'approve' }] };
+    decisions = { decisions: forCalls({ type: 'approve' }, actionParameters.callIds) };
   } else if (payload.action === 'approve_bypass_tool') {
     confirmText = '✅ Approved (always allow this tool)';
-    decisions = { decisions: [{ type: 'approve', bypass: true, bypass_all: true }] };
+    decisions = { decisions: forCalls({ type: 'approve', bypass: true, bypass_all: true }, actionParameters.callIds) };
   } else if (payload.action === 'approve_bypass_pattern') {
     const matchedPattern = (actionParameters as any).matchedPattern;
     confirmText = `✅ Approved (pattern allowed: ${matchedPattern || 'unknown'})`;
-    decisions = { decisions: [{ type: 'approve', bypass: true, bypass_pattern: matchedPattern }] };
+    decisions = {
+      decisions: forCalls({ type: 'approve', bypass: true, bypass_pattern: matchedPattern }, actionParameters.callIds),
+    };
   } else {
     confirmText = '❌ Rejected';
     // No message → the server supplies the default rejection text.
-    decisions = { decisions: [{ type: 'reject' }] };
+    decisions = { decisions: forCalls({ type: 'reject' }, actionParameters.callIds) };
   }
 
   await deps.chatService.updateMessage({
@@ -155,18 +160,22 @@ async function handleHitlCardClick(payload: ButtonClickedPayload, deps: HandlerD
  */
 async function handleHitlMultiCardClick(payload: ButtonClickedPayload, deps: HandlerDependencies) {
   const logger = Logger.getLogger('handleHitlMultiCardClick');
-  const params = payload.actionParameters as unknown as { taskId?: string; calls?: Array<{ id?: string; pattern?: string }> };
+  const params = payload.actionParameters as unknown as {
+    taskId?: string;
+    calls?: Array<{ id?: string; pattern?: string }>;
+    callIds?: string[];
+  };
 
   let confirmText: string;
   let decisions: Record<string, unknown>;
 
   if (payload.action === 'approve') {
     confirmText = '✅ Approved all';
-    decisions = { decisions: [{ type: 'approve' }] };
+    decisions = { decisions: forCalls({ type: 'approve' }, params.callIds) };
   } else if (payload.action === 'reject') {
     confirmText = '❌ Rejected all';
     // No message → the server supplies the default rejection text.
-    decisions = { decisions: [{ type: 'reject' }] };
+    decisions = { decisions: forCalls({ type: 'reject' }, params.callIds) };
   } else {
     // submit_multi — one decision per call, in action_request order, by id.
     const calls = Array.isArray(params.calls) ? params.calls : [];
@@ -262,7 +271,7 @@ async function handleHitlFeedbackCardClick(payload: ButtonClickedPayload, deps: 
 
   // Send reject decision with user's feedback so the LLM re-proposes
   const rejectMessage = `The user requested changes to this tool call. Please revise and try again.\n\nUser feedback: ${feedback}`;
-  const decisions = { decisions: [{ type: 'reject', message: rejectMessage }] };
+  const decisions = { decisions: forCalls({ type: 'reject', message: rejectMessage }, actionParameters.callIds) };
 
   const syntheticMessage: NormalizedMessage = {
     userId: payload.userId,

@@ -205,6 +205,7 @@ function setupServerTimeouts(server: Server, config: Config) {
       inFlightTaskStore: storage.inFlightTask,
       userAuthStorage: storage.userAuth,
       scheduledRunStore: storage.scheduledRun,
+      hitlCardStore: storage.hitlCard,
       fileStorageService,
       feedbackService,
       scheduledRunResumeService,
