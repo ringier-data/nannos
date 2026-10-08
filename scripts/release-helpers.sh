@@ -412,3 +412,19 @@ build_with_pane() {
   fi
   return $rc
 }
+
+# Run a command, retrying transient failures (registry 5xx, mirror timeouts)
+# with backoff. Gives up after 3 attempts and returns the last exit code.
+# Usage: with_retries docker buildx build ...
+with_retries() {
+  local attempt rc=0
+  for attempt in 1 2 3; do
+    if "$@"; then return 0; else rc=$?; fi
+    if [[ $attempt -lt 3 ]]; then
+      printf '\n\033[1;33m🔁 Attempt %d failed (exit %d), retrying in %ds...\033[0m\n' \
+        "$attempt" "$rc" "$((attempt * 15))" >&2
+      sleep $((attempt * 15))
+    fi
+  done
+  return $rc
+}

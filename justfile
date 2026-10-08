@@ -720,7 +720,7 @@ build-pkg pkg:
     T=$SECONDS
 
     build_with_pane "$PKG" "$LOGFILE" \
-      docker buildx build --platform "$PLATFORM" \
+      with_retries docker buildx build --platform "$PLATFORM" \
       "${BUILD_CTX_ARGS[@]}" \
       ${TARGET_ARGS[@]+"${TARGET_ARGS[@]}"} \
       -t "${IMAGE}:${TAG}" "${DIR}"
@@ -734,7 +734,7 @@ build-pkg pkg:
       trap 'printf "${RED}❌ Push failed.${RESET} Full log: ${DIM}%s${RESET}\n" "$LOGFILE"; tail -20 "$LOGFILE"; exit 1' ERR
 
       build_with_pane "$PKG" "$LOGFILE" \
-        docker buildx build --platform "$PLATFORM" \
+        with_retries docker buildx build --platform "$PLATFORM" \
         "${BUILD_CTX_ARGS[@]}" \
         ${TARGET_ARGS[@]+"${TARGET_ARGS[@]}"} \
         -t "${IMAGE}:${TAG}" --push "${DIR}"
@@ -825,24 +825,6 @@ deploy-dev-all:
         printf "${RED}   ✗ %s${RESET}\n" "${PKGS[$i]}"
       fi
     done
-
-    # Retry failures once, sequentially: parallel builds share one uplink, and
-    # most failures are transient fetches (apt mirrors, registry pushes).
-    if [[ ${#FAILED[@]} -gt 0 ]]; then
-      printf "${YELLOW}🔁 Retrying %d failed package(s) sequentially...${RESET}\n" "${#FAILED[@]}"
-      RETRY=("${FAILED[@]}")
-      FAILED=()
-      for pkg in "${RETRY[@]}"; do
-        VERSION="$(get_package_version "$pkg")"
-        TAG="v${VERSION}-next.${TS}"
-        if just tag="$TAG" push=true build-pkg "$pkg" > "${LOG_DIR}/${pkg}.log" 2>&1; then
-          printf "${GREEN}   ✓ %s${RESET}\n" "$pkg"
-        else
-          FAILED+=("$pkg")
-          printf "${RED}   ✗ %s${RESET}\n" "$pkg"
-        fi
-      done
-    fi
 
     if [[ ${#FAILED[@]} -gt 0 ]]; then
       printf "\n${RED}❌ Failed to build %d package(s):${RESET}\n" "${#FAILED[@]}"
