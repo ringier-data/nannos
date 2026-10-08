@@ -16,6 +16,7 @@ from agent_common.core.hitl_resume import (
     KIND_AUTH,
     KIND_HITL,
     KIND_OTHER,
+    _classifier_prompt,
     authorization_from_decisions,
     authorization_verdict,
     decisions_from_resume,
@@ -251,6 +252,37 @@ class TestDecisionsFromResume:
         with _classification("reject"):
             decisions = decisions_from_resume_sync("stop", ACTION_REQUESTS)
         assert [d["type"] for d in decisions] == ["reject"]
+
+    @pytest.mark.asyncio
+    async def test_only_the_users_words_are_classified(self):
+        """Slack and Google Chat put the thread's history before the new message.
+
+        The classifier read the bot's own "Approval required" lines along with the
+        user's "maybe later", and called it an approval: the call ran.
+        """
+        wrapped = (
+            "<thread_context>\n"
+            '<message role="assistant" userName="Nannos">Approval required</message>\n'
+            "</thread_context>\n"
+            '<current_request userId="U1" userName="Andrea">maybe later</current_request>'
+        )
+        with _classification("unclear") as model_factory:
+            decisions = await decisions_from_resume(wrapped, ACTION_REQUESTS)
+            sync_decisions = decisions_from_resume_sync(wrapped, ACTION_REQUESTS)
+
+        prompt = model_factory.return_value.ainvoke.call_args.args[0][1]["content"]
+        assert prompt.endswith("The user replied:\nmaybe later")
+        assert "Approval required" not in prompt
+        assert model_factory.return_value.invoke.call_args.args[0][1]["content"] == prompt
+        for d in (decisions[0], sync_decisions[0]):
+            assert "They said: maybe later " in d["message"]
+            assert "thread_context" not in d["message"]
+
+    def test_a_deferral_is_not_approval(self):
+        """The rule the fast model needs for "maybe later" / "not yet"."""
+        system = _classifier_prompt("maybe later", ACTION_REQUESTS, None)[0]["content"]
+        assert "'maybe later'" in system
+        assert "NOT approval" in system
 
 
 class TestTypedDecisionAnnouncement:

@@ -252,8 +252,22 @@ _CLASSIFIER_SYSTEM_PROMPT = (
     "it (e.g. \'what\'s this?\', \'what does it do?\', \'why do you need it?\', "
     "\'is that safe?\'). A question is NOT a refusal, however sceptical it sounds.\n"
     "- 'unclear' when the reply is about something else entirely, or you cannot tell.\n"
+    "- A reply that puts the decision off or hedges it ('maybe later', 'not yet', "
+    "'let me think', 'hold on', 'maybe', 'later') is NOT approval: it is 'unclear'. "
+    "Approval means going ahead NOW.\n"
     "- Never infer approval from politeness, from a question, or from silence."
 )
+
+# Chat clients send the thread's history ahead of the new message and wrap the
+# message itself in this element. Only the user's own words answer the approval:
+# the history is the bot's earlier output ("Approval required", the card's text).
+_CURRENT_REQUEST_RE = re.compile(r"<current_request\b[^>]*>(.*?)</current_request>", re.DOTALL)
+
+
+def _users_words(reply: str) -> str:
+    """The text the user typed, without the thread history a chat client puts before it."""
+    found = _CURRENT_REQUEST_RE.findall(reply)
+    return found[-1].strip() if found else reply
 
 
 def _classifier_prompt(reply: str, action_requests: list[Any], question: str | None) -> list[dict[str, str]]:
@@ -510,6 +524,7 @@ async def decisions_from_resume(resume: Any, action_requests: list[Any]) -> list
     if structural is not None:
         return structural
     reply = resume if isinstance(resume, str) else str((resume or {}).get("authorization", {}).get("message", ""))
+    reply = _users_words(reply)
     intent = await classify_reply(reply, action_requests)
     decisions = _from_intent(intent, reply, action_requests)
     _announce_typed_decisions(intent, decisions)
@@ -522,6 +537,7 @@ def decisions_from_resume_sync(resume: Any, action_requests: list[Any]) -> list[
     if structural is not None:
         return structural
     reply = resume if isinstance(resume, str) else str((resume or {}).get("authorization", {}).get("message", ""))
+    reply = _users_words(reply)
     intent = classify_reply_sync(reply, action_requests)
     decisions = _from_intent(intent, reply, action_requests)
     _announce_typed_decisions(intent, decisions)
