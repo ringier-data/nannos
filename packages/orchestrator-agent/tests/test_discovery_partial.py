@@ -123,6 +123,20 @@ class TestOnlyACompleteDiscoveryIsCached:
         (entry,) = dc._discovery_cache._store.values()
         assert entry.expires_at - time.time() <= PARTIAL_DISCOVERY_TTL_S + 1
 
+    def test_brief_is_shorter_than_the_default_full_ttl(self):
+        # Round 11: at 60 s it equalled the default TTL, so one timeout hid tools as long as before.
+        assert PARTIAL_DISCOVERY_TTL_S < AgentSettings.AGENT_DISCOVERY_CACHE_TTL
+
+    def test_a_per_entry_ttl_never_outlives_the_cache_ttl(self):
+        token = _jwt_with_exp(int(time.time()) + 3600)
+        off = dc.TtlTokenCache(0, name="T")
+        off.put("k", "partial", token, ttl_seconds=PARTIAL_DISCOVERY_TTL_S)
+        assert off.get("k") is None  # caching off stores nothing, partial or not
+
+        short = dc.TtlTokenCache(5, name="T")
+        short.put("k", "partial", token, ttl_seconds=PARTIAL_DISCOVERY_TTL_S)
+        assert short._store["k"].expires_at - time.time() <= 5
+
     @pytest.mark.asyncio
     async def test_a_missing_sub_agent_card_makes_it_partial(self):
         from app.core.discovery import AgentDiscoveryService

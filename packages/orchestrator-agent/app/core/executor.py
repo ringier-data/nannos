@@ -105,8 +105,9 @@ def _metadata_keys(metadata: Any) -> list[str] | None:
     except AttributeError:
         return [f"<{type(metadata).__name__}>"]
 
-# How long a PARTIAL discovery (a source could not be listed) is cached.
-PARTIAL_DISCOVERY_TTL_S = 60.0
+# How long a PARTIAL discovery (a source could not be listed) is cached: well under the
+# default full TTL (AGENT_DISCOVERY_CACHE_TTL, 60 s), and never past it (the cache clamps).
+PARTIAL_DISCOVERY_TTL_S = 15.0
 
 # The reply to a click on a card that no longer waits for an answer.
 STALE_DECISION_MESSAGE = (
