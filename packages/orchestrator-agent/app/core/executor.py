@@ -104,6 +104,12 @@ def _metadata_keys(metadata: Any) -> list[str] | None:
     except AttributeError:
         return [f"<{type(metadata).__name__}>"]
 
+# The reply to a click on a card that no longer waits for an answer.
+STALE_DECISION_MESSAGE = (
+    "That request was already answered or replaced, so this click did nothing and nothing was run. "
+    "If a newer request is waiting, answer that one."
+)
+
 # An authorization answer whose verdict this build cannot read, delivered where a
 # tool APPROVAL was the pending question. Neither yes nor no, so the call must not
 # run — and the model has to be told, or it assumes the call succeeded.
@@ -173,6 +179,14 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             default now lives one step further down, in ``decisions_from_resume``,
             which rejects whenever the words cannot be read as a clear yes.
         """
+        data = OrchestratorDeepAgentExecutor._decisions_part(context)
+        if data is None:
+            logger.info("[HITL] No data part with decisions: the user's own words are the answer")
+        return data
+
+    @staticmethod
+    def _decisions_part(context: RequestContext) -> dict | None:
+        """The ``{"decisions": [...]}`` DataPart of the incoming message, if it has one."""
         from google.protobuf.json_format import MessageToDict
 
         if context.message and context.message.parts:
@@ -181,8 +195,6 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                     data = MessageToDict(part.data)
                     if isinstance(data, dict) and "decisions" in data:
                         return data
-
-        logger.info("[HITL] No data part with decisions: the user's own words are the answer")
         return None
 
     @staticmethod
@@ -312,6 +324,43 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         await updater.update_status(
             TaskState.TASK_STATE_COMPLETED,
             new_text_message(foreign_interrupt_message(owner.user_name), context_id=task.context_id, task_id=task.id),
+        )
+        return True
+
+    @classmethod
+    async def _refuse_stale_decision(
+        cls, state: Any, context: RequestContext, updater: TaskUpdater, task: Any
+    ) -> bool:
+        """Answer, and report True, when a clicked decision has no pending call to answer.
+
+        A chat card keeps its buttons after the user answered it in words, or after a
+        newer card replaced it. A click on it arrives with no text: with nothing
+        pending it ran as an empty turn ("your message was empty"), and against a
+        newer card its unmatched call id silently rejected that card. The graph is
+        left untouched, so a newer pending card stays answerable.
+        """
+        extracted = cls._decisions_part(context)
+        authorization = cls._extract_authorization_decision(context)
+        if extracted is None and authorization is None:
+            return False
+        interrupts = getattr(state, "interrupts", None) or ()
+        if interrupts:
+            ids = {
+                d["id"] for d in (extracted or {}).get("decisions", []) if isinstance(d, dict) and d.get("id")
+            }
+            if not ids:
+                return False  # a blanket decision answers whatever is pending
+            pending = {
+                cls._action_request_call_id(ar)
+                for intr in interrupts
+                for ar in ((getattr(intr, "value", intr) or {}).get("action_requests") or [])
+            }
+            if ids & pending:
+                return False
+        logger.info(f"[HITL] A decision arrived for no pending call on context {task.context_id}; nothing was run")
+        await updater.update_status(
+            TaskState.TASK_STATE_COMPLETED,
+            new_text_message(STALE_DECISION_MESSAGE, context_id=task.context_id, task_id=task.id),
         )
         return True
 
@@ -1137,6 +1186,8 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             current_state = await graph.aget_state(config)  # type: ignore
 
             if await self._refuse_foreign_interrupt(current_state, user.id, updater, task):
+                return
+            if await self._refuse_stale_decision(current_state, context, updater, task):
                 return
 
             # Check if the graph is currently interrupted and this might be a resume request
