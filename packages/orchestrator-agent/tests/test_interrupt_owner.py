@@ -205,3 +205,31 @@ class TestAStaleClickRunsNothing:
 
         assert not await OrchestratorDeepAgentExecutor._refuse_stale_decision(idle, _typed(), updater, _TASK)
         updater.update_status.assert_not_awaited()
+
+    async def test_a_client_action_result_is_never_a_stale_click(self):
+        """The dock answers a client action (read the page) with its result.
+
+        The guard collected only approval call ids, so the dock's result to
+        ``read_current_page`` was refused as "already answered" and the turn ended.
+        """
+        pending = SimpleNamespace(
+            interrupts=(SimpleNamespace(id="i1", value={"client_action_request": {"id": "ca-1"}}),),
+            metadata={},
+        )
+        for decision in (
+            {"type": "approve", "id": "ca-1", "client_action_result": {"ok": True}},
+            {"type": "approve", "id": "other", "client_action_result": {"ok": True}},
+            {"type": "approve", "id": "ca-1"},
+        ):
+            updater = _recording_updater()
+            assert not await OrchestratorDeepAgentExecutor._refuse_stale_decision(
+                pending, _clicked(decision), updater, _TASK
+            ), decision
+            updater.update_status.assert_not_awaited()
+
+    async def test_an_unknown_question_is_left_to_its_reader(self):
+        """An authorization prompt has no call id to compare a click against."""
+        pending = SimpleNamespace(interrupts=(SimpleNamespace(id="i1", value={"task_state": "auth"}),), metadata={})
+        assert not await OrchestratorDeepAgentExecutor._refuse_stale_decision(
+            pending, _clicked({"type": "approve", "id": "x"}), _recording_updater(), _TASK
+        )

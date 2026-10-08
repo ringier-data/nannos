@@ -345,16 +345,23 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             return False
         interrupts = getattr(state, "interrupts", None) or ()
         if interrupts:
-            ids = {
-                d["id"] for d in (extracted or {}).get("decisions", []) if isinstance(d, dict) and d.get("id")
-            }
+            decisions = [d for d in (extracted or {}).get("decisions", []) if isinstance(d, dict)]
+            ids = {d["id"] for d in decisions if d.get("id")}
             if not ids:
                 return False  # a blanket decision answers whatever is pending
-            pending = {
-                cls._action_request_call_id(ar)
-                for intr in interrupts
-                for ar in ((getattr(intr, "value", intr) or {}).get("action_requests") or [])
-            }
+            pending: set[Any] = set()
+            for intr in interrupts:
+                value = getattr(intr, "value", intr)
+                if isinstance(value, dict) and "action_requests" in value:
+                    pending.update(cls._action_request_call_id(ar) for ar in value.get("action_requests") or [])
+                elif isinstance(value, dict) and "client_action_request" in value:
+                    # The browser's result to a client action (read the page, fill a form):
+                    # matched by request id, and a result still resolves without one.
+                    if any("client_action_result" in d for d in decisions):
+                        return False
+                    pending.add((value.get("client_action_request") or {}).get("id"))
+                else:
+                    return False  # an authorization prompt or another question: no id to compare
             if ids & pending:
                 return False
         logger.info(f"[HITL] A decision arrived for no pending call on context {task.context_id}; nothing was run")
