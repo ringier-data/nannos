@@ -73,6 +73,7 @@ from .a2a_extensions import (
 from ..handlers import StreamHandler
 from .agent import OrchestratorDeepAgent
 from .budget_guard import get_budget_guard
+from .discovery import DiscoveryReport
 from .discovery_cache import (
     cache_key,
     get_discovery_cache,
@@ -597,18 +598,29 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             # Server info is stored in tool.metadata["server_name"] by MultiServerMCPClient
             discovery = self.agent.tool_discovery_service
             token_provider = discovery.make_token_provider(user_token_value) if discovery.oauth2_client else None
+            report = DiscoveryReport()
             tools = await discovery.discover_tools(
                 user_token_value,
                 white_list=None,  # Don't filter here - GP agent needs access to all tools
                 token_provider=token_provider,
+                report=report,
             )
-            cache.put(dkey, (tools, sub_agents, token_provider), user_token_value)
-            logger.info(
-                "[DISCOVERY-CACHE] miss → discovered %d tools, %d sub-agents for user_sub=%s",
-                len(tools),
-                len(sub_agents),
-                user_config.user_sub,
-            )
+            if report.complete:
+                cache.put(dkey, (tools, sub_agents, token_provider), user_token_value)
+                logger.info(
+                    "[DISCOVERY-CACHE] miss → discovered %d tools, %d sub-agents for user_sub=%s",
+                    len(tools),
+                    len(sub_agents),
+                    user_config.user_sub,
+                )
+            else:
+                # A partial toolset serves this turn only; the next turn discovers again.
+                logger.warning(
+                    "[DISCOVERY-CACHE] miss → partial discovery (%s): %d tools for user_sub=%s, not cached",
+                    "; ".join(report.reasons),
+                    len(tools),
+                    user_config.user_sub,
+                )
         logger.debug(f"Discovered {len(sub_agents)} sub-agents: {[agent['name'] for agent in sub_agents]}")
         logger.debug(f"Discovered {len(tools)} total tools (cached or fresh)")
 
