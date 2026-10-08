@@ -14,10 +14,16 @@ one possible move, whatever the model or strategy:
 - Bind-as-tool (``FinalResponseSchema`` / ``SubAgentResponseSchema`` among the tools):
   only that tool is kept.
 
-Offered only the response tool, Claude Sonnet 4.6 still emitted the refused call again,
-copied from its own history: so the step also says so in the system prompt, a reply that
-calls a tool it was not offered is asked for once more, and if it still does, the answer
-is written for it — "that was not done" — in the response shape its strategy expects.
+Offering only the response tool is not enough on its own. Clients that publish page
+context (the console dock) append it as a user message AFTER the tool results on every
+step, and a user turn after the refusal reads as a new ask. Replaying a captured request
+(2026-10-08), Claude Sonnet 4.6 answered with the refused ``client_action``, a tool it was
+not offered, in 10 out of 10 tries, and in 8 of 10 even with that page message cut down to
+its path. An instruction in the system prompt did not change that. With the instruction as
+the LAST message, naming the response tool, it answered in 10 of 10. So the instruction is
+appended after everything else on the step. If a reply still calls only tools it was not
+offered, the answer ("that was not done") is written for it in the response shape its
+strategy expects, and logged as a warning: that is a last resort, not the mechanism.
 
 It must sit innermost: the orchestrator injects its tool registry in an outer
 ``wrap_model_call``, and an outer filter would be overridden.
@@ -37,7 +43,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMe
 from agent_common.a2a.structured_response import REFUSED_REPLY, STOPPED_REPLY
 from agent_common.core.hitl_resume import SKIPPED_AUTH_LEAD
 from agent_common.core.turn_stops import BLOCKED_LEAD, DECLINED_AUTH_LEAD, REFUSED_AGAIN_LEAD
-from agent_common.middleware.utils import VOLATILE_CONTEXT_KEY, append_to_system_message
+from agent_common.middleware.utils import VOLATILE_CONTEXT_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -111,8 +117,7 @@ def _tool_name(tool: Any) -> str | None:
     return getattr(tool, "name", None)
 
 
-#: Said on the narrowed step: offered only the response tool, Claude still re-sent the
-#: refused call, copying its own history, so the rule is spelled out as well.
+#: Said on the narrowed step, as its LAST message (see the module docstring).
 ANSWER_NOW = (
     "The user already refused this call, or it kept being blocked. Do not call any other tool, and "
     "do not repeat that call: answer the user now with {tools}: say plainly what was not done, and "
@@ -158,6 +163,16 @@ def _off_list_calls(response: ModelResponse, allowed: set[str]) -> list[str]:
     return [call.get("name", "") for call in calls]
 
 
+def _called(response: ModelResponse) -> list[str]:
+    """The tool names a response calls, in order — for the narrowing's diagnostics."""
+    return [
+        call.get("name", "")
+        for message in response.result
+        if isinstance(message, AIMessage)
+        for call in message.tool_calls
+    ]
+
+
 def _kept(response: ModelResponse, allowed: set[str]) -> ModelResponse:
     """The response without calls to tools that were not offered, when it also answers."""
     result = []
@@ -177,6 +192,14 @@ def _kept(response: ModelResponse, allowed: set[str]) -> ModelResponse:
     return ModelResponse(result=result, structured_response=response.structured_response)
 
 
+def _strategy_tool_names(request: ModelRequest) -> list[str]:
+    """The structured-output tools a ``ToolStrategy`` binds itself (absent from ``request.tools``)."""
+    strategy = request.response_format
+    if isinstance(strategy, ToolStrategy):
+        return [spec.name for spec in strategy.schema_specs]
+    return []
+
+
 class AnswerAfterRefusalMiddleware(AgentMiddleware):
     """See the module docstring."""
 
@@ -184,15 +207,32 @@ class AnswerAfterRefusalMiddleware(AgentMiddleware):
         if not must_answer(request.messages):
             return None
         kept = [tool for tool in request.tools if _tool_name(tool) in RESPONSE_TOOL_NAMES]
-        named = sorted({name for tool in kept if (name := _tool_name(tool))}) or ["your final response tool"]
+        named = sorted({name for tool in kept if (name := _tool_name(tool))}) or _strategy_tool_names(request)
         logger.info(
             "A call was refused or blocked; offering only the response tool on this step (%d of %d tools kept)",
             len(kept),
             len(request.tools),
         )
-        system = append_to_system_message(request.system_message, ANSWER_NOW.format(tools=", ".join(named)))
+        # Last, after the page context a client appends on every step: placed before it, the
+        # instruction lost to that newer "user" turn (see the module docstring). Marked
+        # volatile so it never reads as the user's own words.
+        note = HumanMessage(
+            content=ANSWER_NOW.format(tools=", ".join(named) or "your final response tool"),
+            additional_kwargs={VOLATILE_CONTEXT_KEY: True},
+        )
         # ``ToolStrategy`` binds its structured-output tool itself; any response tool name is allowed.
-        return request.override(tools=kept, system_message=system), set(RESPONSE_TOOL_NAMES)
+        return request.override(tools=kept, messages=[*request.messages, note]), set(RESPONSE_TOOL_NAMES)
+
+    def _settled(self, request: ModelRequest, response: ModelResponse, allowed: set[str]) -> ModelResponse:
+        if _off_list_calls(response, allowed):
+            logger.warning(
+                "Called only tools it was not offered after a refusal; answering for it (offered=%s, called=%s)",
+                sorted(n for tool in request.tools if (n := _tool_name(tool))) or _strategy_tool_names(request),
+                _called(response),
+            )
+            reply = STOPPED_REPLY if stop_reason(request.messages) == "blocked" else REFUSED_REPLY
+            response = _answer(request, reply)
+        return _kept(response, allowed)
 
     def wrap_model_call(
         self,
@@ -203,15 +243,7 @@ class AnswerAfterRefusalMiddleware(AgentMiddleware):
         if narrowed is None:
             return handler(request)
         request, allowed = narrowed
-        response = handler(request)
-        if _off_list_calls(response, allowed):
-            logger.info("The model called a tool it was not offered after a refusal; asking once more")
-            response = handler(request)
-        if _off_list_calls(response, allowed):
-            logger.warning("Still calling a tool it was not offered after a refusal; answering for it")
-            reply = STOPPED_REPLY if stop_reason(request.messages) == "blocked" else REFUSED_REPLY
-            response = _answer(request, reply)
-        return _kept(response, allowed)
+        return self._settled(request, handler(request), allowed)
 
     async def awrap_model_call(
         self,
@@ -222,12 +254,4 @@ class AnswerAfterRefusalMiddleware(AgentMiddleware):
         if narrowed is None:
             return await handler(request)
         request, allowed = narrowed
-        response = await handler(request)
-        if _off_list_calls(response, allowed):
-            logger.info("The model called a tool it was not offered after a refusal; asking once more")
-            response = await handler(request)
-        if _off_list_calls(response, allowed):
-            logger.warning("Still calling a tool it was not offered after a refusal; answering for it")
-            reply = STOPPED_REPLY if stop_reason(request.messages) == "blocked" else REFUSED_REPLY
-            response = _answer(request, reply)
-        return _kept(response, allowed)
+        return self._settled(request, await handler(request), allowed)

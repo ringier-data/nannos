@@ -145,32 +145,52 @@ class TestTheNarrowedStep:
         tools = [_tool("client_action"), _tool("SubAgentResponseSchema")]
         assert _offered(_turn("The client executed the apply."), tools) == tools
 
-    def test_the_step_says_to_answer_now(self):
+    def test_the_step_ends_with_the_instruction_naming_the_response_tool(self):
+        # Last, after the page context: before it, Sonnet 4.6 kept calling client_action
+        # (10/10 in a replay of the captured request; 10/10 answered with the note last).
+        from agent_common.middleware.utils import VOLATILE_CONTEXT_KEY, append_volatile_context_message
+
         seen = {}
 
         def handler(request):
-            seen["system"] = request.system_message.text
+            seen["messages"] = request.messages
             return _response("SubAgentResponseSchema")
 
-        AnswerAfterRefusalMiddleware().wrap_model_call(
-            _request(_turn(_REFUSED_AGAIN), [_tool("SubAgentResponseSchema")]), handler
-        )
-        assert "answer the user now with SubAgentResponseSchema" in seen["system"]
+        messages = append_volatile_context_message(_turn(_REFUSED_AGAIN), "<current_page>…")
+        AnswerAfterRefusalMiddleware().wrap_model_call(_request(messages, [_tool("SubAgentResponseSchema")]), handler)
+        *before, note = seen["messages"]
+        assert before == messages
+        assert "answer the user now with SubAgentResponseSchema" in note.content
+        assert note.additional_kwargs[VOLATILE_CONTEXT_KEY]  # never read as the user's words
 
-    def test_a_call_to_a_tool_not_offered_is_asked_for_once_more(self):
-        # Live: offered only the response tool, Claude re-sent the refused client_action.
-        replies = iter([_response("client_action"), _response("SubAgentResponseSchema")])
+    def test_on_tool_strategy_it_names_the_strategy_tool(self):
+        from langchain.agents.structured_output import ToolStrategy
+
+        from agent_common.a2a.structured_response import SubAgentResponseSchema
+
+        seen = {}
+
+        def handler(request):
+            seen["note"] = request.messages[-1].content
+            return _response("SubAgentResponseSchema")
+
+        request = _request(_turn(_REFUSED_AGAIN), [_tool("client_action")])
+        request.response_format = ToolStrategy(SubAgentResponseSchema)
+        AnswerAfterRefusalMiddleware().wrap_model_call(request, handler)
+        assert "answer the user now with SubAgentResponseSchema" in seen["note"]
+
+    def test_a_call_to_a_tool_not_offered_is_answered_for_without_asking_again(self):
         calls = []
 
         def handler(request):
             calls.append(request)
-            return next(replies)
+            return _response("client_action")
 
         out = AnswerAfterRefusalMiddleware().wrap_model_call(
-            _request(_turn(_REFUSED_AGAIN), [_tool("client_action")]), handler
+            _request(_turn(_REFUSED_AGAIN), [_tool("SubAgentResponseSchema")]), handler
         )
-        assert len(calls) == 2
-        assert out.result[0].tool_calls[0]["name"] == "SubAgentResponseSchema"
+        assert len(calls) == 1
+        assert out.result[0].tool_calls[0]["args"]["message"] == REFUSED_REPLY
 
     def test_a_valid_answer_next_to_a_stray_call_is_kept(self):
         out = AnswerAfterRefusalMiddleware().wrap_model_call(
