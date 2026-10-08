@@ -1289,10 +1289,9 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
                 streaming_artifact_id = str(uuid.uuid4())
                 first_chunk_sent = False  # Track if we've sent the initial MAIN artifact chunk
                 first_intermediate_chunk_sent = False  # Track if we've sent the initial INTERMEDIATE artifact chunk
-                # The MAIN artifact text itself. A char count is enough to tell whether
-                # a `completed` turn already delivered its answer (the answer IS what
-                # streamed), but an interrupt's terminal message can be a different,
-                # shorter text — so the single-source check compares content there.
+                # The MAIN artifact text itself: the single-source check compares the
+                # terminal message against it, since a char count cannot tell a
+                # different, shorter text from one that already streamed.
                 streamed_text = ""
                 deferred_terminal_item = None
                 # Per-round carrier: the agent populates this from its single
@@ -1847,7 +1846,9 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             # text alongside a streamed prefix it is tagged
             # `final_answer_source: "fallback"`, and clients should treat it as the
             # source of truth (dedupe / replace) rather than appending it.
-            final_answer = content if content else "Task completed successfully"
+            # No terminal text means the streamed artifact is the whole answer — never
+            # let the placeholder below read as a different answer and replace it.
+            final_answer = content or streamed_text.strip() or "Task completed successfully"
             # Streamed and non-streamed completions converge here: the helper
             # closes the streaming artifact (only when token chunks were streamed
             # this turn) and emits the terminal `completed` status carrying the
@@ -1928,20 +1929,24 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
         # whole answer: the console stored it twice, and a reloaded conversation
         # showed one answer as two bubbles.
         #
-        # The extra content check is what makes that safe. For `completed` the
-        # terminal message IS the streamed answer, so the char count settles it.
-        # An interrupt's message may be a DIFFERENT, shorter text — an auth prompt
-        # ("Please sign in to Jira to continue.") after a long streamed answer —
-        # and a length check alone would call that already-delivered and drop a
-        # prompt the client has to render. So compare the text itself there.
+        # The extra content check is what makes that safe. A length check alone
+        # calls any shorter text already delivered: an interrupt's auth prompt
+        # ("Please sign in to Jira to continue.") after a long streamed answer, or a
+        # `completed` answer that is not the one that streamed (nannos#358, where a
+        # previous turn's answer came back as this one's). So compare the text
+        # itself. An interrupt's prompt follows the stream as its prefix; a
+        # `completed` answer may follow narration streamed before it, so it only
+        # has to appear somewhere in the stream.
         terminal_text = "".join(part.text for part in msg.parts if part.WhichOneof("content") == "text").strip()
         answer_fully_streamed = (
             first_chunk_sent
             and final_message_len > 0
             and len(streamed_text) >= final_message_len
+            and bool(terminal_text)
             and (
-                state == TaskState.TASK_STATE_COMPLETED
-                or (bool(terminal_text) and streamed_text.strip().startswith(terminal_text))
+                " ".join(terminal_text.split()) in " ".join(streamed_text.split())
+                if state == TaskState.TASK_STATE_COMPLETED
+                else streamed_text.strip().startswith(terminal_text)
             )
         )
         if first_chunk_sent:
