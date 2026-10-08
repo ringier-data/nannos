@@ -6,7 +6,11 @@ import {
   replaceInterruptWithDecision,
   recordDecision,
   HitlInterruptWidgetData,
+  approvalCardCallIds,
+  settleTypedDecisions,
+  typedDecisionTitle,
 } from '../../src/utils/taskResponseHandler.js';
+import { forCalls } from '../../src/listeners/actions/hitlButton.js';
 
 /** Pull the elements of the (single) actions block from a widget's blocks. */
 function actionElements(blocks: any[]): any[] {
@@ -141,5 +145,116 @@ describe('recordDecision', () => {
     expect(appendStream).not.toHaveBeenCalled();
     // replaceInterruptWithDecision path → chat.update on the approval message
     expect((update.mock.calls[0][0] as any).ts).toBe('approval.ts');
+  });
+});
+
+describe('HITL widget internal args and call ids', () => {
+  const draft = {
+    name: 'gmail_create_draft',
+    args: {
+      _call_id: 'gmail_create_draft:78c5@437f:0',
+      _summary: 'Create a draft email to you with the subject "QA-A2".',
+      _risk_metadata: { source: 'risk_score', score: 1, threshold: 0.8 },
+      subject: 'QA-A2',
+    },
+  };
+  const decode = (value: string) => JSON.parse(Buffer.from(value, 'base64').toString());
+
+  test('server-added args are not shown as arguments; the summary is shown as text', () => {
+    const blocks = buildHitlInterruptWidget({ ...baseData, toolName: 'gmail_create_draft', actionRequests: [draft] });
+    const header = blocks[0];
+    const fields = (header.fields ?? []).map((f: any) => f.text).join('\n');
+    expect(fields).toContain('*subject:*');
+    expect(fields).not.toContain('_call_id');
+    expect(fields).not.toContain('_summary');
+    expect(header.text.text).toContain('Create a draft email to you');
+    // The Approved/Rejected record reads the summary, not the raw call id.
+    expect(decode(byAction(blocks, 'hitl_approve').value).summary).toBe(draft.args._summary);
+  });
+
+  test('every button names the calls its card answers', () => {
+    const single = buildHitlInterruptWidget({ ...baseData, toolName: 'gmail_create_draft', actionRequests: [draft] });
+    expect(decode(byAction(single, 'hitl_reject').value).callIds).toEqual(['gmail_create_draft:78c5@437f:0']);
+
+    const second = { ...draft, args: { ...draft.args, _call_id: 'gmail_create_draft:99@1:0' } };
+    const multi = buildMultiHitlInterruptWidget({ ...baseData, actionRequests: [draft, second] });
+    expect(decode(byAction(multi, 'hitl_approve').value).callIds).toEqual([
+      'gmail_create_draft:78c5@437f:0',
+      'gmail_create_draft:99@1:0',
+    ]);
+    const multiFields = JSON.stringify(multi);
+    expect(multiFields).not.toContain('*_call_id:*');
+  });
+
+  test('approvalCardCallIds reads a posted card back; other messages have none', () => {
+    const blocks = buildHitlInterruptWidget({ ...baseData, toolName: 'gmail_create_draft', actionRequests: [draft] });
+    expect(approvalCardCallIds(blocks)).toEqual(['gmail_create_draft:78c5@437f:0']);
+    expect(approvalCardCallIds([{ type: 'section', text: { type: 'mrkdwn', text: 'hi' } }])).toEqual([]);
+    expect(approvalCardCallIds(undefined)).toEqual([]);
+  });
+});
+
+describe('forCalls', () => {
+  test('one decision per named call, each with its id', () => {
+    expect(forCalls({ type: 'approve' }, ['a', 'b'])).toEqual([
+      { type: 'approve', id: 'a' },
+      { type: 'approve', id: 'b' },
+    ]);
+  });
+
+  test('a card from before call ids sends the bare decision', () => {
+    expect(forCalls({ type: 'reject' }, undefined)).toEqual([{ type: 'reject' }]);
+    expect(forCalls({ type: 'reject' }, [])).toEqual([{ type: 'reject' }]);
+  });
+});
+
+describe('settleTypedDecisions', () => {
+  const draft = { name: 'gmail_create_draft', args: { _call_id: 'c-1', subject: 'QA' } };
+  const card = buildHitlInterruptWidget({ ...baseData, toolName: 'gmail_create_draft', actionRequests: [draft] });
+  const other = buildHitlInterruptWidget({
+    ...baseData,
+    toolName: 'gmail_create_draft',
+    actionRequests: [{ ...draft, args: { ...draft.args, _call_id: 'c-2' } }],
+  });
+
+  function client(messages: any[]) {
+    return {
+      conversations: { replies: jest.fn(async () => ({ messages })) },
+      chat: { update: jest.fn(async () => ({ ok: true })) },
+    } as unknown as WebClient & { chat: { update: jest.Mock } };
+  }
+
+  test('settles only the card whose call the words decided', async () => {
+    const slack = client([
+      { ts: '1.0', text: 'hi' },
+      { ts: '2.0', blocks: card },
+      { ts: '3.0', blocks: other },
+    ]);
+    await settleTypedDecisions(slack, 'C1', '1.0', [{ id: 'c-1', type: 'reject', intent: 'reject' }]);
+
+    expect(slack.chat.update).toHaveBeenCalledTimes(1);
+    const update = (slack.chat.update as jest.Mock).mock.calls[0][0] as any;
+    expect(update.ts).toBe('2.0');
+    expect(update.text).toBe('Rejected in your reply');
+  });
+
+  test('a decision without ids settles nothing and never throws', async () => {
+    const slack = client([{ ts: '2.0', blocks: card }]);
+    await settleTypedDecisions(slack, 'C1', '1.0', [{ type: 'approve' }]);
+    expect(slack.chat.update).not.toHaveBeenCalled();
+
+    const broken = {
+      conversations: { replies: jest.fn(async () => Promise.reject(new Error('rate limited'))) },
+      chat: { update: jest.fn() },
+    } as unknown as WebClient;
+    await expect(settleTypedDecisions(broken, 'C1', '1.0', [{ id: 'c-1', type: 'reject' }])).resolves.toBeUndefined();
+  });
+
+  test('titles say what the words did', () => {
+    expect(typedDecisionTitle({ type: 'approve', intent: 'approve' })).toBe('Approved in your reply');
+    expect(typedDecisionTitle({ type: 'reject', intent: 'change' })).toBe('Changes requested in your reply');
+    expect(typedDecisionTitle({ type: 'reject', intent: 'none' })).toContain('Not run');
+    // A typed yes to a save is read as approve but did not run: the gate's type wins.
+    expect(typedDecisionTitle({ type: 'reject', intent: 'approve' })).toContain('Not run');
   });
 });

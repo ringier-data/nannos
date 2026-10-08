@@ -843,6 +843,18 @@ export async function handleIncomingMessage(msg: NormalizedMessage, deps: Handle
           // Update final response state
           accumulatedTask.status = statusEvent.status;
 
+          // A typed answer to an approval card was read: settle that card, which
+          // a click would have done itself.
+          const statusExtensions = statusEvent.status.message?.extensions || [];
+          if (statusExtensions.includes('urn:nannos:a2a:hitl-decision:1.0')) {
+            const decisionPart = statusEvent.status.message?.parts?.find((p) => p.kind === 'data') as
+              | { kind: 'data'; data: { decisions?: unknown } }
+              | undefined;
+            const typed = Array.isArray(decisionPart?.data?.decisions) ? decisionPart.data.decisions : [];
+            const { settleTypedDecisions } = await import('../../utils/taskResponseHandler.js');
+            await settleTypedDecisions(client, channelId, threadTs, typed as any[]);
+          }
+
           // Handle interrupted states (input-required) with HITL extension
           if (statusEvent.status.state === 'input-required' && statusEvent.status.message) {
             const extensions = statusEvent.status.message.extensions || [];
