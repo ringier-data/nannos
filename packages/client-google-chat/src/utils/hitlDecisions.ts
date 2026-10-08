@@ -6,9 +6,13 @@
  * else — the server refuses it instead of running a turn.
  */
 
-/** Args the server adds for itself (`_call_id`, `_summary`, `_risk_metadata`, …), never the call's own. */
+/**
+ * Args the server adds to an action request for itself, never the call's own. An
+ * explicit list — a tool may have a real `_id`.
+ */
+const SERVER_ARGS = new Set(['_call_id', '_summary', '_risk_metadata', '_requires_click']);
 export function isInternalArg(key: string): boolean {
-  return key.startsWith('_');
+  return SERVER_ARGS.has(key);
 }
 
 /** The call ids of a card's pending calls, in order; calls without one are skipped. */

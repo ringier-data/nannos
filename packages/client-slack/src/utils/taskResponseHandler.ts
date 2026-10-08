@@ -2,7 +2,7 @@ import { WebClient } from '@slack/web-api';
 import { Logger } from './logger.js';
 import _ from 'lodash';
 import { Artifact, DataPart, FileWithBytes, FileWithUri, Task } from '@a2a-js/sdk';
-import { linkAllBareMentions, type ThinkingStepsStreamer } from './thinkingStepsStreamer.js';
+import type { ThinkingStepsStreamer } from './thinkingStepsStreamer.js';
 
 const logger = Logger.getLogger('taskResponseHandler');
 
@@ -151,7 +151,7 @@ export async function postMessage(
   threadTs: string,
   text: string
 ): Promise<string | undefined> {
-  return postOrUpdateMessage(slackClient, channelId, threadTs, linkAllBareMentions(text), undefined);
+  return postOrUpdateMessage(slackClient, channelId, threadTs, text, undefined);
 }
 /**
  * Post or update a status message.
@@ -804,11 +804,12 @@ export function buildHitlInterruptWidget(data: HitlInterruptWidgetData): any[] {
 }
 
 /**
- * Args the server adds for itself (`_call_id`, `_summary`, `_risk_metadata`, …):
- * routing and display data, never the call's own arguments.
+ * Args the server adds to an action request for itself: routing and display data,
+ * never the call's own arguments. An explicit list — a tool may have a real `_id`.
  */
+const SERVER_ARGS = new Set(['_call_id', '_summary', '_risk_metadata', '_requires_click']);
 function isInternalArg(key: string): boolean {
-  return key.startsWith('_');
+  return SERVER_ARGS.has(key);
 }
 
 /** Stable per-call id the server uses to align decisions (top-level args._call_id). */

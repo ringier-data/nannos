@@ -481,7 +481,7 @@ export class ThinkingStepsStreamer {
       await this.streamAppend({ chunks: completion });
     }
     this.answerText += delta;
-    const { ready, held } = linkBareMentions(this.mentionTail + delta);
+    const { ready, held } = linkBareMentions(this.mentionTail + delta, this.opts.userId);
     this.mentionTail = held;
     if (!ready) return;
     if (this.degraded) {
@@ -493,7 +493,7 @@ export class ThinkingStepsStreamer {
 
   /** Emit what was held back at the end of the answer — a complete id there is linked too. */
   private async flushMentionTail(): Promise<void> {
-    const tail = linkAllBareMentions(this.mentionTail);
+    const tail = linkAllBareMentions(this.mentionTail, this.opts.userId);
     if (!tail) return;
     this.mentionTail = '';
     if (this.degraded) {
@@ -640,6 +640,8 @@ export class ThinkingStepsStreamer {
    */
   async pause(planTitle: string): Promise<void> {
     if (this.finished || this.degraded) return;
+    // A held "@U…" must not be lost when the turn stops at an approval or sign-in card.
+    await this.flushMentionTail();
     const completion = this.buildCompletionChunks();
     await this.streamAppend({
       chunks: [...completion, { type: 'plan_update', title: truncate(planTitle, TITLE_MAX) }],
@@ -806,27 +808,29 @@ export class ThinkingStepsStreamer {
 }
 
 
-/** A Slack user id written as plain "@U…": the model dropped the brackets of `<@U…>`. */
-const BARE_MENTION_RE = /(^|[^<\w@])@(U[A-Z0-9]{8,11})(?![A-Za-z0-9])/g;
 /** A chunk ending in what may become a user id once the next chunk arrives. */
 const PARTIAL_MENTION_RE = /(^|[^<\w@])(@U?[A-Z0-9]{0,11})$/;
 
+function escapeRe(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /**
- * Turn bare "@U2PCN6T8W" into the `<@U2PCN6T8W>` Slack renders as a mention (Opus
- * wrote the id without brackets and users read the raw id). The answer streams in
- * chunks, so a trailing id that may still be growing is `held` for the next chunk;
+ * Turn the requesting user's id written as plain "@U2PCN6T8W" into the `<@U2PCN6T8W>`
+ * Slack renders as a mention (Opus dropped the brackets and users read the raw id).
+ * Only that one id: a handle like "@UNICEF2024" has the same shape. The answer streams
+ * in chunks, so a trailing id that may still be growing is `held` for the next chunk;
  * everything before it is `ready` to send.
  */
-export function linkBareMentions(text: string): { ready: string; held: string } {
+export function linkBareMentions(text: string, userId: string): { ready: string; held: string } {
   const partial = PARTIAL_MENTION_RE.exec(text);
   const cut = partial ? partial.index + partial[1].length : text.length;
-  return {
-    ready: text.slice(0, cut).replace(BARE_MENTION_RE, '$1<@$2>'),
-    held: text.slice(cut),
-  };
+  return { ready: linkAllBareMentions(text.slice(0, cut), userId), held: text.slice(cut) };
 }
 
 /** {@link linkBareMentions} for a whole message: nothing is still growing. */
-export function linkAllBareMentions(text: string): string {
-  return text.replace(BARE_MENTION_RE, '$1<@$2>');
+export function linkAllBareMentions(text: string, userId: string): string {
+  if (!userId) return text;
+  const bare = new RegExp(`(^|[^<\\w@])@(${escapeRe(userId)})(?![A-Za-z0-9])`, 'g');
+  return text.replace(bare, '$1<@$2>');
 }
