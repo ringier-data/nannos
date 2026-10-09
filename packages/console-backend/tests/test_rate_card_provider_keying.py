@@ -467,6 +467,25 @@ def test_route_family_resolves_nothing_without_a_route_list():
     assert route_family("bedrock_converse", frozenset()) is None
 
 
+def test_a_route_billed_under_another_name_keys_cards_on_that_name():
+    """litellm calls and stamps `ai21/…` as `ai21_chat`; a deployment's own prefix must say so too,
+    or its card is keyed on a value no usage row carries."""
+    assert runtime_billing_provider({"model": "ai21/jamba-1.5"}) == "ai21_chat"
+    assert runtime_billing_provider({"model": "x", "custom_llm_provider": "ai21"}) == "ai21_chat"
+    assert runtime_billing_provider({"model": "bedrock/eu.anthropic.claude-x"}) == "bedrock"
+
+
+@pytest.mark.asyncio
+async def test_orphan_check_counts_a_route_billed_under_another_name_as_orphaned():
+    service, _ = _service_with_mock_repo()
+    service.repository.find_orphan_card_providers = AsyncMock(return_value=[])
+
+    await service.find_orphan_cards(AsyncMock())
+
+    valid = service.repository.find_orphan_card_providers.await_args.args[1]
+    assert "ai21" not in valid and "ai21_chat" in valid
+
+
 # --- The same invariant on the Rate Cards page's own write paths ---
 #
 # register/edit DERIVE the provider from the deployment's routing params; the Rate Cards page passes

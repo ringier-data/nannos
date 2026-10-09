@@ -26,12 +26,10 @@ def runtime_billing_provider(litellm_params: dict) -> str | None:
     custom_llm_provider) — callers must reject or skip, not guess.
     """
     provider = litellm_params.get("custom_llm_provider")
-    if provider:
-        return str(provider)
-    model = str(litellm_params.get("model") or "")
-    if "/" in model:
-        return model.split("/", 1)[0]
-    return None
+    if not provider:
+        model = str(litellm_params.get("model") or "")
+        provider = model.split("/", 1)[0] if "/" in model else None
+    return _ROUTE_BILLED_AS.get(str(provider), str(provider)) if provider else None
 
 
 # LiteLLM tags catalog models by *implementation* (`bedrock_converse`, `vertex_ai-anthropic_models`,
@@ -41,12 +39,12 @@ def runtime_billing_provider(litellm_params: dict) -> str | None:
 # resolved provider on deployments either). Mirrored here as: the one tag whose family is a different
 # word, else the route itself, else a `<route>-<suffix>` tag's route. The routes are the running
 # proxy's own list (ModelGatewayService.get_supported_providers), never a list kept in this repo.
-_TAG_TO_FAMILY = {
-    "bedrock_converse": "bedrock",
-    # `ai21` is a route, but litellm routes and stamps `ai21/…` as `ai21_chat` (checked against
-    # get_llm_provider for every cost-map tag on the pinned proxy image: the only such route).
-    "ai21": "ai21_chat",
-}
+# Routes litellm accepts as a model-id prefix but resolves — and so stamps on usage — as another
+# provider: `ai21/…` is called and billed as `ai21_chat` (checked against get_llm_provider for every
+# cost-map tag on the pinned proxy image: the only such route). Applied to catalog tags and to a
+# deployment's own prefix alike, so neither can key a card on a value usage never carries.
+_ROUTE_BILLED_AS = {"ai21": "ai21_chat"}
+_TAG_TO_FAMILY = {"bedrock_converse": "bedrock", **_ROUTE_BILLED_AS}
 _VERTEX_TAG_PREFIX = "vertex_ai"  # vertex_ai-anthropic_models, vertex_ai-language-models, …
 
 
@@ -584,7 +582,10 @@ class RateCardService:
         routes = await self.provider_routes()
         if not routes:
             return []
-        return await self.repository.find_orphan_card_providers(db, sorted(routes))
+        # A route billed under another name is no billing key either (`ai21` → `ai21_chat`).
+        return await self.repository.find_orphan_card_providers(
+            db, sorted(r for r in routes if not is_catalog_tag_vocabulary(r))
+        )
 
     async def rekey_model_provider(
         self,

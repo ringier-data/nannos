@@ -30,7 +30,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 # The running proxy's provider routes (GET /public/providers), as the gateway double reports them.
 _ROUTES = frozenset(
-    {"anthropic", "azure", "azure_ai", "bedrock", "deepseek", "fireworks_ai", "gemini", "openai", "vertex_ai"}
+    {
+        "ai21", "ai21_chat", "anthropic", "azure", "azure_ai", "bedrock", "deepseek", "fireworks_ai",
+        "gemini", "openai", "vertex_ai",
+    }
 )
 
 
