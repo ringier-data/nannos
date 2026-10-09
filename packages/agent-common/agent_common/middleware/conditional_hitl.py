@@ -29,10 +29,11 @@ Usage (dynamic scoring):
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable
-from typing import Any, TypedDict
+from typing import Any, NamedTuple, TypedDict
 
 from langchain.agents.middleware.human_in_the_loop import (
     ActionRequest,
@@ -55,9 +56,11 @@ from agent_common.core.client_action_tool import (
     wire_args,
 )
 from agent_common.core.hitl_resume import REFUSAL_LEADS, decisions_from_resume, decisions_from_resume_sync
+from agent_common.core.stream_watchdog import await_with_keepalive
 from agent_common.core.tool_risk_cache import ToolRiskCache, ToolRiskEntry
 from agent_common.core.turn_stops import REFUSED_AGAIN_LEAD
 from agent_common.middleware.ptc_guard import PTC_CODE_INTERPRETER_TOOL_NAME
+from agent_common.middleware.tool_status import RISK_ASSESSMENT_STATUS_TOOL, emit_tool_status
 
 logger = logging.getLogger(__name__)
 
@@ -385,6 +388,17 @@ def _unresolvable_tool_message(
     )
 
 
+class _PendingScore(NamedTuple):
+    """A tool call that reached dynamic risk scoring, with what deciding it needs."""
+
+    idx: int
+    tool_call: ToolCall
+    tool_instance: BaseTool | None
+    cache: ToolRiskCache | None
+    server_slug: str
+    requires_click: bool
+
+
 class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, ContextT, ResponseT]):
     """HumanInTheLoopMiddleware with conditional guarding and dynamic risk scoring.
 
@@ -546,6 +560,39 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         return _answered(last_ai_msg, artificial_tool_messages)
 
     @hook_config(can_jump_to=["model", "end"])
+    async def _score_concurrently(
+        self, pending: list[_PendingScore]
+    ) -> list[tuple[float, ToolRiskEntry | None] | BaseException]:
+        """Score every pending call at once; a failed score comes back as its exception.
+
+        A cache miss is an LLM classification on the default chat tier with reasoning on (see
+        tool_risk_scorer) — tens of seconds per new tool. Nothing reaches the graph stream
+        while this hook awaits, so the orchestrator's inter-chunk watchdog would read the wait
+        as a hung stream and cancel the turn: the wait is kept alive, and when it is long
+        enough to notice, the activity log says what the turn is waiting on.
+        """
+        scorer = self._risk_scorer
+        assert scorer is not None  # only called with calls that reached step 3
+        names = ", ".join(dict.fromkeys(p.tool_call["name"] for p in pending))
+
+        async def _say_why() -> None:
+            await emit_tool_status(f"Assessing the risk of {names}…", RISK_ASSESSMENT_STATUS_TOOL)
+
+        scores = asyncio.gather(
+            *(
+                scorer(
+                    p.tool_call["name"],
+                    p.tool_call.get("args", {}),
+                    tool=p.tool_instance,
+                    cache=p.cache,
+                    server_slug=p.server_slug,
+                )
+                for p in pending
+            ),
+            return_exceptions=True,
+        )
+        return await await_with_keepalive(scores, source="tool-risk-scoring", on_slow=_say_why)
+
     async def aafter_model(self, state: AgentState[Any], runtime: Runtime[ContextT]) -> dict[str, Any] | None:
         """Async handler: combines static guards + dynamic risk scoring.
 
@@ -557,7 +604,8 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         2. If tool is in static interrupt_on -> use static guard (same as sync)
         3. If risk_scorer is configured -> score the tool call:
            a. Check bypass rules from runtime context
-           b. Await scorer (cache lookup or LLM call)
+           b. Score every such call of the step concurrently (cache lookup or LLM call),
+              keeping the graph's idle watchdog fed while they run — see _score_concurrently
            c. Compare against threshold
            d. If score >= threshold -> interrupt with allowed_actions from entry
         4. Otherwise -> auto-approve
@@ -580,6 +628,12 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         # set is exhaustive) any name that resolves to nothing. See
         # _unresolvable_tool_message.
         corrective_messages: dict[int, ToolMessage] = {}
+        # Interrupts by tool-call index. Risk-scored calls are decided after the loop (they are
+        # scored concurrently), so the request lists are built from this, in index order — the
+        # decision loop below pairs decisions with interrupt_indices positionally.
+        interrupts: dict[int, tuple[ActionRequest, ReviewConfig, _RiskMetadata]] = {}
+        # Calls that reached step 3, scored together after the loop.
+        to_score: list[_PendingScore] = []
         refused = _refused_this_turn(messages)
         refused_again = _refused_again_this_turn(messages) if refused else set()
         # A refused call sent a third time ends the turn (see _refused_again_this_turn).
@@ -701,10 +755,7 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
                 # action_request and the resume path aligns them by id. Display-only:
                 # ``args`` is never passed to the tool (approve replays the original call).
                 action_request["args"] = {**action_request.get("args", {}), "_call_id": tool_call["id"]}
-                action_requests.append(action_request)
-                review_configs.append(review_config)
-                interrupt_indices.append(idx)
-                _risk_metadata.append({"source": "static_guard"})
+                interrupts[idx] = (action_request, review_config, {"source": "static_guard"})
                 continue
 
             # 3. Dynamic risk scoring
@@ -730,20 +781,24 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
                 getattr(context, "tool_risk_cache", None) if context else None
             ) or self._tool_risk_cache
 
-            # Score the tool call
-            try:
-                score: float
-                entry: ToolRiskEntry | None
-                score, entry = await self._risk_scorer(
-                    tool_name,
-                    args,
-                    tool=tool_instance,
-                    cache=cache,
-                    server_slug=server_slug,
-                )
-            except Exception:
-                logger.exception("Risk scoring failed for tool '%s', skipping guard", tool_name)
+            to_score.append(_PendingScore(idx, tool_call, tool_instance, cache, server_slug, requires_click))
+
+        # 3b. Score the collected calls together — a step's new tools each cost an LLM
+        #     classification, and awaiting them one by one put their SUM in front of the
+        #     approval card — then decide each one in its own right.
+        outcomes = await self._score_concurrently(to_score) if to_score else []
+        context = getattr(runtime, "context", None)
+        for (idx, tool_call, tool_instance, cache, server_slug, requires_click), outcome in zip(to_score, outcomes):
+            tool_name = tool_call["name"]
+            args = tool_call.get("args", {})
+            if isinstance(outcome, BaseException):
+                if not isinstance(outcome, Exception):
+                    raise outcome
+                logger.error("Risk scoring failed for tool '%s', skipping guard", tool_name, exc_info=outcome)
                 continue
+            score: float
+            entry: ToolRiskEntry | None
+            score, entry = outcome
 
             # Compare against threshold
             threshold: float = self._get_threshold(context)
@@ -800,10 +855,9 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
                 except Exception:
                     pass
 
-            action_requests.append(action_request)
-            review_configs.append(review_config)
-            interrupt_indices.append(idx)
-            _risk_metadata.append(
+            interrupts[idx] = (
+                action_request,
+                review_config,
                 {
                     "source": "risk_score",
                     "score": score,
@@ -811,8 +865,15 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
                     "matched_pattern": matched_pattern,
                     "server_slug": server_slug,
                     "allowed_actions": allowed_actions,
-                }
+                },
             )
+
+        for idx in sorted(interrupts):
+            action_request, review_config, metadata = interrupts[idx]
+            action_requests.append(action_request)
+            review_configs.append(review_config)
+            interrupt_indices.append(idx)
+            _risk_metadata.append(metadata)
 
         # If no interrupts needed, return early — unless a call was answered above,
         # whose ToolMessage still has to reach the graph. The AIMessage is returned

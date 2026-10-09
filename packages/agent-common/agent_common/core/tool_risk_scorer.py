@@ -352,12 +352,19 @@ async def _score_tool_via_llm(
 ) -> ToolRiskEntry:
     """Call LLM to classify a tool's risk profile.
 
-    Uses the fleet's cheap/fast chat tier for speed and cost efficiency.
+    The classification decides whether a call runs without asking, so it runs on the fleet's
+    standard chat tier with reasoning on — deliberately not the cheap ``chat:low`` tier. It
+    used to take that tier with no effort at all, which inherited whatever the provider
+    defaults to: thinking off on some, and on a model that reasons by default (Mistral Large 4)
+    tens of seconds of unasked-for thinking per tool. The cost is paid once per tool: the
+    result is cached and persisted, keyed on the tool's schema. The wait sits in front of the
+    approval card, which ConditionalHumanInTheLoopMiddleware keeps alive and explains.
     Returns a ToolRiskEntry ready for caching.
     """
-    from agent_common.core.model_factory import create_model, get_default_fast_model, require_default_model
+    from agent_common.core.model_factory import create_model, require_default_model
+    from agent_common.models.base import ThinkingLevel
 
-    model = create_model(get_default_fast_model() or require_default_model(), streaming=False)
+    model = create_model(require_default_model(), thinking_level=ThinkingLevel.medium, streaming=False)
     # method="function_calling", not the langchain-openai>=0.3 default of "json_schema",
     # which routes through OpenAI's *strict* validator: it requires every object to
     # declare additionalProperties: false and to list every property in `required`,

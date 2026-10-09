@@ -322,6 +322,96 @@ class TestPerCallIdStamping:
         assert captured["request"]["action_requests"][0]["args"]["_call_id"] == "tc-sync"
 
 
+class TestConcurrentRiskScoring:
+    """A step's calls are scored together, not one after another, and the requests still
+    come out in tool-call order — the decision loop pairs them with interrupt_indices."""
+
+    @staticmethod
+    def _runtime():
+        return types.SimpleNamespace(
+            context=types.SimpleNamespace(tool_bypass_rules={}, tool_risk_cache=None, _pending_bypass_rules=[])
+        )
+
+    async def test_scores_run_concurrently_and_requests_keep_call_order(self, monkeypatch):
+        import asyncio
+
+        captured = TestPerCallIdStamping._capture_interrupt(monkeypatch)
+        running = 0
+        peak = 0
+
+        async def scorer(name, args, *, tool=None, cache=None, server_slug=None):
+            nonlocal running, peak
+            running += 1
+            peak = max(peak, running)
+            # The first call is the slowest: sequential scoring would finish it first anyway,
+            # concurrent scoring finishes it last — the order must not follow completion.
+            await asyncio.sleep({"wipe_a": 0.2, "wipe_b": 0.1}.get(name, 0.0))
+            running -= 1
+            return 0.99, None
+
+        mw = ConditionalHumanInTheLoopMiddleware(
+            interrupt_on={"danger": {"allowed_decisions": ["approve", "reject"]}},
+            risk_scorer=scorer,
+            default_risk_threshold=0.8,
+        )
+        ai = AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "wipe_a", "args": {}, "id": "tc-0", "type": "tool_call"},
+                {"name": "danger", "args": {}, "id": "tc-1", "type": "tool_call"},
+                {"name": "wipe_b", "args": {}, "id": "tc-2", "type": "tool_call"},
+            ],
+        )
+
+        await mw.aafter_model({"messages": [ai]}, self._runtime())
+
+        assert peak == 2
+        assert [ar["args"]["_call_id"] for ar in captured["request"]["action_requests"]] == ["tc-0", "tc-1", "tc-2"]
+
+    async def test_a_failed_score_skips_only_its_own_call(self, monkeypatch):
+        captured = TestPerCallIdStamping._capture_interrupt(monkeypatch)
+
+        async def scorer(name, args, *, tool=None, cache=None, server_slug=None):
+            if name == "broken":
+                raise RuntimeError("classifier down")
+            return 0.99, None
+
+        mw = ConditionalHumanInTheLoopMiddleware(interrupt_on={}, risk_scorer=scorer, default_risk_threshold=0.8)
+        ai = AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "broken", "args": {}, "id": "tc-0", "type": "tool_call"},
+                {"name": "wipe", "args": {}, "id": "tc-1", "type": "tool_call"},
+            ],
+        )
+
+        await mw.aafter_model({"messages": [ai]}, self._runtime())
+
+        assert [ar["args"]["_call_id"] for ar in captured["request"]["action_requests"]] == ["tc-1"]
+
+    async def test_a_slow_assessment_says_what_the_turn_is_waiting_on(self, monkeypatch):
+        import asyncio
+
+        from agent_common.middleware.tool_status import RISK_ASSESSMENT_STATUS_TOOL, TOOL_STATUS_EVENT
+
+        TestPerCallIdStamping._capture_interrupt(monkeypatch)
+        parts: list = []
+        monkeypatch.setattr("agent_common.core.stream_watchdog._stream_writer", lambda: parts.append)
+        monkeypatch.setattr("agent_common.middleware.tool_status.get_stream_writer", lambda: parts.append)
+
+        async def scorer(name, args, *, tool=None, cache=None, server_slug=None):
+            await asyncio.sleep(2.2)  # past the 2s grace
+            return 0.99, None
+
+        mw = ConditionalHumanInTheLoopMiddleware(interrupt_on={}, risk_scorer=scorer, default_risk_threshold=0.8)
+        ai = AIMessage(content="", tool_calls=[{"name": "wipe", "args": {}, "id": "tc-0", "type": "tool_call"}])
+
+        await mw.aafter_model({"messages": [ai]}, self._runtime())
+
+        statuses = [p[1] for p in parts if p[0] == TOOL_STATUS_EVENT]
+        assert statuses == [{"status": "Assessing the risk of wipe…", "tool": RISK_ASSESSMENT_STATUS_TOOL}]
+
+
 def _stub_tool(name: str):
     """A minimal BaseTool the gate can fetch — stands in for a ToolNode-registered tool."""
     from langchain_core.tools import StructuredTool

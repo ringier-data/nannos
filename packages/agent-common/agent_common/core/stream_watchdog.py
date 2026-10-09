@@ -19,9 +19,10 @@ stream inside the agent graph, which isn't cleanly exposed; revisit if needed.
 """
 
 import asyncio
+import inspect
 import logging
 import os
-from typing import AsyncIterator, Callable, TypeVar
+from typing import Any, AsyncIterator, Awaitable, Callable, TypeVar
 
 logger = logging.getLogger(__name__)
 
@@ -181,3 +182,71 @@ async def watch_stream_with_resume(
             logger.error("[watchdog] %s resume yielded no parts — checkpoint had no pending work; failing loudly", label)
             raise first_stall
         return
+
+
+# The custom stream part every consumer already ignores (the orchestrator and DynamicAgent
+# stream loops): its only job is to be a graph stream part, which resets `watch_stream`'s
+# inter-chunk timer. Sub-agent dispatch emits the same one (DynamicToolDispatchMiddleware).
+KEEPALIVE_EVENT = "keepalive"
+
+
+def _stream_writer() -> Callable[[Any], Any] | None:
+    try:
+        from langgraph.config import get_stream_writer
+
+        return get_stream_writer()
+    except Exception:  # outside a graph run: nothing is watching, nothing to feed
+        return None
+
+
+async def await_with_keepalive(
+    aw: Awaitable[T],
+    *,
+    source: str,
+    on_slow: Callable[[], Awaitable[None]] | None = None,
+    slow_after: float = 2.0,
+) -> T:
+    """Await `aw` from inside a graph node without tripping the graph's idle watchdog.
+
+    A node that awaits silent work (an LLM side-call made from a middleware hook) yields no
+    stream parts, so `watch_stream`'s inter-chunk budget (LLM_INTER_CHUNK_TIMEOUT) cannot tell
+    it from a hung stream and cancels the turn. While `aw` runs this pushes a keepalive part at
+    half that budget — at least two resets before it could trip, whatever the env sets. The
+    watchdog still catches a genuinely hung stream: a keepalive only flows while `aw` is
+    pending, and `aw` carries its own timeouts.
+
+    `on_slow` runs once when `aw` is still pending after `slow_after` seconds: room for a
+    user-visible status that appears only when the wait is actually noticeable, not on every
+    instant (cached) answer. Outside a graph run this is a plain await.
+    """
+    task = asyncio.ensure_future(aw)
+    writer = _stream_writer()
+    if writer is None:
+        return await task
+    tick = max(1.0, inter_chunk_timeout() / 2)
+    waited = 0.0
+    try:
+        if on_slow is not None:
+            grace = min(slow_after, tick)
+            done, _ = await asyncio.wait({task}, timeout=grace)
+            if done:
+                return task.result()
+            waited += grace
+            try:
+                await on_slow()
+            except Exception as e:  # a status line is best-effort, never fatal
+                logger.debug("[watchdog] %s on_slow callback failed: %s", source, e)
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=tick)
+            if done:
+                return task.result()
+            waited += tick
+            try:
+                result = writer((KEEPALIVE_EVENT, {"source": source, "waited_s": round(waited, 1)}))
+                if inspect.iscoroutine(result):
+                    await result
+            except Exception as e:  # keepalive is best-effort, never fatal
+                logger.debug("[watchdog] %s keepalive failed: %s", source, e)
+    finally:
+        if not task.done():
+            task.cancel()

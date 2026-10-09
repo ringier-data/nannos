@@ -207,3 +207,33 @@ def test_persist_entry_refuses_a_profile_with_no_schema_hash(caplog):
     )
     cache.persist_entry("consoleCreateBugReport", "_self", no_schema)
     cache._api_client.upsert_score.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_classification_runs_on_the_standard_tier_with_reasoning(monkeypatch):
+    """The score decides what runs unasked: the standard chat tier with reasoning on, never the
+    cheap tier with whatever thinking its provider happens to default to."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from agent_common.core.tool_risk_scorer import ToolRiskOutput, _score_tool_via_llm
+    from agent_common.models.base import ThinkingLevel
+
+    created: dict = {}
+    model = MagicMock()
+    model.with_structured_output.return_value.ainvoke = AsyncMock(
+        return_value=ToolRiskOutput(base_score=0.3, risk_factors=[], reasoning="reads only")
+    )
+
+    def fake_create_model(model_type, thinking_level=None, **kwargs):
+        created.update(model_type=model_type, thinking_level=thinking_level, **kwargs)
+        return model
+
+    monkeypatch.setattr("agent_common.core.model_factory.create_model", fake_create_model)
+    monkeypatch.setattr("agent_common.core.model_factory.require_default_model", lambda: "standard-chat")
+    monkeypatch.setattr("agent_common.core.model_factory.get_default_fast_model", lambda: "cheap-chat")
+
+    entry = await _score_tool_via_llm("list_things", "Lists things.", {})
+
+    assert created["model_type"] == "standard-chat"
+    assert created["thinking_level"] == ThinkingLevel.medium
+    assert entry.base_score == 0.3
