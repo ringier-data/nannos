@@ -555,6 +555,7 @@ class OrchestratorDeepAgentExecutor(AgentExecutor):
             entitlement_version=entitlement_version,
             settings_version=settings_version,
             language=user.language,
+            timezone=user.timezone,
             custom_prompt=user.custom_prompt,
             local_subagents=user.local_subagents,
             agent_metadata=user.agent_metadata,

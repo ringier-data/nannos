@@ -27,6 +27,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dateutil.relativedelta import relativedelta
 from langchain_core.tools import BaseTool, StructuredTool
+from langgraph.runtime import get_runtime
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
@@ -94,8 +95,7 @@ class GetCurrentTimeInput(BaseModel):
         default=None,
         description=(
             "IANA timezone name (e.g., 'America/New_York', 'Europe/Berlin', 'Asia/Tokyo'). "
-            "Defaults to the deployment's DEFAULT_TIMEZONE when not provided. "
-            "Use user's configured timezone when available from context."
+            "Defaults to the user's configured timezone when not provided."
         ),
     )
 
@@ -191,6 +191,15 @@ def _format_datetime(dt: datetime, format: OutputFormat, tz: ZoneInfo) -> str:
         return dt_in_tz.isoformat()
 
 
+def _run_timezone() -> str | None:
+    """The user's timezone from the running graph's context, or None outside a graph run."""
+    try:
+        runtime = get_runtime()
+    except RuntimeError:
+        return None
+    return getattr(getattr(runtime, "context", None), "timezone", None)
+
+
 def _create_get_current_time_tool() -> BaseTool:
     """Create tool for getting current time with timezone awareness and relative date calculations.
 
@@ -238,15 +247,15 @@ def _create_get_current_time_tool() -> BaseTool:
             delta_value: Optional offset amount (positive or negative integer)
             delta_unit: Time unit for delta ('minutes', 'hours', 'days', 'weeks', 'months')
             format: Output format ('iso8601', 'unix', 'human', 'date_only', 'time_only')
-            timezone: IANA timezone name (defaults to 'UTC')
+            timezone: IANA timezone name (defaults to the user's configured timezone)
 
         Returns:
             Formatted datetime string, or error message if timezone is invalid
         """
         try:
-            # No explicit timezone → the deployment default (env-controlled,
-            # never a hardcoded locale).
-            timezone = timezone or os.getenv("DEFAULT_TIMEZONE", "UTC")
+            # No explicit timezone → the user's saved one from the run context, then
+            # the deployment default (env-controlled, never a hardcoded locale).
+            timezone = timezone or _run_timezone() or os.getenv("DEFAULT_TIMEZONE", "UTC")
             # Validate and load timezone
             try:
                 tz = ZoneInfo(timezone)
