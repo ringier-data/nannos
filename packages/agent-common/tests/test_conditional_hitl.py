@@ -368,6 +368,37 @@ class TestConcurrentRiskScoring:
         assert peak == 2
         assert [ar["args"]["_call_id"] for ar in captured["request"]["action_requests"]] == ["tc-0", "tc-1", "tc-2"]
 
+    async def test_calls_of_one_new_tool_pay_one_classification(self, monkeypatch):
+        """Scored sequentially, the first call's result made the rest cache hits; the
+        concurrent pass must keep that, or N calls pay N classifications and may disagree."""
+        import asyncio
+
+        TestPerCallIdStamping._capture_interrupt(monkeypatch)
+        known: dict[str, float] = {}
+        classifications: list[str] = []
+
+        async def scorer(name, args, *, tool=None, cache=None, server_slug=None):
+            if name in known:
+                return known[name], None
+            classifications.append(name)
+            await asyncio.sleep(0.05)
+            known[name] = 0.99
+            return 0.99, None
+
+        mw = ConditionalHumanInTheLoopMiddleware(interrupt_on={}, risk_scorer=scorer, default_risk_threshold=0.8)
+        ai = AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "wipe", "args": {"path": "/a"}, "id": "tc-0", "type": "tool_call"},
+                {"name": "wipe", "args": {"path": "/b"}, "id": "tc-1", "type": "tool_call"},
+                {"name": "other", "args": {}, "id": "tc-2", "type": "tool_call"},
+            ],
+        )
+
+        await mw.aafter_model({"messages": [ai]}, self._runtime())
+
+        assert sorted(classifications) == ["other", "wipe"]
+
     async def test_a_failed_score_skips_only_its_own_call(self, monkeypatch):
         captured = TestPerCallIdStamping._capture_interrupt(monkeypatch)
 

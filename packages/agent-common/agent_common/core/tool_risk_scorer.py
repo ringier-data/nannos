@@ -14,6 +14,7 @@ Scoring flow:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -30,6 +31,10 @@ from agent_common.core.load_skill_tool import LOAD_SKILL_TOOL_NAME
 from agent_common.core.tool_risk_cache import ParamRiskProfile, ToolRiskCache, ToolRiskEntry
 
 logger = logging.getLogger(__name__)
+
+# Upper bound on one classification (reasoning on, standard tier). Generous: a slow answer is
+# fine — the approval hook keeps the turn alive — but a hung one must not hold the turn forever.
+_SCORING_TIMEOUT_SECONDS = 180.0
 
 # ---------------------------------------------------------------------------
 # Pydantic models for structured LLM output
@@ -356,15 +361,18 @@ async def _score_tool_via_llm(
     standard chat tier with reasoning on — deliberately not the cheap ``chat:low`` tier. It
     used to take that tier with no effort at all, which inherited whatever the provider
     defaults to: thinking off on some, and on a model that reasons by default (Mistral Large 4)
-    tens of seconds of unasked-for thinking per tool. The cost is paid once per tool: the
-    result is cached and persisted, keyed on the tool's schema. The wait sits in front of the
+    tens of seconds of unasked-for thinking per tool. The cost is paid once per tool per
+    process, typically: the result is cached and persisted, keyed on the tool's schema, and
+    other replicas pick it up on their next cache refresh. The wait sits in front of the
     approval card, which ConditionalHumanInTheLoopMiddleware keeps alive and explains.
     Returns a ToolRiskEntry ready for caching.
     """
+    from agent_common.a2a.structured_response import select_response_format
     from agent_common.core.model_factory import create_model, require_default_model
     from agent_common.models.base import ThinkingLevel
 
-    model = create_model(require_default_model(), thinking_level=ThinkingLevel.medium, streaming=False)
+    model_type = require_default_model()
+    model = create_model(model_type, thinking_level=ThinkingLevel.medium, streaming=False)
     # method="function_calling", not the langchain-openai>=0.3 default of "json_schema",
     # which routes through OpenAI's *strict* validator: it requires every object to
     # declare additionalProperties: false and to list every property in `required`,
@@ -377,7 +385,20 @@ async def _score_tool_via_llm(
     # list shape of ToolRiskOutput is (see the note above its definition). Under
     # function calling with the old open-map schema, Vertex and Azure AI still
     # returned an empty risk_factors, silently.
-    structured_model = model.with_structured_output(ToolRiskOutput, method="function_calling")
+    #
+    # Forcing the tool is NOT always allowed with reasoning on: Anthropic and Bedrock reject a
+    # forced tool_choice next to thinking. select_response_format is the harness's one answer to
+    # "may this alias be forced with thinking on" (the main graph and sub-agents ask it too).
+    # Where it may not, the schema is bound as an ordinary tool the model is asked to call.
+    _, unforced = select_response_format(model_type, ToolRiskOutput, thinking_enabled=True)
+    if unforced:
+        from langchain_core.output_parsers.openai_tools import PydanticToolsParser
+
+        structured_model = model.bind_tools([ToolRiskOutput], tool_choice="auto") | PydanticToolsParser(
+            tools=[ToolRiskOutput], first_tool_only=True
+        )
+    else:
+        structured_model = model.with_structured_output(ToolRiskOutput, method="function_calling")
 
     # Build user prompt with tool details
     schema_str = json.dumps(input_schema, indent=2) if input_schema else "No schema available"
@@ -385,20 +406,28 @@ async def _score_tool_via_llm(
         f"Tool name: {tool_name}\n"
         f"Description: {description or 'No description available'}\n"
         f"Input schema:\n```json\n{schema_str}\n```\n\n"
-        f"Assess the risk level of this tool."
+        f"Assess the risk level of this tool, and answer by calling the {ToolRiskOutput.__name__} tool."
     )
 
     # Side-channel call (not through the agent middleware stack): attribute the
     # gateway spend from the run config's tags, like GatewayAttributionMiddleware.
     from agent_common.middleware.gateway_attribution_middleware import run_config_attribution_scope
 
+    # Bounded: the approval hook keeps the turn's stream alive while this runs, so nothing
+    # else would stop a hung call. A timeout is a scoring failure, which score_tool_risk turns
+    # into the name-based fallback score (nothing cached), never into "no guard".
     with run_config_attribution_scope():
-        result: ToolRiskOutput = await structured_model.ainvoke(
-            [
-                {"role": "system", "content": _SCORING_SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ]
+        result: ToolRiskOutput | None = await asyncio.wait_for(
+            structured_model.ainvoke(
+                [
+                    {"role": "system", "content": _SCORING_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ]
+            ),
+            timeout=_SCORING_TIMEOUT_SECONDS,
         )
+    if result is None:  # unforced, and the model answered without calling the tool
+        raise ValueError(f"model did not call {ToolRiskOutput.__name__} for tool {tool_name!r}")
 
     # Convert LLM output to ToolRiskEntry. The wire format is a list of named
     # parameters (see ToolRiskOutput); the cache is keyed by param name, so fold it

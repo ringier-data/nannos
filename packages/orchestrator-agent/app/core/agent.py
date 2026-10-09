@@ -38,7 +38,7 @@ from agent_common.core.notify_user_tool import (
     NOTIFY_USER_TOOL_NAME,
     USER_NOTE_EVENT,
 )
-from agent_common.core.stream_watchdog import StreamStallError, watch_stream_with_resume
+from agent_common.core.stream_watchdog import KEEPALIVE_EVENT, StreamStallError, watch_stream_with_resume
 from agent_common.middleware.ptc_guard import PTC_CODE_INTERPRETER_TOOL_NAME
 from agent_common.middleware.tool_status import RISK_ASSESSMENT_STATUS_TOOL, TOOL_STATUS_EVENT
 from agent_common.models.base import DEFAULT_THINKING_LEVEL, ModelType, ThinkingLevel
@@ -1246,7 +1246,7 @@ class OrchestratorDeepAgent:
                         )
                         continue
 
-                    if event_type == "keepalive":
+                    if event_type == KEEPALIVE_EVENT:
                         # Sub-agent dispatch heartbeat. Its only job is to be a graph
                         # stream part so the inter-chunk watchdog timer resets while a
                         # long, legitimately-silent sub-agent step runs. Nothing is

@@ -559,7 +559,6 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
 
         return _answered(last_ai_msg, artificial_tool_messages)
 
-    @hook_config(can_jump_to=["model", "end"])
     async def _score_concurrently(
         self, pending: list[_PendingScore]
     ) -> list[tuple[float, ToolRiskEntry | None] | BaseException]:
@@ -570,6 +569,12 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         while this hook awaits, so the orchestrator's inter-chunk watchdog would read the wait
         as a hung stream and cancel the turn: the wait is kept alive, and when it is long
         enough to notice, the activity log says what the turn is waiting on.
+
+        One call per (tool, server) is scored first, the rest after it. They are then cache
+        hits, as they were when scoring was sequential: N calls of one new tool pay one
+        classification, and every call of it is judged on the same profile — independent
+        classifications could fall on both sides of the threshold, and the resume, which
+        re-scores against the one cached profile, would then pair decisions with the wrong calls.
         """
         scorer = self._risk_scorer
         assert scorer is not None  # only called with calls that reached step 3
@@ -578,21 +583,32 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         async def _say_why() -> None:
             await emit_tool_status(f"Assessing the risk of {names}…", RISK_ASSESSMENT_STATUS_TOOL)
 
-        scores = asyncio.gather(
-            *(
-                scorer(
-                    p.tool_call["name"],
-                    p.tool_call.get("args", {}),
-                    tool=p.tool_instance,
-                    cache=p.cache,
-                    server_slug=p.server_slug,
-                )
-                for p in pending
-            ),
-            return_exceptions=True,
-        )
-        return await await_with_keepalive(scores, source="tool-risk-scoring", on_slow=_say_why)
+        def score(p: _PendingScore) -> Awaitable[tuple[float, ToolRiskEntry | None]]:
+            return scorer(
+                p.tool_call["name"],
+                p.tool_call.get("args", {}),
+                tool=p.tool_instance,
+                cache=p.cache,
+                server_slug=p.server_slug,
+            )
 
+        first_of: dict[tuple[str, str], int] = {}
+        for i, p in enumerate(pending):
+            first_of.setdefault((p.tool_call["name"], p.server_slug), i)
+        leaders = list(first_of.values())
+        followers = [i for i in range(len(pending)) if i not in set(leaders)]
+
+        async def scores() -> list[tuple[float, ToolRiskEntry | None] | BaseException]:
+            outcomes: list[Any] = [None] * len(pending)
+            for batch in (leaders, followers):
+                results = await asyncio.gather(*(score(pending[i]) for i in batch), return_exceptions=True)
+                for i, result in zip(batch, results):
+                    outcomes[i] = result
+            return outcomes
+
+        return await await_with_keepalive(scores(), source="tool-risk-scoring", on_slow=_say_why)
+
+    @hook_config(can_jump_to=["model", "end"])
     async def aafter_model(self, state: AgentState[Any], runtime: Runtime[ContextT]) -> dict[str, Any] | None:
         """Async handler: combines static guards + dynamic risk scoring.
 
@@ -788,7 +804,9 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         #     approval card — then decide each one in its own right.
         outcomes = await self._score_concurrently(to_score) if to_score else []
         context = getattr(runtime, "context", None)
-        for (idx, tool_call, tool_instance, cache, server_slug, requires_click), outcome in zip(to_score, outcomes):
+        for pending, outcome in zip(to_score, outcomes):
+            idx, tool_call, tool_instance = pending.idx, pending.tool_call, pending.tool_instance
+            server_slug, requires_click = pending.server_slug, pending.requires_click
             tool_name = tool_call["name"]
             args = tool_call.get("args", {})
             if isinstance(outcome, BaseException):

@@ -28,8 +28,8 @@ logger = logging.getLogger(__name__)
 
 
 # The chat tiers whose default (and chain) must serve the harness's utility calls: every
-# classifier, summarizer and risk-scorer call goes to the fast model (chat:low, falling back to
-# chat), and those calls use ``response_format`` with no alternative shape. A model recorded as
+# classifier and summarizer call goes to the fast model (chat:low, falling back to chat), the
+# tool risk scorer to chat, and those calls use ``response_format`` with no alternative shape. A model recorded as
 # rejecting it would break each of them the moment it became the tier's default or was failed
 # over to — so it is refused for those tiers, and only those. chat:premium is a user's explicit
 # choice for a conversation and carries no utility traffic.

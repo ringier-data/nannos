@@ -184,10 +184,27 @@ async def watch_stream_with_resume(
         return
 
 
-# The custom stream part every consumer already ignores (the orchestrator and DynamicAgent
-# stream loops): its only job is to be a graph stream part, which resets `watch_stream`'s
-# inter-chunk timer. Sub-agent dispatch emits the same one (DynamicToolDispatchMiddleware).
+# The custom stream part every consumer ignores (the orchestrator matches it, DynamicAgent's
+# loop finds no `status` in it): its only job is to be a graph stream part, which resets
+# `watch_stream`'s inter-chunk timer. Emitted by sub-agent dispatch (DynamicToolDispatchMiddleware)
+# and by `await_with_keepalive`, both through `emit_keepalive`.
 KEEPALIVE_EVENT = "keepalive"
+
+
+def keepalive_tick() -> float:
+    """How often a busy-but-silent node emits a keepalive: half the inter-chunk budget, so the
+    watchdog sees at least two resets before it could trip, whatever LLM_INTER_CHUNK_TIMEOUT is."""
+    return max(1.0, inter_chunk_timeout() / 2)
+
+
+async def emit_keepalive(writer: Callable[[Any], Any], source: str, waited: float) -> None:
+    """Push one keepalive part; best-effort, never fatal."""
+    try:
+        result = writer((KEEPALIVE_EVENT, {"source": source, "waited_s": round(waited, 1)}))
+        if inspect.iscoroutine(result):
+            await result
+    except Exception as e:
+        logger.debug("[watchdog] %s keepalive failed: %s", source, e)
 
 
 def _stream_writer() -> Callable[[Any], Any] | None:
@@ -223,30 +240,24 @@ async def await_with_keepalive(
     writer = _stream_writer()
     if writer is None:
         return await task
-    tick = max(1.0, inter_chunk_timeout() / 2)
+    tick = keepalive_tick()
+    slow_pending = on_slow is not None
     waited = 0.0
     try:
-        if on_slow is not None:
-            grace = min(slow_after, tick)
-            done, _ = await asyncio.wait({task}, timeout=grace)
-            if done:
-                return task.result()
-            waited += grace
-            try:
-                await on_slow()
-            except Exception as e:  # a status line is best-effort, never fatal
-                logger.debug("[watchdog] %s on_slow callback failed: %s", source, e)
         while True:
-            done, _ = await asyncio.wait({task}, timeout=tick)
+            timeout = min(slow_after, tick) if slow_pending else tick
+            done, _ = await asyncio.wait({task}, timeout=timeout)
             if done:
                 return task.result()
-            waited += tick
-            try:
-                result = writer((KEEPALIVE_EVENT, {"source": source, "waited_s": round(waited, 1)}))
-                if inspect.iscoroutine(result):
-                    await result
-            except Exception as e:  # keepalive is best-effort, never fatal
-                logger.debug("[watchdog] %s keepalive failed: %s", source, e)
+            waited += timeout
+            if slow_pending:
+                slow_pending = False
+                try:
+                    await on_slow()  # type: ignore[misc]  # slow_pending implies on_slow
+                except Exception as e:  # a status line is best-effort, never fatal
+                    logger.debug("[watchdog] %s on_slow callback failed: %s", source, e)
+                continue
+            await emit_keepalive(writer, source, waited)
     finally:
         if not task.done():
             task.cancel()

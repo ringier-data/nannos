@@ -64,7 +64,8 @@ from agent_common.core.hitl_resume import (
     pending_authorization_answer,
 )
 from agent_common.core.model_factory import create_model, get_default_fast_model, require_default_model
-from agent_common.core.stream_watchdog import inter_chunk_timeout
+from agent_common.core.stream_watchdog import emit_keepalive
+from agent_common.core.stream_watchdog import keepalive_tick as watchdog_keepalive_tick
 from langchain.agents.middleware.types import (
     AgentMiddleware,
     AgentState,
@@ -1922,20 +1923,14 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                 # watchdog would trip. Push a lightweight keepalive part so the
                 # watchdog timer resets; the orchestrator consumer ignores it. The
                 # tick (< the watchdog budget) guarantees a reset before the trip.
-                if not stream_writer:
-                    return
-                try:
-                    result = stream_writer(("keepalive", {"source": subagent_type, "waited_s": round(waited, 1)}))
-                    if inspect.iscoroutine(result):
-                        await result
-                except Exception as e:
-                    logger.debug(f"Failed to emit sub-agent keepalive: {e}")
+                if stream_writer:
+                    await emit_keepalive(stream_writer, subagent_type, waited)
 
             # Fire the keepalive at most half the orchestrator watchdog's inter-chunk
             # budget so a silent-but-busy sub-agent always produces ≥2 resets before the
             # watchdog could trip — independent of how SUBAGENT_STREAM_TICK_SECONDS and
             # LLM_INTER_CHUNK_TIMEOUT are individually configured.
-            keepalive_tick = min(SUBAGENT_STREAM_TICK_SECONDS, max(1.0, inter_chunk_timeout() / 2))
+            keepalive_tick = min(SUBAGENT_STREAM_TICK_SECONDS, watchdog_keepalive_tick())
             wrapped_stream = _iter_subagent_stream_with_stall_timeout(
                 runnable.astream(agent_state, agent_config),  # type: ignore[arg-type]
                 subagent_type=subagent_type,

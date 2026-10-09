@@ -209,31 +209,91 @@ def test_persist_entry_refuses_a_profile_with_no_schema_hash(caplog):
     cache._api_client.upsert_score.assert_not_called()
 
 
-@pytest.mark.asyncio
-async def test_classification_runs_on_the_standard_tier_with_reasoning(monkeypatch):
-    """The score decides what runs unasked: the standard chat tier with reasoning on, never the
-    cheap tier with whatever thinking its provider happens to default to."""
+def _fake_scoring_model(monkeypatch, *, unforced: bool):
+    """The scorer's model, recording how it was created and which output shape was bound.
+
+    A pin on the request shape only, not provider evidence: whether a provider accepts the
+    shape is what select_response_format and the registration probe answer.
+    """
     from unittest.mock import AsyncMock, MagicMock
 
-    from agent_common.core.tool_risk_scorer import ToolRiskOutput, _score_tool_via_llm
-    from agent_common.models.base import ThinkingLevel
+    from langchain_core.messages import AIMessage
+    from langchain_core.runnables import RunnableLambda
 
-    created: dict = {}
+    from agent_common.core.tool_risk_scorer import ToolRiskOutput
+
+    seen: dict = {}
+    answer = {"base_score": 0.3, "risk_factors": [], "reasoning": "reads only"}
     model = MagicMock()
-    model.with_structured_output.return_value.ainvoke = AsyncMock(
-        return_value=ToolRiskOutput(base_score=0.3, risk_factors=[], reasoning="reads only")
-    )
+    model.with_structured_output.return_value.ainvoke = AsyncMock(return_value=ToolRiskOutput(**answer))
+
+    def bind_tools(tools, tool_choice=None):
+        seen["bound"] = (tools, tool_choice)
+        return RunnableLambda(
+            lambda _messages: AIMessage(
+                content="", tool_calls=[{"name": "ToolRiskOutput", "args": answer, "id": "c1", "type": "tool_call"}]
+            )
+        )
+
+    model.bind_tools.side_effect = bind_tools
 
     def fake_create_model(model_type, thinking_level=None, **kwargs):
-        created.update(model_type=model_type, thinking_level=thinking_level, **kwargs)
+        seen.update(model_type=model_type, thinking_level=thinking_level)
         return model
 
     monkeypatch.setattr("agent_common.core.model_factory.create_model", fake_create_model)
     monkeypatch.setattr("agent_common.core.model_factory.require_default_model", lambda: "standard-chat")
     monkeypatch.setattr("agent_common.core.model_factory.get_default_fast_model", lambda: "cheap-chat")
+    monkeypatch.setattr(
+        "agent_common.a2a.structured_response.select_response_format",
+        lambda model_type, schema, *, thinking_enabled=False, has_builtin_tools=False: (None, unforced),
+    )
+    return seen, model
+
+
+@pytest.mark.asyncio
+async def test_classification_runs_on_the_standard_tier_with_reasoning(monkeypatch):
+    """The score decides what runs unasked: the standard chat tier with reasoning on, never the
+    cheap tier with whatever thinking its provider happens to default to."""
+    from agent_common.core.tool_risk_scorer import _score_tool_via_llm
+    from agent_common.models.base import ThinkingLevel
+
+    seen, _ = _fake_scoring_model(monkeypatch, unforced=False)
 
     entry = await _score_tool_via_llm("list_things", "Lists things.", {})
 
-    assert created["model_type"] == "standard-chat"
-    assert created["thinking_level"] == ThinkingLevel.medium
+    assert seen["model_type"] == "standard-chat"
+    assert seen["thinking_level"] == ThinkingLevel.medium
     assert entry.base_score == 0.3
+
+
+@pytest.mark.asyncio
+async def test_a_provider_that_refuses_forcing_with_thinking_gets_the_tool_unforced(monkeypatch):
+    """Anthropic/Bedrock reject a forced tool_choice next to thinking; where
+    select_response_format says forcing is unsafe the tool is bound with tool_choice="auto"."""
+    from agent_common.core.tool_risk_scorer import ToolRiskOutput, _score_tool_via_llm
+
+    seen, model = _fake_scoring_model(monkeypatch, unforced=True)
+
+    entry = await _score_tool_via_llm("list_things", "Lists things.", {})
+
+    assert seen["bound"] == ([ToolRiskOutput], "auto")
+    model.with_structured_output.assert_not_called()
+    assert entry.base_score == 0.3
+
+
+@pytest.mark.asyncio
+async def test_an_unforced_answer_without_the_tool_is_a_scoring_failure(monkeypatch):
+    """No tool call means no profile: score_tool_risk then falls back to the name-based score."""
+    from langchain_core.messages import AIMessage
+    from langchain_core.runnables import RunnableLambda
+
+    from agent_common.core.tool_risk_scorer import _score_tool_via_llm
+
+    _, model = _fake_scoring_model(monkeypatch, unforced=True)
+    model.bind_tools.side_effect = lambda tools, tool_choice=None: RunnableLambda(
+        lambda _messages: AIMessage(content="It looks harmless.")
+    )
+
+    with pytest.raises(ValueError, match="did not call ToolRiskOutput"):
+        await _score_tool_via_llm("list_things", "Lists things.", {})
