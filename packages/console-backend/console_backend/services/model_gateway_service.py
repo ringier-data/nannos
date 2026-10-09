@@ -48,8 +48,7 @@ _CATALOG_TTL = 6 * 3600.0
 # how we notice that the payload's SHAPE changed (a wrapper object, a renamed key, an error page that
 # happens to be valid JSON) rather than parsing it into a near-empty catalog and reporting that as
 # fact — an empty catalog reads as "unreadable" downstream and blocks registrations. Counted on the
-# RAW map, before our integrated-provider filter, so a deployment that integrates one provider isn't
-# mistaken for a broken payload.
+# RAW map, before the mode filter.
 _MIN_COST_MAP_ENTRIES = 50
 
 
@@ -191,6 +190,7 @@ class ModelGatewayService:
         self._master_key = master_key if master_key is not None else config.model_gateway.master_key.get_secret_value()
         self._timeout = timeout
         self._catalog_cache: tuple[float, list[dict]] | None = None
+        self._providers_cache: tuple[float, frozenset[str]] | None = None
         self._list_cache: tuple[float, list[dict]] | None = None
         # One pooled client reused across every management call (the service is a process-wide
         # singleton). Created lazily on first use so it binds to the running event loop; opening
@@ -474,7 +474,8 @@ class ModelGatewayService:
         #     while the proxy image is still on an older litellm. Registering it is safe even then,
         #     because an id we prefix with its route (`bedrock/…`) is routed generically — the proxy
         #     doesn't need the entry to serve the call. Unknown TAGS can't leak into billing either:
-        #     `route_family` maps anything it doesn't recognize to None → registration 422s.
+        #     `route_family` maps a tag that is no provider route of the running proxy to None →
+        #     registration 422s.
         #  2. the proxy's OWN bundled map — same data as of its image version, no egress needed.
         # Each source is tried END TO END (fetch + shape check + normalize) and any failure moves on
         # to the next: `main` is an upstream file nobody here controls, so it can also change shape
@@ -501,6 +502,30 @@ class ModelGatewayService:
         logger.warning("Could not load a model catalog from any source")
         return self._catalog_cache[1] if self._catalog_cache else []
 
+    async def get_supported_providers(self) -> frozenset[str]:
+        """Every provider route the running proxy's LiteLLM can call (``/public/providers``).
+
+        The vocabulary a rate-card provider key and a model-id route prefix must come from — asked of
+        the proxy rather than written down here, so it is always the deployed LiteLLM version's own
+        list and a new provider needs neither a code change nor configuration. Whether THIS
+        deployment holds credentials for a provider is not knowable from outside the proxy (LiteLLM's
+        own env check misreads role- and ADC-based auth); the registration test call answers that.
+        Cached like the catalog; empty only when the proxy has never answered, which callers treat as
+        "cannot verify", never as "anything goes".
+        """
+        now = time.monotonic()
+        if self._providers_cache and now - self._providers_cache[0] < _CATALOG_TTL:
+            return self._providers_cache[1]
+        try:
+            raw = await self._request("GET", "/public/providers", optional=True)
+        except ModelGatewayError as e:
+            logger.warning("Could not load the gateway's provider list: %s", e)
+            raw = None
+        if isinstance(raw, list) and raw:
+            self._providers_cache = (now, frozenset(p for p in raw if isinstance(p, str)))
+            return self._providers_cache[1]
+        return self._providers_cache[1] if self._providers_cache else frozenset()
+
     async def _fetch_public_cost_map(self) -> object:
         """The upstream cost map JSON at LITELLM_COSTMAP_REF (raises on HTTP or decode failure)."""
         async with httpx.AsyncClient(timeout=15.0) as client:
@@ -524,12 +549,11 @@ class ModelGatewayService:
         return None
 
     def _normalize_catalog(self, raw: dict) -> list[dict]:
-        """Cost-map entries → picker entries, pre-filtered to the providers this deployment integrated.
+        """Cost-map entries → picker entries (chat and embedding models, every provider).
 
         Per-entry failures are skipped rather than fatal: upstream adds fields and occasionally changes
         a type, and one odd entry must not cost us the other three thousand.
         """
-        allowed = set(config.model_gateway.integrated_providers)
         catalog: list[dict] = []
         skipped = 0
         for key, info in raw.items():
@@ -539,8 +563,6 @@ class ModelGatewayService:
                 mode = info.get("mode", "chat")
                 if mode not in ("chat", "embedding"):
                     continue  # focus on what we register (chat + embeddings)
-                if allowed and info.get("litellm_provider") not in allowed:
-                    continue
                 catalog.append(
                     {
                         "model_id": key,

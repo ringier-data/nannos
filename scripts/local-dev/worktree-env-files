@@ -1,6 +1,7 @@
 # Gitignored per-checkout files a worktree takes from the main checkout (`just env-sync`).
 # Paths only, relative to the repo root — never contents. One per line; # starts a comment.
 .env
+.env.gateway
 litellm-local-models.yaml
 packages/client-slack/.env
 packages/orchestrator-agent/tests/integration/.env.integration

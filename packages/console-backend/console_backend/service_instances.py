@@ -231,6 +231,8 @@ async def initialize_services(app: "FastAPI") -> None:
     # Sub-agent writes consult the gateway for live thinking-capability (created above,
     # before the gateway client existed — inject now).
     app.state.sub_agent_service.set_model_gateway_service(app.state.model_gateway_service)
+    # Rate-card writes validate provider keys against the gateway's own provider routes.
+    app.state.rate_card_service.model_gateway_service = app.state.model_gateway_service
 
     # Per-role default model aliases (graceful degradation). Writes go through the
     # audited repository so "set fleet default model" is recorded automatically.

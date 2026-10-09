@@ -31,6 +31,10 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 T0 = datetime(2025, 1, 1, tzinfo=timezone.utc)
+# The running proxy's provider routes (GET /public/providers), as the gateway double reports them.
+_ROUTES = frozenset(
+    {"anthropic", "azure", "azure_ai", "bedrock", "deepseek", "fireworks_ai", "gemini", "openai", "vertex_ai"}
+)
 
 
 # --- runtime_billing_provider: the shared derivation rule ---
@@ -75,6 +79,7 @@ def _register_request(
         catalog_model=AsyncMock(side_effect=lambda mid: next((c for c in entries if c["model_id"] == mid), None)),
         # Readability is what separates "unknown model id" (422) from "catalog outage" (502).
         get_catalog=AsyncMock(return_value=entries),
+        get_supported_providers=AsyncMock(return_value=_ROUTES),
     )
     state = SimpleNamespace(model_gateway_service=gateway, rate_card_service=rate_card_service)
     return SimpleNamespace(app=SimpleNamespace(state=state)), rate_card_service, gateway
@@ -234,8 +239,8 @@ async def test_derived_writes_still_refuse_a_catalog_tag(tag: str):
 
 @pytest.mark.asyncio
 async def test_derived_writes_accept_a_vendor_outside_the_family_allowlist():
-    """The counterpart: `anthropic` isn't in runtime_provider_families() for this deployment, but a
-    deployment routed as `anthropic/…` bills under exactly that key."""
+    """The counterpart: derived writes never consult the route list — a deployment routed as
+    `anthropic/…` bills under exactly that key."""
     service, repo = _service_with_mock_repo()
     pricing = {"base_input_tokens": RateCardPricingEntry(price_per_million=Decimal("1"), flow_direction="input")}
 
@@ -249,8 +254,8 @@ async def test_derived_writes_accept_a_vendor_outside_the_family_allowlist():
 
 @pytest.mark.asyncio
 async def test_register_rejects_a_catalog_tag_with_no_route_family():
-    """A catalog entry whose tag maps to no known family (litellm drift, or a tag forced in via
-    LLM_GATEWAY_PROVIDERS that isn't a route) resolves to nothing — same refusal, no silent guess."""
+    """A catalog entry whose tag maps to no route of the running proxy (litellm drift, a provider
+    this LiteLLM version can't call) resolves to nothing — same refusal, no silent guess."""
     import console_backend.routers.admin_model_gateway_router as router
 
     request, rate_card_service, _ = _register_request(
@@ -270,7 +275,9 @@ async def test_catalog_annotates_each_entry_with_its_route_family():
     normalization (and can show `bedrock` rather than the `bedrock_converse` tag)."""
     import console_backend.routers.admin_model_gateway_router as router
 
-    gateway = SimpleNamespace(get_catalog=AsyncMock(return_value=list(_CATALOG)))
+    gateway = SimpleNamespace(
+        get_catalog=AsyncMock(return_value=list(_CATALOG)), get_supported_providers=AsyncMock(return_value=_ROUTES)
+    )
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(model_gateway_service=gateway)))
 
     out = await router.model_catalog(request, user=SimpleNamespace(id="admin"))
@@ -400,28 +407,42 @@ async def test_an_edit_whose_old_deployment_survived_names_it():
 
 
 @pytest.mark.asyncio
-async def test_register_accepts_a_provider_added_via_env():
-    """LLM_GATEWAY_PROVIDERS is the supported way to integrate another vendor. Its catalog entries
-    come with unprefixed ids, so the family vocabulary must include it — otherwise registration 422s
-    on a deployment that is configured correctly."""
+async def test_register_accepts_any_provider_the_gateway_routes():
+    """No provider list to maintain: a vendor the running proxy can call registers from its catalog
+    entry alone, its unprefixed id prefixed with the route the tag names."""
     import console_backend.routers.admin_model_gateway_router as router
-    from console_backend.config import config
 
-    original = config.model_gateway.integrated_providers
-    config.model_gateway.integrated_providers = [*original, "mistral"]
-    try:
-        # Its catalog entries are tagged with the vendor name, which for such providers IS the route.
-        request, rate_card_service, gateway = _register_request(
-            [1], catalog=[{"model_id": "mistral-large-latest", "provider": "mistral"}]
-        )
-        body = _body({"model": "mistral-large-latest"})
+    request, rate_card_service, gateway = _register_request(
+        [1], catalog=[{"model_id": "deepseek-chat", "provider": "deepseek"}]
+    )
+    body = _body({"model": "deepseek-chat"})
 
-        await router.register_model(request, body, AsyncMock(), user=SimpleNamespace(id="admin"))
+    await router.register_model(request, body, AsyncMock(), user=SimpleNamespace(id="admin"))
 
-        assert rate_card_service.create_model_rate_card.await_args.kwargs["provider"] == "mistral"
-        assert gateway.register_model.await_args.args[1]["model"] == "mistral/mistral-large-latest"
-    finally:
-        config.model_gateway.integrated_providers = original
+    assert rate_card_service.create_model_rate_card.await_args.kwargs["provider"] == "deepseek"
+    assert gateway.register_model.await_args.args[1]["model"] == "deepseek/deepseek-chat"
+
+
+@pytest.mark.parametrize(
+    ("tag", "family"),
+    [
+        ("bedrock_converse", "bedrock"),
+        ("vertex_ai-anthropic_models", "vertex_ai"),
+        ("fireworks_ai-embedding-models", "fireworks_ai"),
+        ("deepseek", "deepseek"),
+        ("aihubmix", None),  # in the cost map, but no route of this proxy
+    ],
+)
+def test_route_family_normalizes_tags_onto_the_gateway_routes(tag: str, family: str | None):
+    from console_backend.services.rate_card_service import route_family
+
+    assert route_family(tag, _ROUTES) == family
+
+
+def test_route_family_resolves_nothing_without_a_route_list():
+    from console_backend.services.rate_card_service import route_family
+
+    assert route_family("bedrock_converse", frozenset()) is None
 
 
 # --- The same invariant on the Rate Cards page's own write paths ---
@@ -437,10 +458,12 @@ def _service_with_mock_repo():
         create_model_rate_card=AsyncMock(return_value=[1]),
         copy_model_rates=AsyncMock(return_value=[1]),
     )
-    return RateCardService(repo), repo
+    service = RateCardService(repo)
+    service.model_gateway_service = SimpleNamespace(get_supported_providers=AsyncMock(return_value=_ROUTES))
+    return service, repo
 
 
-@pytest.mark.parametrize("provider", ["bedrock_converse", "eu", "bedrock-anthropic", "anthropic"])
+@pytest.mark.parametrize("provider", ["bedrock_converse", "eu", "bedrock-anthropic"])
 @pytest.mark.asyncio
 async def test_manual_rate_card_writes_reject_non_runtime_providers(provider: str):
     service, repo = _service_with_mock_repo()
@@ -474,6 +497,20 @@ async def test_manual_rate_card_write_accepts_a_runtime_family():
         billing_unit="base_input_tokens", flow_direction="input", price_per_million=Decimal("1"),
     )
     assert repo.create_entry.await_args.kwargs["provider"] == "bedrock"
+
+
+@pytest.mark.asyncio
+async def test_manual_rate_card_write_is_refused_when_the_route_list_is_unavailable():
+    """No route list (the proxy never answered) means nothing can be verified — refuse, never pass."""
+    service, repo = _service_with_mock_repo()
+    service.model_gateway_service.get_supported_providers = AsyncMock(return_value=frozenset())
+
+    with pytest.raises(ValueError, match="Cannot verify"):
+        await service.create_entry(
+            db=AsyncMock(), actor=SimpleNamespace(sub="admin"), provider="bedrock", model_name="m",
+            billing_unit="base_input_tokens", flow_direction="input", price_per_million=Decimal("1"),
+        )
+    repo.create_entry.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -8,8 +8,9 @@ that question from configuration alone, in two directions:
   (``resolve_deployment_provider`` — the cost logger's own rule plus the catalog step, i.e. exactly
   what registration resolves — and billing's own exact-or-pattern card match). Catches a mis-keyed
   model BEFORE its first call;
-- backward: no active card may be keyed outside ``runtime_provider_families()``. Catches dead
-  pricing (catalog tags, Vertex locations, hand-typed vendors) with no traffic and no gateway.
+- backward: no active card may be keyed outside the gateway's provider routes
+  (``RateCardService.provider_routes``). Catches dead pricing (catalog tags, Vertex locations,
+  typos) with no traffic.
 
 Deterministic, cheap (one already-cached gateway list + two point queries) and always actionable:
 every finding is a live misconfiguration, so a healthy system reports nothing. That is why there is
@@ -85,8 +86,11 @@ async def check_provider_config(request: "Request", db: "AsyncSession") -> Provi
     # An unprefixed id is resolved through the catalog, and get_catalog fails SOFT (stale cache, else
     # []). With no catalog we cannot tell a bare-but-valid Bedrock id from an unroutable one — so a
     # catalog outage must not turn every such deployment into a red "will bill $0" row. Report only
-    # what we could resolve; say nothing about the rest.
-    catalog_readable = bool(await _catalog_or_empty(gateway_service))
+    # what we could resolve; say nothing about the rest. The proxy's route list is the other half of
+    # that resolution (a catalog tag only becomes a route through it), so its absence counts the same.
+    catalog_readable = bool(await _catalog_or_empty(gateway_service)) and bool(
+        await gateway_service.get_supported_providers()
+    )
     # One query for the whole fleet, with billing's own match semantics (pattern cards, scheduled
     # entries) — so "no card" here means exactly "get_active_rate would find nothing".
     card_providers = await rate_card_service.find_card_providers_for_models(db, sorted(alias_derived))

@@ -93,7 +93,7 @@ async def rekey_rate_card(
     # Validated here, not only in the service, because the ValueError below is the 409 "already
     # exists" case: a non-billable target is a bad request, not a conflict.
     try:
-        assert_billable_provider(body.to_provider)
+        assert_billable_provider(body.to_provider, await rate_card_service.provider_routes())
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
     try:
@@ -294,7 +294,7 @@ async def copy_model_rates(
     # Checked up front (the service re-checks) so a non-billable target provider reads as a 422 and
     # not as the 404 this endpoint uses for "source has no rates".
     try:
-        assert_billable_provider(target_provider)
+        assert_billable_provider(target_provider, await rate_card_service.provider_routes())
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
 

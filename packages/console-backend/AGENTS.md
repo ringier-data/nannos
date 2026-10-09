@@ -541,10 +541,14 @@ Enforcement lives entirely in `services/rate_card_service.py`, on BOTH write pat
 
 Which check applies depends on WHERE the provider came from. The two share no logic, so they are two
 functions — do not fold them back into one with a mode flag:
-- admin-typed → `assert_billable_provider`: the `runtime_provider_families()` allowlist (verified
-  built-ins plus whatever `LLM_GATEWAY_PROVIDERS` adds, so integrating `mistral` needs no code change
-  — for those tag == family, which is how litellm routes `mistral/…`). A typo and an un-integrated
-  vendor are indistinguishable here, so the allowlist is the only guard available.
+- admin-typed → `assert_billable_provider`: the provider routes of the running proxy
+  (`ModelGatewayService.get_supported_providers` → LiteLLM's `GET /public/providers`, cached like the
+  catalog). No provider list lives in this repo or its config, so a new vendor needs neither a code
+  change nor an env var. A typo, a catalog tag and a Vertex location are none of those routes, which
+  is the only guard available on a hand-entered value. No route list (the proxy never answered) →
+  refused, never waved through. Whether the deployment holds CREDENTIALS for a provider is not
+  knowable from outside the proxy (LiteLLM's env check misreads IAM-role and ADC auth); the
+  registration test call answers that.
 - derived from the deployment (register/edit only) → `assert_routable_provider`: only the TAG
   vocabulary is refused (`is_catalog_tag_vocabulary`). The value is the deployment's own route, which
   is by construction what `get_llm_provider` routes on and what the cost logger stamps, so any
@@ -631,9 +635,8 @@ vocabulary from the runtime family (`bedrock`, `vertex_ai`) the logger emits at 
 (`get_llm_provider` normalizes tags to families; verified on litellm 1.90.0). A card keyed on the
 tag matches no usage → silent $0 billing; `assert_billable_provider` rejects it now, and
 `route_family` is the ONLY sanctioned tag→family conversion. Reading the tag is legitimate in
-exactly three places, none of which decide a billing key: catalog filtering against
-`integrated_providers` (those are tags), the provider shown in the admin/app model lists when
-nothing is derivable, and `cost-prefill`'s second lookup candidate so cards written before this
+exactly two places, none of which decide a billing key: the provider shown in the admin/app model
+lists when nothing is derivable, and `cost-prefill`'s second lookup candidate so cards written before this
 derivation existed still prefill their stored rates. Anywhere else, a tag compared against family
 names is a bug — it silently takes the "unknown provider" branch. Also: `bedrock_converse/` is NOT
 a routable model-id prefix in litellm 1.90.0 — never pin catalog tags as `custom_llm_provider`.
@@ -643,8 +646,8 @@ Safety net: `GET /api/v1/admin/rate-cards/provider-config` →
 plus the `billing_rate_cards` System Status row. Configuration only, in both directions: every gateway
 deployment's derived runtime provider must have an active card pricing its alias
 (`unbillable_deployments`, so a mis-keyed model is caught before its first call), and no active card
-may be keyed outside `runtime_provider_families()` (`orphan_cards` — the dead pricing migration 076
-cleaned up by hand, findable with no traffic and no gateway). Deterministic and cheap: the gateway
+may be keyed outside the proxy's provider routes (`orphan_cards` — the dead pricing migration 076
+cleaned up by hand, findable with no traffic). Deterministic and cheap: the gateway
 list is already cached in `model_gateway_service`, the rest is two point queries. **No result cache
 and no `days`** — the answer must be right the instant a fix lands, and the frontend only needs to
 invalidate `PROVIDER_CONFIG_QUERY_KEY`. A healthy system returns two empty lists.

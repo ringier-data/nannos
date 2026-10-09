@@ -54,6 +54,8 @@ set -euo pipefail
 #   GCP_KEY                  - GCP service account key JSON (Vertex AI / Gemini)
 #   GCP_PROJECT_ID           - GCP project ID (defaults to "rcplus-alloy-gcp")
 #   GCP_LOCATION             - GCP region (defaults to "global")
+#   Any other LiteLLM provider - put its env vars (e.g. DEEPSEEK_API_KEY) in .env.gateway, which
+#                              only the gateway container reads
 #
 # Tracing (fetched from SSM when AWS_PROFILE is set):
 #   LANGSMITH_API_KEY        - LangSmith tracing API key

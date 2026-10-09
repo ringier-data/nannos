@@ -34,6 +34,16 @@ if [[ -n "${NANNOS_GW_GCP_SA:-}" ]]; then
   gcp_env=(-v "$NANNOS_GW_GCP_SA:/secrets/gcp/sa.json:ro" -e GOOGLE_APPLICATION_CREDENTIALS=/secrets/gcp/sa.json)
 fi
 
+# Any other provider LiteLLM supports (DEEPSEEK_API_KEY, ANTHROPIC_API_KEY, GROQ_API_KEY, …) takes
+# its env vars from .env.gateway at the repo root: the local counterpart of the litellm-proxy-secrets
+# envFrom in deployment, so a new provider needs no change here. Docker env-file syntax: KEY=value
+# per line, no quotes, no `export`. The -e flags below win over it, so it is not the place for the
+# Azure/GCP/AWS settings start-local.sh already wires.
+env_file=()
+if [[ -f "$ROOT/.env.gateway" ]]; then
+  env_file=(--env-file "$ROOT/.env.gateway")
+fi
+
 # exec: process-compose's stop signal reaches `docker run`, which passes it to the container;
 # --rm removes it. (process-compose.yaml also runs `docker stop` as the shutdown command.)
 exec docker run --rm --name "$CONTAINER" \
@@ -57,6 +67,7 @@ exec docker run --rm --name "$CONTAINER" \
   -e GCP_PROJECT_ID="${GCP_PROJECT_ID:-}" \
   -e GCP_KEY="${GCP_KEY:-}" \
   ${gcp_env[@]+"${gcp_env[@]}"} \
+  ${env_file[@]+"${env_file[@]}"} \
   -e DEFAULT_VERTEXAI_LOCATION="${DEFAULT_VERTEXAI_LOCATION:-eu}" \
   -e CONSOLE_BACKEND_URL="http://host.docker.internal:${CONSOLE_BACKEND_PORT}" \
   -e GATEWAY_INGEST_TOKEN="$GATEWAY_INGEST_TOKEN" \
