@@ -209,23 +209,6 @@ class ModelGatewayConfig(BaseModel):
             if r.strip()
         ]
     )
-    # Providers this deployment has integrated (has credentials for on the proxy).
-    # The model-catalog picker is pre-filtered to these litellm_provider values.
-    # NOTE: LiteLLM tags a model by its *implementation*, so the same vendor spans
-    # several keys — e.g. newer Bedrock Claude is `bedrock_converse` (not `bedrock`)
-    # and Vertex Claude is `vertex_ai-anthropic_models`. The default lists every
-    # variant for our integrated vendors so the newest models aren't filtered out.
-    # Empty = no filter (show the whole catalog). Comma-separated env.
-    integrated_providers: list[str] = Field(
-        default_factory=lambda: [
-            p.strip()
-            for p in os.getenv(
-                "LLM_GATEWAY_PROVIDERS",
-                "bedrock,bedrock_converse,azure,azure_ai,vertex_ai,vertex_ai-anthropic_models,gemini",
-            ).split(",")
-            if p.strip()
-        ]
-    )
 
 
 class SchedulerConfig(BaseModel):

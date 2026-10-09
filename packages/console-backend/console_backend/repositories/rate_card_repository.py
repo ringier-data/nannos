@@ -334,9 +334,8 @@ class RateCardRepository(AuditedRepository):
         The runtime only ever stamps a provider family on usage, so a card under any other
         vocabulary (a LiteLLM catalog tag like ``bedrock_converse``, a Vertex location like ``eu``, a
         hand-typed ``bedrock-anthropic``) is dead pricing: whatever it was meant to bill is billing
-        $0. Unlike the usage audit this needs no traffic to find them, and unlike the deployment
-        check it needs no gateway. The vocabulary is passed in — the repository holds no opinion on
-        which providers exist (see ``runtime_provider_families``).
+        $0. Unlike the usage audit this needs no traffic to find them. The vocabulary is passed in — the repository holds no opinion on
+        which providers exist (see ``RateCardService.provider_routes``).
         """
         query = text(f"""
             SELECT rc.provider, rc.model_name, rc.model_name_pattern

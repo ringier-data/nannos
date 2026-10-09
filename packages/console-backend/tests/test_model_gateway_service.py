@@ -945,3 +945,71 @@ async def test_a_stale_id_resolving_to_a_config_deployment_on_re_read_is_not_rec
         result = await svc.test_model("m", model_id="cfg")
     assert result["recorded"] is None and calls["patched"] == []
     assert "is not a DB deployment; not recorded" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_supported_providers_are_the_proxys_own_list_cached(svc, monkeypatch):
+    """The provider vocabulary comes from the running proxy, fetched once per TTL."""
+    calls = {"n": 0}
+
+    async def _fake_request(method, path, **kwargs):
+        assert (method, path) == ("GET", "/public/providers")
+        calls["n"] += 1
+        return ["bedrock", "deepseek", "vertex_ai"]
+
+    monkeypatch.setattr(svc, "_request", _fake_request)
+
+    assert await svc.get_supported_providers() == {"bedrock", "deepseek", "vertex_ai"}
+    await svc.get_supported_providers()
+    assert calls["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_supported_providers_keep_the_last_answer_when_the_proxy_stops_answering(svc, monkeypatch):
+    """Empty only when the proxy never answered; after that, an outage serves the last list."""
+    answers = [["bedrock", "deepseek"]]
+
+    async def _fake_request(method, path, **kwargs):
+        if answers:
+            return answers.pop()
+        raise ModelGatewayError("Gateway unreachable")
+
+    monkeypatch.setattr(svc, "_request", _fake_request)
+
+    first = await svc.get_supported_providers()
+    svc._providers_cache = (svc._providers_cache[0] - 10 * 24 * 3600, svc._providers_cache[1])  # expire it
+    assert await svc.get_supported_providers() == first == {"bedrock", "deepseek"}
+
+
+@pytest.mark.asyncio
+async def test_supported_providers_are_empty_when_the_proxy_never_answered(svc, monkeypatch):
+    async def _fake_request(method, path, **kwargs):
+        raise ModelGatewayError("Gateway unreachable")
+
+    monkeypatch.setattr(svc, "_request", _fake_request)
+
+    assert await svc.get_supported_providers() == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_a_provider_list_of_an_unexpected_shape_never_replaces_a_good_one(svc, monkeypatch):
+    answers = [["bedrock", "deepseek"], {"error": "not a list"}]
+
+    async def _fake_request(method, path, **kwargs):
+        return answers.pop(0)
+
+    monkeypatch.setattr(svc, "_request", _fake_request)
+
+    first = await svc.get_supported_providers()
+    svc._providers_cache = (svc._providers_cache[0] - 10 * 24 * 3600, svc._providers_cache[1])  # expire it
+    assert await svc.get_supported_providers() == first == {"bedrock", "deepseek"}
+
+
+@pytest.mark.asyncio
+async def test_a_provider_list_that_is_not_json_reads_as_unavailable(svc, monkeypatch):
+    async def _fake_request(method, path, **kwargs):
+        raise ValueError("Expecting value: line 1 column 1 (char 0)")  # resp.json() on an HTML page
+
+    monkeypatch.setattr(svc, "_request", _fake_request)
+
+    assert await svc.get_supported_providers() == frozenset()

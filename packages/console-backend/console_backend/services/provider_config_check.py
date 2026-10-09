@@ -8,8 +8,9 @@ that question from configuration alone, in two directions:
   (``resolve_deployment_provider`` — the cost logger's own rule plus the catalog step, i.e. exactly
   what registration resolves — and billing's own exact-or-pattern card match). Catches a mis-keyed
   model BEFORE its first call;
-- backward: no active card may be keyed outside ``runtime_provider_families()``. Catches dead
-  pricing (catalog tags, Vertex locations, hand-typed vendors) with no traffic and no gateway.
+- backward: no active card may be keyed outside the gateway's provider routes
+  (``RateCardService.provider_routes``). Catches dead pricing (catalog tags, Vertex locations,
+  typos) with no traffic.
 
 Deterministic, cheap (one already-cached gateway list + two point queries) and always actionable:
 every finding is a live misconfiguration, so a healthy system reports nothing. That is why there is
@@ -75,7 +76,7 @@ async def check_provider_config(request: "Request", db: "AsyncSession") -> Provi
     gateway_checked = True
     try:
         gateway_models = await request.app.state.model_gateway_service.list_models()
-    except Exception as e:  # orphan cards need no gateway; report those rather than nothing
+    except Exception as e:  # the cards are still checked against the routes; report those rather than nothing
         logger.warning(f"Provider config check: gateway unreachable, deployment half skipped: {e}")
         gateway_models = []
         gateway_checked = False
@@ -85,8 +86,10 @@ async def check_provider_config(request: "Request", db: "AsyncSession") -> Provi
     # An unprefixed id is resolved through the catalog, and get_catalog fails SOFT (stale cache, else
     # []). With no catalog we cannot tell a bare-but-valid Bedrock id from an unroutable one — so a
     # catalog outage must not turn every such deployment into a red "will bill $0" row. Report only
-    # what we could resolve; say nothing about the rest.
-    catalog_readable = bool(await _catalog_or_empty(gateway_service))
+    # what we could resolve; say nothing about the rest. The proxy's route list is the other half of
+    # that resolution (a catalog tag only becomes a route through it), so its absence counts the same.
+    routes_known = bool(await gateway_service.get_supported_providers())
+    catalog_readable = bool(await _catalog_or_empty(gateway_service)) and routes_known
     # One query for the whole fleet, with billing's own match semantics (pattern cards, scheduled
     # entries) — so "no card" here means exactly "get_active_rate would find nothing".
     card_providers = await rate_card_service.find_card_providers_for_models(db, sorted(alias_derived))
@@ -149,4 +152,5 @@ async def check_provider_config(request: "Request", db: "AsyncSession") -> Provi
         unbillable_deployments=unbillable,
         orphan_cards=orphan_cards,
         gateway_checked=gateway_checked,
+        orphans_checked=routes_known,
     )

@@ -28,6 +28,20 @@ from console_backend.services.rate_card_service import RateCardService
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+# The running proxy's provider routes (GET /public/providers), as the gateway double reports them.
+_ROUTES = frozenset(
+    {
+        "ai21", "ai21_chat", "anthropic", "azure", "azure_ai", "bedrock", "deepseek", "fireworks_ai",
+        "gemini", "openai", "vertex_ai",
+    }
+)
+
+
+def _routed(service: RateCardService) -> RateCardService:
+    service.model_gateway_service = SimpleNamespace(get_supported_providers=AsyncMock(return_value=_ROUTES))
+    return service
+
+
 T0 = datetime(2025, 1, 1, tzinfo=timezone.utc)
 
 
@@ -57,6 +71,7 @@ def _config_request(
         # Non-empty by default so "unresolved" means unroutable, not unreadable. Tests that want the
         # catalog-outage path pass catalog=None and get [] here.
         get_catalog=AsyncMock(return_value=entries),
+        get_supported_providers=AsyncMock(return_value=_ROUTES),
     )
     state = SimpleNamespace(model_gateway_service=gateway, rate_card_service=rate_card_service)
     return SimpleNamespace(app=SimpleNamespace(state=state))
@@ -202,6 +217,22 @@ async def test_unreadable_catalog_does_not_flag_unprefixed_deployments():
 
 
 @pytest.mark.asyncio
+async def test_unknown_gateway_routes_do_not_flag_unprefixed_deployments():
+    """A catalog tag only becomes a route through the proxy's provider list, so a list the gateway
+    never served is the same outage as an unreadable catalog: silence, not "will bill $0"."""
+    request = _config_request(
+        gateway_models=[{"model_name": "claude-bare", "litellm_params": {"model": "eu.anthropic.claude-bare-v1:0"}}],
+        card_providers={"claude-bare": {"bedrock"}},
+        catalog=[{"model_id": "eu.anthropic.claude-bare-v1:0", "provider": "bedrock_converse"}],
+    )
+    request.app.state.model_gateway_service.get_supported_providers = AsyncMock(return_value=frozenset())
+
+    out = await check_provider_config(request, db=AsyncMock())
+
+    assert out.unbillable_deployments == []
+
+
+@pytest.mark.asyncio
 async def test_card_pricing_another_deployment_of_the_alias_is_not_a_rekey_candidate():
     """One alias, two deployments: the vertex_ai card is pricing the vertex route, so moving it to fix
     the bedrock route would un-bill live traffic. Name it, never offer it."""
@@ -222,8 +253,9 @@ async def test_card_pricing_another_deployment_of_the_alias_is_not_a_rekey_candi
 
 @pytest.mark.asyncio
 async def test_gateway_down_reports_cards_but_no_deployments():
-    """Orphan cards need no gateway, so a gateway blip must not blank the whole check — and the
-    deployment half must be reported as unverified rather than clean."""
+    """The cards are checked against the routes (still served from the last answer), so a gateway
+    blip must not blank the whole check — and the deployment half must be reported as unverified
+    rather than clean."""
     from console_backend.models.usage import OrphanCard
 
     def _boom():
@@ -238,6 +270,35 @@ async def test_gateway_down_reports_cards_but_no_deployments():
     assert out.gateway_checked is False
     assert out.unbillable_deployments == []
     assert out.orphan_cards == [OrphanCard(provider="eu", model_name="claude-loc")]
+
+
+@pytest.mark.asyncio
+async def test_unknown_routes_report_the_cards_as_unchecked_not_clean():
+    """A card is orphaned by being keyed outside the proxy's routes; with no route list nothing can
+    be said about the cards, and the check must say that rather than come back all-clear."""
+    request = _config_request(gateway_models=[])
+    request.app.state.model_gateway_service.get_supported_providers = AsyncMock(return_value=frozenset())
+
+    out = await check_provider_config(request, db=AsyncMock())
+
+    assert out.orphans_checked is False
+
+
+@pytest.mark.asyncio
+async def test_status_row_is_limited_while_the_cards_are_unchecked(monkeypatch):
+    from console_backend.models.usage import ProviderConfigCheck
+    from console_backend.services import feature_status, provider_config_check
+
+    async def check(request, db):
+        return ProviderConfigCheck(
+            unbillable_deployments=[], orphan_cards=[], gateway_checked=True, orphans_checked=False
+        )
+
+    monkeypatch.setattr(provider_config_check, "check_provider_config", check)
+
+    row = await feature_status._billing_config_feature(SimpleNamespace(), AsyncMock())
+
+    assert row.status == "limited"
 
 
 # --- backward direction: orphan cards (real DB) ---
@@ -279,7 +340,7 @@ async def test_orphan_card_is_found_without_any_usage(pg_session: AsyncSession, 
     """What migration 076 had to clean up by hand: a card under a vocabulary the runtime never emits.
     No traffic is needed to know it can never match."""
     repo = _repo()
-    service = RateCardService(repo)
+    service = _routed(RateCardService(repo))
     await _create_card(repo, pg_session, test_user, "bedrock_converse", "claude-orphan")
     await _create_card(repo, pg_session, test_user, "bedrock", "claude-fine")
 
@@ -295,7 +356,7 @@ async def test_expired_orphan_card_is_not_reported(pg_session: AsyncSession, tes
     """A card whose pricing has lapsed is not billing anything wrong — only live pricing is a finding,
     or the banner would never clear for historical keys."""
     repo = _repo()
-    service = RateCardService(repo)
+    service = _routed(RateCardService(repo))
     await _create_card(
         repo, pg_session, test_user, "bedrock_converse", "claude-lapsed-orphan",
         effective_until=datetime.now(timezone.utc) - timedelta(days=1),
@@ -361,14 +422,15 @@ async def test_check_reflects_a_fix_immediately(pg_session: AsyncSession, test_u
     """No result cache on this half: the banner refetch after a re-key must see the fixed state, and
     there is no TTL to defeat (the usage audit is the one that caches)."""
     repo = _repo()
-    service = RateCardService(repo)
+    service = _routed(RateCardService(repo))
     await _create_card(repo, pg_session, test_user, "bedrock_converse", "claude-fixme")
     gateway = SimpleNamespace(
         list_models=AsyncMock(
             return_value=[
                 {"model_name": "claude-fixme", "litellm_params": {"model": "bedrock/us.anthropic.claude-fixme-v1:0"}}
             ]
-        )
+        ),
+        get_supported_providers=AsyncMock(return_value=_ROUTES),
     )
     request = SimpleNamespace(
         app=SimpleNamespace(state=SimpleNamespace(model_gateway_service=gateway, rate_card_service=service))

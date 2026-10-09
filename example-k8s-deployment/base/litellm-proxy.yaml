@@ -51,8 +51,9 @@ spec:
         # Cost ingestion target (Phase 2).
         - name: CONSOLE_BACKEND_URL
           value: "https://console.${BASE_DOMAIN}"
-        # LITELLM_MASTER_KEY, AZURE_OPENAI_API_KEY, AZURE_AI_API_KEY, GCP_KEY, DATABASE_URL
-        # password, GATEWAY_INGEST_TOKEN (shared secret for cost ingestion) → litellm-proxy-secrets.
+        # LITELLM_MASTER_KEY, DATABASE_URL password, GATEWAY_INGEST_TOKEN (shared secret for cost
+        # ingestion) and the provider credentials → litellm-proxy-secrets. Any env var LiteLLM reads
+        # for a provider works (AZURE_OPENAI_API_KEY, GCP_KEY, DEEPSEEK_API_KEY, …).
         # The same GATEWAY_INGEST_TOKEN must also be in console-secrets.
         envFrom:
         - secretRef:

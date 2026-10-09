@@ -416,7 +416,7 @@ export function ModelGatewayPage() {
     [models],
   );
 
-  // LiteLLM's known-model catalog, pre-filtered server-side to integrated providers.
+  // LiteLLM's known-model catalog: every provider, each entry annotated with the route it bills under.
   const { data: catalog = [] } = useQuery({
     queryKey: ['gateway-catalog'],
     queryFn: listModelCatalog,
@@ -435,11 +435,18 @@ export function ModelGatewayPage() {
   // Bedrock availability is regional and AWS's rejection doesn't say which region it checked.
   const defaultBedrockRegion = gatewayConfig?.default_bedrock_region || '';
 
-  // Picker matches: scoped to the chosen mode, substring-filtered on what's typed, capped.
+  // Routes this gateway already serves. The catalog lists every LiteLLM provider, and whether this
+  // deployment holds credentials for one is only known to the proxy — so matches from a route already
+  // in use rank first, and typing "claude-sonnet" doesn't open on resellers.
+  const servedRoutes = useMemo(() => new Set(models.map((m) => m.provider).filter(Boolean)), [models]);
+  const isServed = (c: CatalogModel) => servedRoutes.has(c.family ?? '') || servedRoutes.has(c.provider ?? '');
+
+  // Picker matches: scoped to the chosen mode, substring-filtered on what's typed, served routes
+  // first (a stable sort, so the catalog's order holds within each group), capped.
   const q = form.litellm_model.trim().toLowerCase();
-  const catalogMatches = catalog.filter(
-    (c) => c.mode === form.mode && (q === '' || c.model_id.toLowerCase().includes(q)),
-  );
+  const catalogMatches = catalog
+    .filter((c) => c.mode === form.mode && (q === '' || c.model_id.toLowerCase().includes(q)))
+    .sort((a, b) => Number(isServed(b)) - Number(isServed(a)));
   const visibleMatches = catalogMatches.slice(0, CATALOG_LIMIT);
 
   // Base-model picker: only entries compatible with the gateway id (same route; the same model's

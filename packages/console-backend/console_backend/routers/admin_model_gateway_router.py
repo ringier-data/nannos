@@ -92,12 +92,13 @@ async def _resolve_billing_provider(
 
 
 async def _catalog_is_readable(svc: ModelGatewayService) -> bool:
-    """Whether the model catalog can be read at all (it degrades to [] on failure, never raising).
+    """Whether the model catalog can be read at all (it degrades to [] on failure, never raising),
+    together with the proxy's provider routes, which turn a catalog tag into a route.
 
     Used only to tell "we looked and this id isn't a known model" apart from "we couldn't look".
     """
     try:
-        return bool(await svc.get_catalog())
+        return bool(await svc.get_catalog()) and bool(await svc.get_supported_providers())
     except Exception as e:  # get_catalog is already fail-soft; never let this decide a 500
         logger.warning("Catalog readability check failed: %s", e)
         return False
@@ -289,18 +290,19 @@ async def gateway_ui_config(user: User = Depends(require_admin)):
 
 @router.get("/catalog", response_model=list[CatalogModel])
 async def model_catalog(request: Request, user: User = Depends(require_admin)):
-    """LiteLLM's known-model catalog for the registration picker, pre-filtered to the
-    providers this deployment has integrated (config.model_gateway.integrated_providers).
+    """LiteLLM's known-model catalog (chat + embedding models of every provider) for the
+    registration picker.
 
     Each entry is annotated with the provider route its cost-map tag resolves to (``family``), the
     same derivation registration applies — so the picker can show and reason about the route that
     will actually bill without re-implementing the tag→family normalization client-side.
     """
     try:
-        catalog = await get_model_gateway_service(request).get_catalog()
+        service = get_model_gateway_service(request)
+        catalog, routes = await asyncio.gather(service.get_catalog(), service.get_supported_providers())
     except ModelGatewayError as e:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
-    return [{**entry, "family": route_family(entry.get("provider"))} for entry in catalog]
+    return [{**entry, "family": route_family(entry.get("provider"), routes)} for entry in catalog]
 
 
 @router.get("/bedrock-regions", response_model=BedrockModelRegions)

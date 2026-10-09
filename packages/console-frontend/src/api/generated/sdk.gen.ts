@@ -1928,8 +1928,8 @@ export const gatewayUiConfigApiV1AdminModelGatewayConfigGet = <ThrowOnError exte
 /**
  * Model Catalog
  *
- * LiteLLM's known-model catalog for the registration picker, pre-filtered to the
- * providers this deployment has integrated (config.model_gateway.integrated_providers).
+ * LiteLLM's known-model catalog (chat + embedding models of every provider) for the
+ * registration picker.
  *
  * Each entry is annotated with the provider route its cost-map tag resolves to (``family``), the
  * same derivation registration applies — so the picker can show and reason about the route that
