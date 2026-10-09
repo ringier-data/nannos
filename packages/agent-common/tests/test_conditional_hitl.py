@@ -399,6 +399,30 @@ class TestConcurrentRiskScoring:
 
         assert sorted(classifications) == ["other", "wipe"]
 
+    async def test_a_tool_whose_classification_failed_is_not_classified_again_in_the_step(self, monkeypatch):
+        """No profile for the first call (the scorer fell back to its name-based score): the
+        tool's other calls take that answer instead of re-classifying, possibly disagreeing."""
+        captured = TestPerCallIdStamping._capture_interrupt(monkeypatch)
+        calls: list[str] = []
+
+        async def scorer(name, args, *, tool=None, cache=None, server_slug=None):
+            calls.append(args["id"])
+            return 0.9, None  # the fallback: a score, no profile, nothing cached
+
+        mw = ConditionalHumanInTheLoopMiddleware(interrupt_on={}, risk_scorer=scorer, default_risk_threshold=0.8)
+        ai = AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "wipe", "args": {"id": "a"}, "id": "tc-0", "type": "tool_call"},
+                {"name": "wipe", "args": {"id": "b"}, "id": "tc-1", "type": "tool_call"},
+            ],
+        )
+
+        await mw.aafter_model({"messages": [ai]}, self._runtime())
+
+        assert calls == ["a"]
+        assert [ar["args"]["_call_id"] for ar in captured["request"]["action_requests"]] == ["tc-0", "tc-1"]
+
     async def test_a_failed_score_skips_only_its_own_call(self, monkeypatch):
         captured = TestPerCallIdStamping._capture_interrupt(monkeypatch)
 

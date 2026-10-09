@@ -600,10 +600,22 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
 
         async def scores() -> list[tuple[float, ToolRiskEntry | None] | BaseException]:
             outcomes: list[Any] = [None] * len(pending)
-            for batch in (leaders, followers):
-                results = await asyncio.gather(*(score(pending[i]) for i in batch), return_exceptions=True)
-                for i, result in zip(batch, results):
-                    outcomes[i] = result
+            results = await asyncio.gather(*(score(pending[i]) for i in leaders), return_exceptions=True)
+            for i, result in zip(leaders, results):
+                outcomes[i] = result
+            # A leader that got no profile (classification failed → the scorer's name-based
+            # fallback, nothing cached) answers for its followers: they would only classify
+            # again, in parallel, and could disagree with it. The fallback ignores args.
+            redo = []
+            for i in followers:
+                leader = outcomes[first_of[(pending[i].tool_call["name"], pending[i].server_slug)]]
+                if isinstance(leader, BaseException) or leader[1] is None:
+                    outcomes[i] = leader
+                else:
+                    redo.append(i)
+            results = await asyncio.gather(*(score(pending[i]) for i in redo), return_exceptions=True)
+            for i, result in zip(redo, results):
+                outcomes[i] = result
             return outcomes
 
         return await await_with_keepalive(scores(), source="tool-risk-scoring", on_slow=_say_why)
