@@ -188,3 +188,16 @@ def test_without_structured_state_the_response_tool_call_is_read_from_this_turn_
     messages = _answered_turn("earlier", "a1") + _answered_turn("now", "a2")
     out = _Translator()._translate_agent_result({"messages": messages}, None, None)
     assert out == ("schema", "now")
+
+
+def test_a_plain_text_turn_never_replays_the_previous_structured_answer():
+    """nannos#358: a turn that answers in plain text, after one that answered through the
+    response tool, still finds that earlier answer in the persisted channel. The plain
+    text is this turn's answer; the channel's is a previous turn's."""
+    previous = SubAgentResponseSchema(task_state="completed", message="I filed the report.")
+    messages = _answered_turn("I filed the report.", "a1") + [
+        HumanMessage(content="should we raise the limit?"),
+        AIMessage(content="Yes, I'd raise it."),
+    ]
+    out = _Translator()._translate_agent_result({"structured_response": previous, "messages": messages}, None, None)
+    assert out == ("success", "Yes, I'd raise it.")
