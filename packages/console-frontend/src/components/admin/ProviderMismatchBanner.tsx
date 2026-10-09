@@ -56,7 +56,10 @@ export function ProviderMismatchBanner() {
   if (!data) return null;
   const deployments = data.unbillable_deployments;
   const orphans = data.orphan_cards;
-  if (deployments.length === 0 && orphans.length === 0) return null;
+  // Unchecked cards are not clean cards: without the gateway's provider list nothing can be
+  // called orphaned, so say so rather than render the all-clear of an empty banner.
+  const orphansUnchecked = data.orphans_checked === false;
+  if (deployments.length === 0 && orphans.length === 0 && !orphansUnchecked) return null;
 
   return (
     <>
@@ -101,6 +104,17 @@ export function ProviderMismatchBanner() {
             <p className="text-xs text-muted-foreground">
               Gateway unreachable — registered models could not be checked, so this banner only reflects the rate
               cards themselves.
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
+      {orphansUnchecked && (
+        <Card className="border-amber-400/50 bg-amber-50/50 dark:border-amber-600/40 dark:bg-amber-950/20">
+          <CardContent className="pt-0">
+            <p className="text-xs text-muted-foreground">
+              Rate cards were not checked — the gateway&apos;s provider list is unavailable, so cards keyed on a
+              provider the runtime never reports cannot be found.
             </p>
           </CardContent>
         </Card>

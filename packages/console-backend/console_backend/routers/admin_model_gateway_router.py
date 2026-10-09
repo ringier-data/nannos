@@ -92,12 +92,13 @@ async def _resolve_billing_provider(
 
 
 async def _catalog_is_readable(svc: ModelGatewayService) -> bool:
-    """Whether the model catalog can be read at all (it degrades to [] on failure, never raising).
+    """Whether the model catalog can be read at all (it degrades to [] on failure, never raising),
+    together with the proxy's provider routes, which turn a catalog tag into a route.
 
     Used only to tell "we looked and this id isn't a known model" apart from "we couldn't look".
     """
     try:
-        return bool(await svc.get_catalog())
+        return bool(await svc.get_catalog()) and bool(await svc.get_supported_providers())
     except Exception as e:  # get_catalog is already fail-soft; never let this decide a 500
         logger.warning("Catalog readability check failed: %s", e)
         return False
@@ -298,8 +299,7 @@ async def model_catalog(request: Request, user: User = Depends(require_admin)):
     """
     try:
         service = get_model_gateway_service(request)
-        catalog = await service.get_catalog()
-        routes = await service.get_supported_providers()
+        catalog, routes = await asyncio.gather(service.get_catalog(), service.get_supported_providers())
     except ModelGatewayError as e:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
     return [{**entry, "family": route_family(entry.get("provider"), routes)} for entry in catalog]

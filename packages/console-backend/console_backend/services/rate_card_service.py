@@ -41,17 +41,13 @@ def runtime_billing_provider(litellm_params: dict) -> str | None:
 # resolved provider on deployments either). Mirrored here as: the one tag whose family is a different
 # word, else the route itself, else a `<route>-<suffix>` tag's route. The routes are the running
 # proxy's own list (ModelGatewayService.get_supported_providers), never a list kept in this repo.
-_TAG_TO_FAMILY = {"bedrock_converse": "bedrock"}
+_TAG_TO_FAMILY = {
+    "bedrock_converse": "bedrock",
+    # `ai21` is a route, but litellm routes and stamps `ai21/…` as `ai21_chat` (checked against
+    # get_llm_provider for every cost-map tag on the pinned proxy image: the only such route).
+    "ai21": "ai21_chat",
+}
 _VERTEX_TAG_PREFIX = "vertex_ai"  # vertex_ai-anthropic_models, vertex_ai-language-models, …
-
-
-def _family_of(catalog_tag: str, routes: frozenset[str]) -> str:
-    if catalog_tag in _TAG_TO_FAMILY:
-        return _TAG_TO_FAMILY[catalog_tag]
-    if catalog_tag in routes:
-        return catalog_tag
-    base = catalog_tag.split("-", 1)[0]
-    return base if base in routes else catalog_tag
 
 
 def route_family(catalog_tag: str | None, routes: frozenset[str]) -> str | None:
@@ -65,8 +61,11 @@ def route_family(catalog_tag: str | None, routes: frozenset[str]) -> str | None:
     """
     if not catalog_tag:
         return None
-    family = _family_of(catalog_tag, routes)
-    return family if family in routes else None
+    family = _TAG_TO_FAMILY.get(catalog_tag, catalog_tag)
+    if family in routes:
+        return family
+    base = catalog_tag.split("-", 1)[0]
+    return base if base in routes else None
 
 
 async def resolve_deployment_provider(gateway_service: Any, litellm_params: dict) -> str | None:
@@ -122,7 +121,8 @@ def assert_billable_provider(provider: str, routes: frozenset[str]) -> None:
             f"Cannot verify '{provider}' as a billing provider right now: the model gateway's provider "
             "list is unavailable. Retry once the gateway is reachable."
         )
-    if provider not in routes:
+    # A route can still be a tag litellm bills under another name (`ai21` → `ai21_chat`).
+    if provider not in routes or is_catalog_tag_vocabulary(provider):
         raise ValueError(
             f"'{provider}' is not a runtime billing provider. Rate cards must be keyed on a provider "
             "route LiteLLM reports in usage (e.g. 'bedrock', 'vertex_ai', 'anthropic') — LiteLLM catalog "

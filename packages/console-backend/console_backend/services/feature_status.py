@@ -312,6 +312,18 @@ async def _billing_config_feature(request: "Request", db: "AsyncSession") -> Fea
             remediation="Re-key those cards to the provider family the cost logger reports, or expire them.",
             caveat=gateway_caveat,
         )
+    if not check.orphans_checked:
+        return FeatureStatus(
+            key=key,
+            name=name,
+            status="limited",
+            detail=(
+                "Rate cards were not checked: the gateway's provider list is unavailable, and a card "
+                "is dead pricing when keyed outside it."
+            ),
+            remediation="Check that the Model Gateway answers GET /public/providers.",
+            caveat=gateway_caveat,
+        )
     return FeatureStatus(
         key=key,
         name=name,

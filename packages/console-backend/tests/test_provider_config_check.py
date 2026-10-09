@@ -250,8 +250,9 @@ async def test_card_pricing_another_deployment_of_the_alias_is_not_a_rekey_candi
 
 @pytest.mark.asyncio
 async def test_gateway_down_reports_cards_but_no_deployments():
-    """Orphan cards need no gateway, so a gateway blip must not blank the whole check — and the
-    deployment half must be reported as unverified rather than clean."""
+    """The cards are checked against the routes (still served from the last answer), so a gateway
+    blip must not blank the whole check — and the deployment half must be reported as unverified
+    rather than clean."""
     from console_backend.models.usage import OrphanCard
 
     def _boom():
@@ -266,6 +267,35 @@ async def test_gateway_down_reports_cards_but_no_deployments():
     assert out.gateway_checked is False
     assert out.unbillable_deployments == []
     assert out.orphan_cards == [OrphanCard(provider="eu", model_name="claude-loc")]
+
+
+@pytest.mark.asyncio
+async def test_unknown_routes_report_the_cards_as_unchecked_not_clean():
+    """A card is orphaned by being keyed outside the proxy's routes; with no route list nothing can
+    be said about the cards, and the check must say that rather than come back all-clear."""
+    request = _config_request(gateway_models=[])
+    request.app.state.model_gateway_service.get_supported_providers = AsyncMock(return_value=frozenset())
+
+    out = await check_provider_config(request, db=AsyncMock())
+
+    assert out.orphans_checked is False
+
+
+@pytest.mark.asyncio
+async def test_status_row_is_limited_while_the_cards_are_unchecked(monkeypatch):
+    from console_backend.models.usage import ProviderConfigCheck
+    from console_backend.services import feature_status, provider_config_check
+
+    async def check(request, db):
+        return ProviderConfigCheck(
+            unbillable_deployments=[], orphan_cards=[], gateway_checked=True, orphans_checked=False
+        )
+
+    monkeypatch.setattr(provider_config_check, "check_provider_config", check)
+
+    row = await feature_status._billing_config_feature(SimpleNamespace(), AsyncMock())
+
+    assert row.status == "limited"
 
 
 # --- backward direction: orphan cards (real DB) ---

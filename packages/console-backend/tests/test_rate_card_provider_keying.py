@@ -33,7 +33,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 T0 = datetime(2025, 1, 1, tzinfo=timezone.utc)
 # The running proxy's provider routes (GET /public/providers), as the gateway double reports them.
 _ROUTES = frozenset(
-    {"anthropic", "azure", "azure_ai", "bedrock", "deepseek", "fireworks_ai", "gemini", "openai", "vertex_ai"}
+    {
+        "ai21", "ai21_chat", "anthropic", "azure", "azure_ai", "bedrock", "deepseek", "fireworks_ai",
+        "gemini", "openai", "vertex_ai",
+    }
 )
 
 
@@ -200,6 +203,24 @@ async def test_unreadable_catalog_is_a_502_not_a_bad_model_id():
     assert exc.value.status_code == 502
     assert "outage" in exc.value.detail.lower() or "unreadable" in exc.value.detail.lower()
     rate_card_service.create_model_rate_card.assert_not_awaited()
+    gateway.register_model.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unknown_gateway_routes_are_a_502_not_a_bad_model_id():
+    """A catalog tag becomes a route only through the proxy's provider list; without that list an
+    unprefixed id is unresolvable for the same reason as with no catalog — an outage, said so."""
+    import console_backend.routers.admin_model_gateway_router as router
+
+    request, rate_card_service, gateway = _register_request([1])
+    gateway.get_supported_providers = AsyncMock(return_value=frozenset())
+
+    with pytest.raises(HTTPException) as exc:
+        await router.register_model(
+            request, _body({"model": "eu.anthropic.claude-opus-4-8"}), AsyncMock(), user=SimpleNamespace(id="admin")
+        )
+
+    assert exc.value.status_code == 502
     gateway.register_model.assert_not_awaited()
 
 
@@ -430,6 +451,7 @@ async def test_register_accepts_any_provider_the_gateway_routes():
         ("vertex_ai-anthropic_models", "vertex_ai"),
         ("fireworks_ai-embedding-models", "fireworks_ai"),
         ("deepseek", "deepseek"),
+        ("ai21", "ai21_chat"),  # a route itself, but litellm routes and bills it as ai21_chat
         ("aihubmix", None),  # in the cost map, but no route of this proxy
     ],
 )
@@ -463,7 +485,7 @@ def _service_with_mock_repo():
     return service, repo
 
 
-@pytest.mark.parametrize("provider", ["bedrock_converse", "eu", "bedrock-anthropic"])
+@pytest.mark.parametrize("provider", ["bedrock_converse", "eu", "bedrock-anthropic", "ai21"])
 @pytest.mark.asyncio
 async def test_manual_rate_card_writes_reject_non_runtime_providers(provider: str):
     service, repo = _service_with_mock_repo()

@@ -76,7 +76,7 @@ async def check_provider_config(request: "Request", db: "AsyncSession") -> Provi
     gateway_checked = True
     try:
         gateway_models = await request.app.state.model_gateway_service.list_models()
-    except Exception as e:  # orphan cards need no gateway; report those rather than nothing
+    except Exception as e:  # the cards are still checked against the routes; report those rather than nothing
         logger.warning(f"Provider config check: gateway unreachable, deployment half skipped: {e}")
         gateway_models = []
         gateway_checked = False
@@ -88,9 +88,8 @@ async def check_provider_config(request: "Request", db: "AsyncSession") -> Provi
     # catalog outage must not turn every such deployment into a red "will bill $0" row. Report only
     # what we could resolve; say nothing about the rest. The proxy's route list is the other half of
     # that resolution (a catalog tag only becomes a route through it), so its absence counts the same.
-    catalog_readable = bool(await _catalog_or_empty(gateway_service)) and bool(
-        await gateway_service.get_supported_providers()
-    )
+    routes_known = bool(await gateway_service.get_supported_providers())
+    catalog_readable = bool(await _catalog_or_empty(gateway_service)) and routes_known
     # One query for the whole fleet, with billing's own match semantics (pattern cards, scheduled
     # entries) — so "no card" here means exactly "get_active_rate would find nothing".
     card_providers = await rate_card_service.find_card_providers_for_models(db, sorted(alias_derived))
@@ -153,4 +152,5 @@ async def check_provider_config(request: "Request", db: "AsyncSession") -> Provi
         unbillable_deployments=unbillable,
         orphan_cards=orphan_cards,
         gateway_checked=gateway_checked,
+        orphans_checked=routes_known,
     )

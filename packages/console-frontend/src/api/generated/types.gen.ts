@@ -4348,9 +4348,15 @@ export type ProviderConfigCheck = {
     /**
      * Gateway Checked
      *
-     * False when the gateway was unreachable: unbillable_deployments is then empty and unverified (orphan_cards is still authoritative — it needs no gateway).
+     * False when the gateway was unreachable: unbillable_deployments is then empty and unverified.
      */
     gateway_checked: boolean;
+    /**
+     * Orphans Checked
+     *
+     * False when the gateway's provider list is unavailable: orphan_cards is then empty and unverified, since a card is orphaned by being keyed outside that list.
+     */
+    orphans_checked?: boolean;
 };
 
 /**

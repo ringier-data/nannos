@@ -989,3 +989,27 @@ async def test_supported_providers_are_empty_when_the_proxy_never_answered(svc, 
     monkeypatch.setattr(svc, "_request", _fake_request)
 
     assert await svc.get_supported_providers() == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_a_provider_list_of_an_unexpected_shape_never_replaces_a_good_one(svc, monkeypatch):
+    answers = [["bedrock", "deepseek"], {"error": "not a list"}]
+
+    async def _fake_request(method, path, **kwargs):
+        return answers.pop(0)
+
+    monkeypatch.setattr(svc, "_request", _fake_request)
+
+    first = await svc.get_supported_providers()
+    svc._providers_cache = (svc._providers_cache[0] - 10 * 24 * 3600, svc._providers_cache[1])  # expire it
+    assert await svc.get_supported_providers() == first == {"bedrock", "deepseek"}
+
+
+@pytest.mark.asyncio
+async def test_a_provider_list_that_is_not_json_reads_as_unavailable(svc, monkeypatch):
+    async def _fake_request(method, path, **kwargs):
+        raise ValueError("Expecting value: line 1 column 1 (char 0)")  # resp.json() on an HTML page
+
+    monkeypatch.setattr(svc, "_request", _fake_request)
+
+    assert await svc.get_supported_providers() == frozenset()

@@ -518,12 +518,13 @@ class ModelGatewayService:
             return self._providers_cache[1]
         try:
             raw = await self._request("GET", "/public/providers", optional=True)
-        except ModelGatewayError as e:
+        except Exception as e:  # unreachable, an error status, or a body that isn't JSON
             logger.warning("Could not load the gateway's provider list: %s", e)
             raw = None
-        if isinstance(raw, list) and raw:
-            self._providers_cache = (now, frozenset(p for p in raw if isinstance(p, str)))
-            return self._providers_cache[1]
+        routes = frozenset(p for p in raw if isinstance(p, str)) if isinstance(raw, list) else frozenset()
+        if routes:  # an answer of an unexpected shape never replaces a good list
+            self._providers_cache = (now, routes)
+            return routes
         return self._providers_cache[1] if self._providers_cache else frozenset()
 
     async def _fetch_public_cost_map(self) -> object:
