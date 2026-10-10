@@ -390,8 +390,10 @@ def shape_forced_tool_choice(model: str) -> dict[str, Any]:
 
 
 def shape_named_tool_choice(model: str) -> dict[str, Any]:
-    """``with_structured_output(method="function_calling")`` (the tool risk scorer): one tool,
-    named ``tool_choice``, ``parallel_tool_calls: false``."""
+    """``with_structured_output(method="function_calling")``: one tool, named ``tool_choice``,
+    ``parallel_tool_calls: false``. The tool risk scorer sends it where
+    ``select_response_format`` allows forcing with reasoning on (OpenAI/Azure); elsewhere it binds
+    the tool unforced."""
     return _base(
         model,
         max_tokens=_GRADED_MAX_TOKENS,

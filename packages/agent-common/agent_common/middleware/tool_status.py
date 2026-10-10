@@ -47,6 +47,12 @@ logger = logging.getLogger(__name__)
 # Custom-event key used for stream_writer emissions.
 TOOL_STATUS_EVENT = "tool_status"
 
+# ``tool`` value of the status ConditionalHumanInTheLoopMiddleware emits while it scores the
+# risk of a step's tool calls and that takes noticeably long (an LLM classification per new
+# tool). Like ``eval``, the orchestrator surfaces it from this channel: nothing on the
+# ``messages`` stream says why the turn is waiting.
+RISK_ASSESSMENT_STATUS_TOOL = "tool_risk_assessment"
+
 # Tools that should never emit status (internal schema tools), plus ``notify_user``:
 # its whole output IS an activity line (the note itself), so a "Using notify_user…"
 # label lands directly above the note and says nothing the note does not.

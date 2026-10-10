@@ -102,11 +102,11 @@ _DANGEROUS_CALL = {"method": "DELETE", "url": "https://api.example.com/v1/items"
 
 
 @pytest.fixture()
-def fast_tier_pinned_to(monkeypatch, usage_recorder):
-    """Pin the fast tier to one alias, and route its spend into the run report.
+def scorer_model_pinned_to(monkeypatch, usage_recorder):
+    """Pin the scorer's model (the standard chat tier) to one alias, and route its spend into the run report.
 
     ``_score_tool_via_llm`` takes no model argument — it resolves
-    ``get_default_fast_model()`` itself and builds the model with no callbacks.
+    ``require_default_model()`` itself and builds the model with no callbacks.
     Without the first patch every parametrization would score on whichever alias
     the fleet default happens to be; without the second the call is invisible to
     ``UsageRecorder`` and the test shows "-" in the integration cost table.
@@ -117,7 +117,7 @@ def fast_tier_pinned_to(monkeypatch, usage_recorder):
     real_create_model = model_factory.create_model
 
     def _pin(model_type: ModelType) -> None:
-        monkeypatch.setattr(model_factory, "get_default_fast_model", lambda: model_type)
+        monkeypatch.setattr(model_factory, "require_default_model", lambda: model_type)
         monkeypatch.setattr(
             model_factory,
             "create_model",
@@ -163,7 +163,7 @@ async def _score_once(model_type: ModelType, pin) -> ToolRiskEntry:
 @pytest.mark.langsmith
 @pytest.mark.parametrize("model_type", ALL_MODELS, ids=ALL_MODELS)
 async def test_risk_scoring_never_returns_an_empty_risk_factors_map(
-    model_type: ModelType, fast_tier_pinned_to
+    model_type: ModelType, scorer_model_pinned_to
 ):
     """An empty ``risk_factors`` is a failure, on every alias the gateway serves.
 
@@ -178,7 +178,7 @@ async def test_risk_scoring_never_returns_an_empty_risk_factors_map(
         {"model": model_type, "tool": _TOOL_NAME, "asserts": "risk_factors non-empty"}
     )
 
-    entry = await _score_once(model_type, fast_tier_pinned_to)
+    entry = await _score_once(model_type, scorer_model_pinned_to)
 
     t.log_outputs(
         {"base_score": entry.base_score, "control_params": sorted(entry.risk_factors)}
@@ -196,7 +196,7 @@ async def test_risk_scoring_never_returns_an_empty_risk_factors_map(
 @pytest.mark.langsmith
 @pytest.mark.parametrize("model_type", ALL_MODELS, ids=ALL_MODELS)
 async def test_risk_scoring_separates_a_dangerous_call_from_a_safe_one(
-    model_type: ModelType, fast_tier_pinned_to
+    model_type: ModelType, scorer_model_pinned_to
 ):
     """The profile actually discriminates, measured the way HITL measures it.
 
@@ -214,7 +214,7 @@ async def test_risk_scoring_separates_a_dangerous_call_from_a_safe_one(
         {"model": model_type, "tool": _TOOL_NAME, "asserts": "DELETE scores above GET"}
     )
 
-    entry = await _score_once(model_type, fast_tier_pinned_to)
+    entry = await _score_once(model_type, scorer_model_pinned_to)
 
     safe = entry.match_args(_SAFE_CALL)
     dangerous = entry.match_args(_DANGEROUS_CALL)
@@ -284,7 +284,7 @@ async def test_report_strict_json_schema_matrix(
     override.
     """
     real_create_model = model_factory.create_model
-    monkeypatch.setattr(model_factory, "get_default_fast_model", lambda: model_type)
+    monkeypatch.setattr(model_factory, "require_default_model", lambda: model_type)
     monkeypatch.setattr(
         model_factory,
         "create_model",

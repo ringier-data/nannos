@@ -142,8 +142,9 @@ around failing is **recorded, not refused**; the record is what lets the harness
   they keep sending nothing, the provider default, as before any record existed. The hook applies
   the serving deployment's recorded switch per attempt, a failover attempt included; an attempt
   landing on an unprobed deployment gets the effort alone — every deployment is tested before the
-  gateway knows more. Utility calls (risk scoring,
-  HITL resume, indexing, tool selection) are not user choices and are unchanged.
+  gateway knows more. Utility calls (HITL resume,
+  indexing, tool selection) are not user choices and are unchanged. Risk scoring has since moved
+  to the standard tier with reasoning asked for explicitly (nannos#361).
 - A deployment recorded as rejecting the replay of its own signed thinking block has the blocks
   stripped by the hook per attempt, the way a non-Anthropic fallback does: the turn continues without
   extended thinking rather than not at all.
