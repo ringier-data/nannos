@@ -84,6 +84,17 @@ def cleanup_docker_networks():
 
     def cleanup():
         """Remove unused Docker networks related to tests."""
+        # A crashed or interrupted run never reaches _teardown_postgres, so its
+        # container stays behind (Exited) and pins its network. Running ones may
+        # belong to a concurrent run and are left alone.
+        try:
+            stale = {"label": _PG_LABEL, "status": ["exited", "dead"]}
+            for container in docker_client.containers.list(all=True, filters=stale):
+                container.remove(force=True, v=True)
+                logger.debug(f"Removed stale test Postgres container: {container.name}")
+        except Exception as e:
+            logger.debug(f"Could not sweep stale test Postgres containers: {e}")
+
         try:
             # Get all networks
             networks = docker_client.networks.list()
@@ -636,6 +647,7 @@ _PG_SCHEMA = "console"
 _PG_PORT = 5432
 _PG_SHARED_STATE = "postgres_template.json"
 _PG_SHARED_LOCK = "postgres_template.lock"
+_PG_LABEL = "nannos.console-backend.test-postgres"
 
 
 def _xdist_shared_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
@@ -673,6 +685,10 @@ def _provision_postgres(client: docker.DockerClient, run_tag: str) -> dict[str, 
                 "POSTGRES_DB": _PG_DATABASE,
             },
             ports={f"{_PG_PORT}/tcp": None},  # None = Docker picks a free host port
+            # The image declares the data dir as a VOLUME, so without this every run
+            # leaves an anonymous volume behind. In RAM it is never created at all.
+            tmpfs={"/var/lib/postgresql/data": ""},
+            labels={_PG_LABEL: "true"},
             # Throwaway server: durability off so CREATE/DROP DATABASE checkpoints
             # hit the page cache, not the Docker VM disk. Every DROP DATABASE forces
             # a checkpoint, and with fsync on eight workers serialised on them.
@@ -791,7 +807,7 @@ def _teardown_postgres(client: docker.DockerClient, info: dict[str, Any]) -> Non
             container.stop(timeout=1)
         except Exception:
             pass
-        container.remove(force=True)
+        container.remove(force=True, v=True)
     except Exception:
         pass
     try:
