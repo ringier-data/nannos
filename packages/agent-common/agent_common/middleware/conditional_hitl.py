@@ -570,11 +570,9 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         as a hung stream and cancel the turn: the wait is kept alive, and when it is long
         enough to notice, the activity log says what the turn is waiting on.
 
-        One call per (tool, server) is scored first, the rest after it. They are then cache
-        hits, as they were when scoring was sequential: N calls of one new tool pay one
-        classification, and every call of it is judged on the same profile — independent
-        classifications could fall on both sides of the threshold, and the resume, which
-        re-scores against the one cached profile, would then pair decisions with the wrong calls.
+        Calls of one new tool share one classification: the scorer runs a single one per
+        tool, however many calls miss together (see tool_risk_scorer._classify_once), so
+        every call of it is judged on the same profile.
         """
         scorer = self._risk_scorer
         assert scorer is not None  # only called with calls that reached step 3
@@ -592,33 +590,8 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
                 server_slug=p.server_slug,
             )
 
-        first_of: dict[tuple[str, str], int] = {}
-        for i, p in enumerate(pending):
-            first_of.setdefault((p.tool_call["name"], p.server_slug), i)
-        leaders = list(first_of.values())
-        followers = [i for i in range(len(pending)) if i not in set(leaders)]
-
-        async def scores() -> list[tuple[float, ToolRiskEntry | None] | BaseException]:
-            outcomes: list[Any] = [None] * len(pending)
-            results = await asyncio.gather(*(score(pending[i]) for i in leaders), return_exceptions=True)
-            for i, result in zip(leaders, results):
-                outcomes[i] = result
-            # A leader that got no profile (classification failed → the scorer's name-based
-            # fallback, nothing cached) answers for its followers: they would only classify
-            # again, in parallel, and could disagree with it. The fallback ignores args.
-            redo = []
-            for i in followers:
-                leader = outcomes[first_of[(pending[i].tool_call["name"], pending[i].server_slug)]]
-                if isinstance(leader, BaseException) or leader[1] is None:
-                    outcomes[i] = leader
-                else:
-                    redo.append(i)
-            results = await asyncio.gather(*(score(pending[i]) for i in redo), return_exceptions=True)
-            for i, result in zip(redo, results):
-                outcomes[i] = result
-            return outcomes
-
-        return await await_with_keepalive(scores(), source="tool-risk-scoring", on_slow=_say_why)
+        scores = asyncio.gather(*(score(p) for p in pending), return_exceptions=True)
+        return await await_with_keepalive(scores, source="tool-risk-scoring", on_slow=_say_why)
 
     @hook_config(can_jump_to=["model", "end"])
     async def aafter_model(self, state: AgentState[Any], runtime: Runtime[ContextT]) -> dict[str, Any] | None:

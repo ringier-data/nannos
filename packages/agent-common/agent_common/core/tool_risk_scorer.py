@@ -270,41 +270,67 @@ async def score_tool_risk(
         )
         return score, None
 
-    # 3. LLM scoring
+    # 3. LLM scoring — one classification per tool, however many calls miss at once
     try:
-        description = tool.description or ""
-        input_schema: dict[str, Any] = tool.get_input_schema().model_json_schema()
-
-        entry = await _score_tool_via_llm(tool_name, description, input_schema)
-        entry.schema_hash = current_hash
-
-        # Safety floor: an LLM under-rating must never drop a clearly irreversible /
-        # destructive operation below the HITL approval gate. Observed in practice:
-        # `alloy-riad_delete_campaign_by_id` was LLM-scored 0.75 (< 0.80 threshold)
-        # and deleted a campaign without asking. Floor destructive verbs so they
-        # always require approval regardless of the model's estimate.
-        floor = _destructive_floor(tool_name)
-        if floor > entry.base_score:
-            logger.info(
-                "Flooring destructive tool '%s' risk %.2f -> %.2f (LLM under-rated)",
-                tool_name,
-                entry.base_score,
-                floor,
-            )
-            entry.base_score = floor
-
-        # Update cache immediately
-        cache.put(tool_name, server_slug, entry)
-
-        # Write-through to database (fire-and-forget)
-        cache.persist_entry(tool_name, server_slug, entry)
-
+        entry = await _classify_once(tool_name, tool, cache, server_slug, current_hash)
         score = entry.match_args(args)
         return score, entry
     except Exception:
         logger.exception("LLM risk scoring failed for tool '%s', using deterministic fallback", tool_name)
         fallback_score = _deterministic_fallback(tool_name)
         return fallback_score, None
+
+
+# Classifications in flight, by (cache, tool, server, schema hash). Calls of one new tool that
+# miss together — a step's parallel calls, or an `eval` program's — share one classification:
+# N independent ones would pay N times, and could fall on both sides of the threshold for calls
+# that differ only in args. Shared by every scoring path (approval hook and PTC guard alike).
+_inflight: dict[tuple[int, str, str, str], asyncio.Task[ToolRiskEntry]] = {}
+
+
+async def _classify_once(
+    tool_name: str, tool: BaseTool, cache: ToolRiskCache, server_slug: str, current_hash: str
+) -> ToolRiskEntry:
+    key = (id(cache), tool_name, server_slug, current_hash)
+    task = _inflight.get(key)
+    if task is None or task.get_loop() is not asyncio.get_running_loop():
+        task = asyncio.ensure_future(_classify_and_cache(tool_name, tool, cache, server_slug, current_hash))
+        _inflight[key] = task
+        task.add_done_callback(lambda t: _inflight.pop(key, None) if _inflight.get(key) is t else None)
+    # Shielded: one waiter's turn being cancelled must not cancel the others' classification.
+    return await asyncio.shield(task)
+
+
+async def _classify_and_cache(
+    tool_name: str, tool: BaseTool, cache: ToolRiskCache, server_slug: str, current_hash: str
+) -> ToolRiskEntry:
+    description = tool.description or ""
+    input_schema: dict[str, Any] = tool.get_input_schema().model_json_schema()
+
+    entry = await _score_tool_via_llm(tool_name, description, input_schema)
+    entry.schema_hash = current_hash
+
+    # Safety floor: an LLM under-rating must never drop a clearly irreversible /
+    # destructive operation below the HITL approval gate. Observed in practice:
+    # `alloy-riad_delete_campaign_by_id` was LLM-scored 0.75 (< 0.80 threshold)
+    # and deleted a campaign without asking. Floor destructive verbs so they
+    # always require approval regardless of the model's estimate.
+    floor = _destructive_floor(tool_name)
+    if floor > entry.base_score:
+        logger.info(
+            "Flooring destructive tool '%s' risk %.2f -> %.2f (LLM under-rated)",
+            tool_name,
+            entry.base_score,
+            floor,
+        )
+        entry.base_score = floor
+
+    # Update cache immediately
+    cache.put(tool_name, server_slug, entry)
+
+    # Write-through to database (fire-and-forget)
+    cache.persist_entry(tool_name, server_slug, entry)
+    return entry
 
 
 # ---------------------------------------------------------------------------

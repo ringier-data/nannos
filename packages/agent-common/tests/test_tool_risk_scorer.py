@@ -297,3 +297,135 @@ async def test_an_unforced_answer_without_the_tool_is_a_scoring_failure(monkeypa
 
     with pytest.raises(ValueError, match="did not call ToolRiskOutput"):
         await _score_tool_via_llm("list_things", "Lists things.", {})
+
+
+# --- one classification per tool, however many calls miss at once ---
+
+
+def _wipe_tool():
+    from langchain_core.tools import StructuredTool
+
+    def wipe(path: str) -> str:
+        """Wipes a path."""
+        return path
+
+    return StructuredTool.from_function(wipe)
+
+
+def _missing_cache():
+    from unittest.mock import MagicMock
+
+    cache = MagicMock()
+    cache.get.return_value = None
+    return cache
+
+
+def _profile():
+    from datetime import datetime, timezone
+
+    from agent_common.core.tool_risk_cache import ParamRiskProfile
+
+    now = datetime.now(timezone.utc)
+    return ToolRiskEntry(
+        base_score=0.2,
+        risk_factors={"path": ParamRiskProfile(risky_values={"/etc/*": 0.9})},
+        allowed_actions=["approve", "reject"],
+        schema_hash="",
+        updated_at=now,
+        last_accessed_at=now,
+    )
+
+
+async def test_calls_of_one_new_tool_that_miss_together_share_one_classification(monkeypatch):
+    """A step's parallel calls, or an eval program's, all miss the cache at once: they must
+    pay one classification and be judged on the one profile it returns, each on its own args."""
+    import asyncio
+
+    classified: list[str] = []
+
+    async def classify(tool_name, description, input_schema):
+        classified.append(tool_name)
+        await asyncio.sleep(0.05)
+        return _profile()
+
+    monkeypatch.setattr("agent_common.core.tool_risk_scorer._score_tool_via_llm", classify)
+    tool, cache = _wipe_tool(), _missing_cache()
+
+    results = await asyncio.gather(
+        score_tool_risk("wipe", {"path": "/tmp/a"}, tool=tool, cache=cache, server_slug="fs"),
+        score_tool_risk("wipe", {"path": "/etc/passwd"}, tool=tool, cache=cache, server_slug="fs"),
+        score_tool_risk("wipe", {"path": "/tmp/b"}, tool=tool, cache=cache, server_slug="fs"),
+    )
+
+    assert classified == ["wipe"]
+    assert [score for score, _ in results] == [0.2, 0.9, 0.2]
+    assert len({id(entry) for _, entry in results}) == 1
+    cache.put.assert_called_once()
+    cache.persist_entry.assert_called_once()
+
+
+async def test_a_failed_classification_fails_every_call_that_waited_on_it(monkeypatch):
+    """Each waiter falls back to the name-based score; none of them classifies again."""
+    import asyncio
+
+    attempts = 0
+
+    async def classify(tool_name, description, input_schema):
+        nonlocal attempts
+        attempts += 1
+        await asyncio.sleep(0.05)
+        raise RuntimeError("classifier down")
+
+    monkeypatch.setattr("agent_common.core.tool_risk_scorer._score_tool_via_llm", classify)
+    tool, cache = _wipe_tool(), _missing_cache()
+
+    results = await asyncio.gather(
+        score_tool_risk("wipe", {"path": "/a"}, tool=tool, cache=cache),
+        score_tool_risk("wipe", {"path": "/b"}, tool=tool, cache=cache),
+    )
+
+    assert attempts == 1
+    assert results == [(_deterministic_fallback("wipe"), None)] * 2
+    cache.put.assert_not_called()
+
+
+async def test_a_cancelled_caller_does_not_cancel_the_classification_others_wait_on(monkeypatch):
+    import asyncio
+
+    async def classify(tool_name, description, input_schema):
+        await asyncio.sleep(0.1)
+        return _profile()
+
+    monkeypatch.setattr("agent_common.core.tool_risk_scorer._score_tool_via_llm", classify)
+    tool, cache = _wipe_tool(), _missing_cache()
+
+    first = asyncio.ensure_future(score_tool_risk("wipe", {"path": "/a"}, tool=tool, cache=cache))
+    second = asyncio.ensure_future(score_tool_risk("wipe", {"path": "/b"}, tool=tool, cache=cache))
+    await asyncio.sleep(0.02)
+    first.cancel()
+
+    score, entry = await second
+    assert (score, entry is not None) == (0.2, True)
+    cache.put.assert_called_once()
+
+
+async def test_a_finished_classification_is_not_reused_for_a_later_miss(monkeypatch):
+    """In flight only: once it is done the cache answers, and a miss after that (the entry
+    evicted, the schema changed) classifies afresh."""
+    from agent_common.core import tool_risk_scorer
+
+    classified = 0
+
+    async def classify(tool_name, description, input_schema):
+        nonlocal classified
+        classified += 1
+        return _profile()
+
+    monkeypatch.setattr("agent_common.core.tool_risk_scorer._score_tool_via_llm", classify)
+    tool, cache = _wipe_tool(), _missing_cache()
+
+    await score_tool_risk("wipe", {"path": "/a"}, tool=tool, cache=cache)
+    await score_tool_risk("wipe", {"path": "/a"}, tool=tool, cache=cache)
+
+    assert classified == 2
+    assert tool_risk_scorer._inflight == {}
