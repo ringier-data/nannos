@@ -283,6 +283,12 @@ async def test_report_strict_json_schema_matrix(
     changes, when langchain moves, or before proposing to drop the ``method``
     override.
     """
+    from agent_common.a2a.structured_response import select_response_format
+    from agent_common.core.tool_risk_scorer import ToolRiskOutput
+
+    if select_response_format(model_type, ToolRiskOutput, thinking_enabled=True)[1]:
+        pytest.skip("the scorer binds the tool unforced on this alias: no structured-output method is sent")
+
     real_create_model = model_factory.create_model
     monkeypatch.setattr(model_factory, "require_default_model", lambda: model_type)
     monkeypatch.setattr(

@@ -294,9 +294,20 @@ async def _classify_once(
     key = (id(cache), tool_name, server_slug, current_hash)
     task = _inflight.get(key)
     if task is None or task.get_loop() is not asyncio.get_running_loop():
+        # Runs in the context of the call that started it, so a classification shared by
+        # several turns is billed and traced to that first turn.
         task = asyncio.ensure_future(_classify_and_cache(tool_name, tool, cache, server_slug, current_hash))
         _inflight[key] = task
-        task.add_done_callback(lambda t: _inflight.pop(key, None) if _inflight.get(key) is t else None)
+
+        def _done(t: asyncio.Task[ToolRiskEntry]) -> None:
+            if _inflight.get(key) is t:
+                del _inflight[key]
+            # Every waiter may be gone (their turns stopped): a failure is theirs to log, and
+            # unretrieved it would surface as asyncio's "Task exception was never retrieved".
+            if not t.cancelled():
+                t.exception()
+
+        task.add_done_callback(_done)
     # Shielded: one waiter's turn being cancelled must not cancel the others' classification.
     return await asyncio.shield(task)
 
