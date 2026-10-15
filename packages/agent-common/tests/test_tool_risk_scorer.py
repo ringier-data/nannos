@@ -207,3 +207,225 @@ def test_persist_entry_refuses_a_profile_with_no_schema_hash(caplog):
     )
     cache.persist_entry("consoleCreateBugReport", "_self", no_schema)
     cache._api_client.upsert_score.assert_not_called()
+
+
+def _fake_scoring_model(monkeypatch, *, unforced: bool):
+    """The scorer's model, recording how it was created and which output shape was bound.
+
+    A pin on the request shape only, not provider evidence: whether a provider accepts the
+    shape is what select_response_format and the registration probe answer.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from langchain_core.messages import AIMessage
+    from langchain_core.runnables import RunnableLambda
+
+    from agent_common.core.tool_risk_scorer import ToolRiskOutput
+
+    seen: dict = {}
+    answer = {"base_score": 0.3, "risk_factors": [], "reasoning": "reads only"}
+    model = MagicMock()
+    model.with_structured_output.return_value.ainvoke = AsyncMock(return_value=ToolRiskOutput(**answer))
+
+    def bind_tools(tools, tool_choice=None):
+        seen["bound"] = (tools, tool_choice)
+        return RunnableLambda(
+            lambda _messages: AIMessage(
+                content="", tool_calls=[{"name": "ToolRiskOutput", "args": answer, "id": "c1", "type": "tool_call"}]
+            )
+        )
+
+    model.bind_tools.side_effect = bind_tools
+
+    def fake_create_model(model_type, thinking_level=None, **kwargs):
+        seen.update(model_type=model_type, thinking_level=thinking_level)
+        return model
+
+    monkeypatch.setattr("agent_common.core.model_factory.create_model", fake_create_model)
+    monkeypatch.setattr("agent_common.core.model_factory.require_default_model", lambda: "standard-chat")
+    monkeypatch.setattr("agent_common.core.model_factory.get_default_fast_model", lambda: "cheap-chat")
+    monkeypatch.setattr(
+        "agent_common.a2a.structured_response.select_response_format",
+        lambda model_type, schema, *, thinking_enabled=False, has_builtin_tools=False: (None, unforced),
+    )
+    return seen, model
+
+
+@pytest.mark.asyncio
+async def test_classification_runs_on_the_standard_tier_with_reasoning(monkeypatch):
+    """The score decides what runs unasked: the standard chat tier with reasoning on, never the
+    cheap tier with whatever thinking its provider happens to default to."""
+    from agent_common.core.tool_risk_scorer import _score_tool_via_llm
+    from agent_common.models.base import ThinkingLevel
+
+    seen, _ = _fake_scoring_model(monkeypatch, unforced=False)
+
+    entry = await _score_tool_via_llm("list_things", "Lists things.", {})
+
+    assert seen["model_type"] == "standard-chat"
+    assert seen["thinking_level"] == ThinkingLevel.medium
+    assert entry.base_score == 0.3
+
+
+@pytest.mark.asyncio
+async def test_a_provider_that_refuses_forcing_with_thinking_gets_the_tool_unforced(monkeypatch):
+    """Anthropic/Bedrock reject a forced tool_choice next to thinking; where
+    select_response_format says forcing is unsafe the tool is bound with tool_choice="auto"."""
+    from agent_common.core.tool_risk_scorer import ToolRiskOutput, _score_tool_via_llm
+
+    seen, model = _fake_scoring_model(monkeypatch, unforced=True)
+
+    entry = await _score_tool_via_llm("list_things", "Lists things.", {})
+
+    assert seen["bound"] == ([ToolRiskOutput], "auto")
+    model.with_structured_output.assert_not_called()
+    assert entry.base_score == 0.3
+
+
+@pytest.mark.asyncio
+async def test_an_unforced_answer_without_the_tool_is_a_scoring_failure(monkeypatch):
+    """No tool call means no profile: score_tool_risk then falls back to the name-based score."""
+    from langchain_core.messages import AIMessage
+    from langchain_core.runnables import RunnableLambda
+
+    from agent_common.core.tool_risk_scorer import _score_tool_via_llm
+
+    _, model = _fake_scoring_model(monkeypatch, unforced=True)
+    model.bind_tools.side_effect = lambda tools, tool_choice=None: RunnableLambda(
+        lambda _messages: AIMessage(content="It looks harmless.")
+    )
+
+    with pytest.raises(ValueError, match="did not call ToolRiskOutput"):
+        await _score_tool_via_llm("list_things", "Lists things.", {})
+
+
+# --- one classification per tool, however many calls miss at once ---
+
+
+def _wipe_tool():
+    from langchain_core.tools import StructuredTool
+
+    def wipe(path: str) -> str:
+        """Wipes a path."""
+        return path
+
+    return StructuredTool.from_function(wipe)
+
+
+def _missing_cache():
+    from unittest.mock import MagicMock
+
+    cache = MagicMock()
+    cache.get.return_value = None
+    return cache
+
+
+def _profile():
+    from datetime import datetime, timezone
+
+    from agent_common.core.tool_risk_cache import ParamRiskProfile
+
+    now = datetime.now(timezone.utc)
+    return ToolRiskEntry(
+        base_score=0.2,
+        risk_factors={"path": ParamRiskProfile(risky_values={"/etc/*": 0.9})},
+        allowed_actions=["approve", "reject"],
+        schema_hash="",
+        updated_at=now,
+        last_accessed_at=now,
+    )
+
+
+async def test_calls_of_one_new_tool_that_miss_together_share_one_classification(monkeypatch):
+    """A step's parallel calls, or an eval program's, all miss the cache at once: they must
+    pay one classification and be judged on the one profile it returns, each on its own args."""
+    import asyncio
+
+    classified: list[str] = []
+
+    async def classify(tool_name, description, input_schema):
+        classified.append(tool_name)
+        await asyncio.sleep(0.05)
+        return _profile()
+
+    monkeypatch.setattr("agent_common.core.tool_risk_scorer._score_tool_via_llm", classify)
+    tool, cache = _wipe_tool(), _missing_cache()
+
+    results = await asyncio.gather(
+        score_tool_risk("wipe", {"path": "/tmp/a"}, tool=tool, cache=cache, server_slug="fs"),
+        score_tool_risk("wipe", {"path": "/etc/passwd"}, tool=tool, cache=cache, server_slug="fs"),
+        score_tool_risk("wipe", {"path": "/tmp/b"}, tool=tool, cache=cache, server_slug="fs"),
+    )
+
+    assert classified == ["wipe"]
+    assert [score for score, _ in results] == [0.2, 0.9, 0.2]
+    assert len({id(entry) for _, entry in results}) == 1
+    cache.put.assert_called_once()
+    cache.persist_entry.assert_called_once()
+
+
+async def test_a_failed_classification_fails_every_call_that_waited_on_it(monkeypatch):
+    """Each waiter falls back to the name-based score; none of them classifies again."""
+    import asyncio
+
+    attempts = 0
+
+    async def classify(tool_name, description, input_schema):
+        nonlocal attempts
+        attempts += 1
+        await asyncio.sleep(0.05)
+        raise RuntimeError("classifier down")
+
+    monkeypatch.setattr("agent_common.core.tool_risk_scorer._score_tool_via_llm", classify)
+    tool, cache = _wipe_tool(), _missing_cache()
+
+    results = await asyncio.gather(
+        score_tool_risk("wipe", {"path": "/a"}, tool=tool, cache=cache),
+        score_tool_risk("wipe", {"path": "/b"}, tool=tool, cache=cache),
+    )
+
+    assert attempts == 1
+    assert results == [(_deterministic_fallback("wipe"), None)] * 2
+    cache.put.assert_not_called()
+
+
+async def test_a_cancelled_caller_does_not_cancel_the_classification_others_wait_on(monkeypatch):
+    import asyncio
+
+    async def classify(tool_name, description, input_schema):
+        await asyncio.sleep(0.1)
+        return _profile()
+
+    monkeypatch.setattr("agent_common.core.tool_risk_scorer._score_tool_via_llm", classify)
+    tool, cache = _wipe_tool(), _missing_cache()
+
+    first = asyncio.ensure_future(score_tool_risk("wipe", {"path": "/a"}, tool=tool, cache=cache))
+    second = asyncio.ensure_future(score_tool_risk("wipe", {"path": "/b"}, tool=tool, cache=cache))
+    await asyncio.sleep(0.02)
+    first.cancel()
+
+    score, entry = await second
+    assert (score, entry is not None) == (0.2, True)
+    cache.put.assert_called_once()
+
+
+async def test_a_finished_classification_is_not_reused_for_a_later_miss(monkeypatch):
+    """In flight only: once it is done the cache answers, and a miss after that (the entry
+    evicted, the schema changed) classifies afresh."""
+    from agent_common.core import tool_risk_scorer
+
+    classified = 0
+
+    async def classify(tool_name, description, input_schema):
+        nonlocal classified
+        classified += 1
+        return _profile()
+
+    monkeypatch.setattr("agent_common.core.tool_risk_scorer._score_tool_via_llm", classify)
+    tool, cache = _wipe_tool(), _missing_cache()
+
+    await score_tool_risk("wipe", {"path": "/a"}, tool=tool, cache=cache)
+    await score_tool_risk("wipe", {"path": "/a"}, tool=tool, cache=cache)
+
+    assert classified == 2
+    assert tool_risk_scorer._inflight == {}

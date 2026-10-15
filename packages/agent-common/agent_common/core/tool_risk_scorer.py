@@ -14,6 +14,7 @@ Scoring flow:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -30,6 +31,10 @@ from agent_common.core.load_skill_tool import LOAD_SKILL_TOOL_NAME
 from agent_common.core.tool_risk_cache import ParamRiskProfile, ToolRiskCache, ToolRiskEntry
 
 logger = logging.getLogger(__name__)
+
+# Upper bound on one classification (reasoning on, standard tier). Generous: a slow answer is
+# fine — the approval hook keeps the turn alive — but a hung one must not hold the turn forever.
+_SCORING_TIMEOUT_SECONDS = 180.0
 
 # ---------------------------------------------------------------------------
 # Pydantic models for structured LLM output
@@ -265,41 +270,78 @@ async def score_tool_risk(
         )
         return score, None
 
-    # 3. LLM scoring
+    # 3. LLM scoring — one classification per tool, however many calls miss at once
     try:
-        description = tool.description or ""
-        input_schema: dict[str, Any] = tool.get_input_schema().model_json_schema()
-
-        entry = await _score_tool_via_llm(tool_name, description, input_schema)
-        entry.schema_hash = current_hash
-
-        # Safety floor: an LLM under-rating must never drop a clearly irreversible /
-        # destructive operation below the HITL approval gate. Observed in practice:
-        # `alloy-riad_delete_campaign_by_id` was LLM-scored 0.75 (< 0.80 threshold)
-        # and deleted a campaign without asking. Floor destructive verbs so they
-        # always require approval regardless of the model's estimate.
-        floor = _destructive_floor(tool_name)
-        if floor > entry.base_score:
-            logger.info(
-                "Flooring destructive tool '%s' risk %.2f -> %.2f (LLM under-rated)",
-                tool_name,
-                entry.base_score,
-                floor,
-            )
-            entry.base_score = floor
-
-        # Update cache immediately
-        cache.put(tool_name, server_slug, entry)
-
-        # Write-through to database (fire-and-forget)
-        cache.persist_entry(tool_name, server_slug, entry)
-
+        entry = await _classify_once(tool_name, tool, cache, server_slug, current_hash)
         score = entry.match_args(args)
         return score, entry
     except Exception:
         logger.exception("LLM risk scoring failed for tool '%s', using deterministic fallback", tool_name)
         fallback_score = _deterministic_fallback(tool_name)
         return fallback_score, None
+
+
+# Classifications in flight, by (cache, tool, server, schema hash). Calls of one new tool that
+# miss together — a step's parallel calls, or an `eval` program's — share one classification:
+# N independent ones would pay N times, and could fall on both sides of the threshold for calls
+# that differ only in args. Shared by every scoring path (approval hook and PTC guard alike).
+_inflight: dict[tuple[int, str, str, str], asyncio.Task[ToolRiskEntry]] = {}
+
+
+async def _classify_once(
+    tool_name: str, tool: BaseTool, cache: ToolRiskCache, server_slug: str, current_hash: str
+) -> ToolRiskEntry:
+    key = (id(cache), tool_name, server_slug, current_hash)
+    task = _inflight.get(key)
+    if task is None or task.get_loop() is not asyncio.get_running_loop():
+        # Runs in the context of the call that started it, so a classification shared by
+        # several turns is billed and traced to that first turn.
+        task = asyncio.ensure_future(_classify_and_cache(tool_name, tool, cache, server_slug, current_hash))
+        _inflight[key] = task
+
+        def _done(t: asyncio.Task[ToolRiskEntry]) -> None:
+            if _inflight.get(key) is t:
+                del _inflight[key]
+            # Every waiter may be gone (their turns stopped): a failure is theirs to log, and
+            # unretrieved it would surface as asyncio's "Task exception was never retrieved".
+            if not t.cancelled():
+                t.exception()
+
+        task.add_done_callback(_done)
+    # Shielded: one waiter's turn being cancelled must not cancel the others' classification.
+    return await asyncio.shield(task)
+
+
+async def _classify_and_cache(
+    tool_name: str, tool: BaseTool, cache: ToolRiskCache, server_slug: str, current_hash: str
+) -> ToolRiskEntry:
+    description = tool.description or ""
+    input_schema: dict[str, Any] = tool.get_input_schema().model_json_schema()
+
+    entry = await _score_tool_via_llm(tool_name, description, input_schema)
+    entry.schema_hash = current_hash
+
+    # Safety floor: an LLM under-rating must never drop a clearly irreversible /
+    # destructive operation below the HITL approval gate. Observed in practice:
+    # `alloy-riad_delete_campaign_by_id` was LLM-scored 0.75 (< 0.80 threshold)
+    # and deleted a campaign without asking. Floor destructive verbs so they
+    # always require approval regardless of the model's estimate.
+    floor = _destructive_floor(tool_name)
+    if floor > entry.base_score:
+        logger.info(
+            "Flooring destructive tool '%s' risk %.2f -> %.2f (LLM under-rated)",
+            tool_name,
+            entry.base_score,
+            floor,
+        )
+        entry.base_score = floor
+
+    # Update cache immediately
+    cache.put(tool_name, server_slug, entry)
+
+    # Write-through to database (fire-and-forget)
+    cache.persist_entry(tool_name, server_slug, entry)
+    return entry
 
 
 # ---------------------------------------------------------------------------
@@ -352,12 +394,22 @@ async def _score_tool_via_llm(
 ) -> ToolRiskEntry:
     """Call LLM to classify a tool's risk profile.
 
-    Uses the fleet's cheap/fast chat tier for speed and cost efficiency.
+    The classification decides whether a call runs without asking, so it runs on the fleet's
+    standard chat tier with reasoning on — deliberately not the cheap ``chat:low`` tier. It
+    used to take that tier with no effort at all, which inherited whatever the provider
+    defaults to: thinking off on some, and on a model that reasons by default (Mistral Large 4)
+    tens of seconds of unasked-for thinking per tool. The cost is paid once per tool per
+    process, typically: the result is cached and persisted, keyed on the tool's schema, and
+    other replicas pick it up on their next cache refresh. The wait sits in front of the
+    approval card, which ConditionalHumanInTheLoopMiddleware keeps alive and explains.
     Returns a ToolRiskEntry ready for caching.
     """
-    from agent_common.core.model_factory import create_model, get_default_fast_model, require_default_model
+    from agent_common.a2a.structured_response import select_response_format
+    from agent_common.core.model_factory import create_model, require_default_model
+    from agent_common.models.base import ThinkingLevel
 
-    model = create_model(get_default_fast_model() or require_default_model(), streaming=False)
+    model_type = require_default_model()
+    model = create_model(model_type, thinking_level=ThinkingLevel.medium, streaming=False)
     # method="function_calling", not the langchain-openai>=0.3 default of "json_schema",
     # which routes through OpenAI's *strict* validator: it requires every object to
     # declare additionalProperties: false and to list every property in `required`,
@@ -370,7 +422,20 @@ async def _score_tool_via_llm(
     # list shape of ToolRiskOutput is (see the note above its definition). Under
     # function calling with the old open-map schema, Vertex and Azure AI still
     # returned an empty risk_factors, silently.
-    structured_model = model.with_structured_output(ToolRiskOutput, method="function_calling")
+    #
+    # Forcing the tool is NOT always allowed with reasoning on: Anthropic and Bedrock reject a
+    # forced tool_choice next to thinking. select_response_format is the harness's one answer to
+    # "may this alias be forced with thinking on" (the main graph and sub-agents ask it too).
+    # Where it may not, the schema is bound as an ordinary tool the model is asked to call.
+    _, unforced = select_response_format(model_type, ToolRiskOutput, thinking_enabled=True)
+    if unforced:
+        from langchain_core.output_parsers.openai_tools import PydanticToolsParser
+
+        structured_model = model.bind_tools([ToolRiskOutput], tool_choice="auto") | PydanticToolsParser(
+            tools=[ToolRiskOutput], first_tool_only=True
+        )
+    else:
+        structured_model = model.with_structured_output(ToolRiskOutput, method="function_calling")
 
     # Build user prompt with tool details
     schema_str = json.dumps(input_schema, indent=2) if input_schema else "No schema available"
@@ -378,20 +443,28 @@ async def _score_tool_via_llm(
         f"Tool name: {tool_name}\n"
         f"Description: {description or 'No description available'}\n"
         f"Input schema:\n```json\n{schema_str}\n```\n\n"
-        f"Assess the risk level of this tool."
+        f"Assess the risk level of this tool, and answer by calling the {ToolRiskOutput.__name__} tool."
     )
 
     # Side-channel call (not through the agent middleware stack): attribute the
     # gateway spend from the run config's tags, like GatewayAttributionMiddleware.
     from agent_common.middleware.gateway_attribution_middleware import run_config_attribution_scope
 
+    # Bounded: the approval hook keeps the turn's stream alive while this runs, so nothing
+    # else would stop a hung call. A timeout is a scoring failure, which score_tool_risk turns
+    # into the name-based fallback score (nothing cached), never into "no guard".
     with run_config_attribution_scope():
-        result: ToolRiskOutput = await structured_model.ainvoke(
-            [
-                {"role": "system", "content": _SCORING_SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt},
-            ]
+        result: ToolRiskOutput | None = await asyncio.wait_for(
+            structured_model.ainvoke(
+                [
+                    {"role": "system", "content": _SCORING_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ]
+            ),
+            timeout=_SCORING_TIMEOUT_SECONDS,
         )
+    if result is None:  # unforced, and the model answered without calling the tool
+        raise ValueError(f"model did not call {ToolRiskOutput.__name__} for tool {tool_name!r}")
 
     # Convert LLM output to ToolRiskEntry. The wire format is a list of named
     # parameters (see ToolRiskOutput); the cache is keyed by param name, so fold it

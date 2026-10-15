@@ -131,3 +131,84 @@ async def test_empty_resume_fails_loudly():
         async for _ in watch_stream_with_resume(make_stream, first_timeout=0.1, chunk_timeout=1):
             pass
     assert ei.value.phase == "first-token"
+
+
+# --- await_with_keepalive: silent work inside a graph node ---
+
+
+def _recording_writer(monkeypatch):
+    parts: list = []
+    monkeypatch.setattr("agent_common.core.stream_watchdog._stream_writer", lambda: parts.append)
+    # The smallest budget the env allows: one keepalive per second (half of it, floored at 1s).
+    monkeypatch.setenv("LLM_INTER_CHUNK_TIMEOUT", "2")
+    return parts
+
+
+async def test_keepalive_flows_while_silent_work_runs(monkeypatch):
+    from agent_common.core.stream_watchdog import KEEPALIVE_EVENT, await_with_keepalive
+
+    parts = _recording_writer(monkeypatch)
+
+    async def slow():
+        await asyncio.sleep(2.3)
+        return "scored"
+
+    assert await await_with_keepalive(slow(), source="test") == "scored"
+    assert [p[0] for p in parts] == [KEEPALIVE_EVENT, KEEPALIVE_EVENT]
+    assert parts[0][1]["source"] == "test"
+
+
+async def test_on_slow_fires_once_and_only_when_the_wait_is_noticeable(monkeypatch):
+    from agent_common.core.stream_watchdog import await_with_keepalive
+
+    _recording_writer(monkeypatch)
+    calls: list[str] = []
+
+    async def say():
+        calls.append("slow")
+
+    async def quick():
+        return 1
+
+    async def slow():
+        await asyncio.sleep(0.3)
+        return 2
+
+    assert await await_with_keepalive(quick(), source="t", on_slow=say, slow_after=0.1) == 1
+    assert calls == []
+    assert await await_with_keepalive(slow(), source="t", on_slow=say, slow_after=0.1) == 2
+    assert calls == ["slow"]
+
+
+async def test_outside_a_graph_it_is_a_plain_await(monkeypatch):
+    from agent_common.core.stream_watchdog import await_with_keepalive
+
+    monkeypatch.setattr("agent_common.core.stream_watchdog._stream_writer", lambda: None)
+
+    async def work():
+        return "done"
+
+    assert await await_with_keepalive(work(), source="t") == "done"
+
+
+async def test_cancelling_the_wait_cancels_the_work(monkeypatch):
+    from agent_common.core.stream_watchdog import await_with_keepalive
+
+    _recording_writer(monkeypatch)
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def work():
+        started.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    waiter = asyncio.create_task(await_with_keepalive(work(), source="t"))
+    await started.wait()
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    assert cancelled.is_set()

@@ -977,8 +977,9 @@ def get_available_models_metadata() -> list[dict]:
 
 
 def get_default_fast_model() -> ModelType | None:
-    """Default model for cheap, low-latency utility LLM calls — file filtering, tool-risk
-    scoring, watch-condition evaluation, notification-message generation, etc.
+    """Default model for cheap, low-latency utility LLM calls — file filtering,
+    watch-condition evaluation, notification-message generation, etc. (Not tool-risk
+    scoring: that decides what runs unasked, so it takes the standard tier with reasoning.)
 
     Runs on the low chat tier (``chat:low``) — the fleet's designated cheap chat model —
     falling back to the standard chat default when no low tier is set. No hardcoded alias and
@@ -1017,8 +1018,9 @@ def create_fast_model(
     Currently used by ONE of them — `tool_call_summarizer`, the worst-placed, sitting between
     the model's tool call and the HITL approval card. The other agent-common fast-model
     callers still build their own client and still inherit provider-default thinking:
-    `tool_risk_scorer` (which gates that same card), `hitl_resume` (between the user\'s reply
-    and the resume) and `indexing_store` (per chunk, so it multiplies by corpus size).
+    `hitl_resume` (between the user\'s reply and the resume) and `indexing_store` (per chunk,
+    so it multiplies by corpus size). `tool_risk_scorer` left this set the other way: it now
+    runs on the standard tier with reasoning on, because its answer decides what runs unasked.
     Converting them is a quality judgement — reasoning may be buying something in a score or
     a classification — not a mechanical swap, so they are deliberately left alone here.
     (Watch conditions are NOT in this set: they run through console-backend\'s `gateway_chat`,

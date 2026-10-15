@@ -38,9 +38,9 @@ from agent_common.core.notify_user_tool import (
     NOTIFY_USER_TOOL_NAME,
     USER_NOTE_EVENT,
 )
-from agent_common.core.stream_watchdog import StreamStallError, watch_stream_with_resume
+from agent_common.core.stream_watchdog import KEEPALIVE_EVENT, StreamStallError, watch_stream_with_resume
 from agent_common.middleware.ptc_guard import PTC_CODE_INTERPRETER_TOOL_NAME
-from agent_common.middleware.tool_status import TOOL_STATUS_EVENT
+from agent_common.middleware.tool_status import RISK_ASSESSMENT_STATUS_TOOL, TOOL_STATUS_EVENT
 from agent_common.models.base import DEFAULT_THINKING_LEVEL, ModelType, ThinkingLevel
 from langchain.messages import HumanMessage
 from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
@@ -1246,7 +1246,7 @@ class OrchestratorDeepAgent:
                         )
                         continue
 
-                    if event_type == "keepalive":
+                    if event_type == KEEPALIVE_EVENT:
                         # Sub-agent dispatch heartbeat. Its only job is to be a graph
                         # stream part so the inter-chunk watchdog timer resets while a
                         # long, legitimately-silent sub-agent step runs. Nothing is
@@ -1344,7 +1344,9 @@ class OrchestratorDeepAgent:
                         # deliberately drops (see _ACTIVITY_LOG_EXCLUDED_TOOLS) and
                         # would otherwise be silent — mirroring how a sub-agent's eval
                         # surfaces via its generic tool_status→ActivityLog forwarding.
-                        if event_data.get("tool") == PTC_CODE_INTERPRETER_TOOL_NAME:
+                        # Likewise a slow risk assessment of the step's tool calls (the
+                        # approval hook's LLM classification), which nothing else explains.
+                        if event_data.get("tool") in (PTC_CODE_INTERPRETER_TOOL_NAME, RISK_ASSESSMENT_STATUS_TOOL):
                             status_msg = event_data.get("status", "")
                             if status_msg and status_msg not in emitted_updates:
                                 emitted_updates.add(status_msg)
