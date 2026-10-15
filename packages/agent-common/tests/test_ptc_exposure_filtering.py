@@ -341,7 +341,7 @@ class TestTheNamespaceIsRebuiltWithoutARiskScorer:
     """A replayed eval must get its ``tools.*`` bridges back on BOTH eval paths.
 
     On an interrupt resume only the eval tool node replays: the model-call hook that
-    normally fills ``_ptc_tools_by_thread`` never runs, so the REPL would install an
+    normally fills ``_ptc_tools_by_slot`` never runs, so the REPL would install an
     empty namespace and the replayed code throws ``TypeError: ... is not a function``.
 
     That rebuild used to live inside ``_run_guarded_eval``, which runs only for an
@@ -361,20 +361,20 @@ class TestTheNamespaceIsRebuiltWithoutARiskScorer:
     def test_a_replayed_eval_gets_its_namespace_back(self):
         mw = self._mw_without_scorer()
         # A replayed tool node: no request.tools, and nothing cached for this thread.
-        request = _req(tools=[], state={})
-        assert not mw._ptc_tools_by_thread.get("t-1")
+        request = _req(tools=[], state={"_quickjs_slot_id": "s-1"})
+        assert not mw._ptc_tools_by_slot.get("s-1")
 
         mw._ensure_ptc_namespace(request, "t-1")
 
-        names = {t.name for t in mw._ptc_tools_by_thread["t-1"]}
+        names = {t.name for t in mw._ptc_tools_by_slot["s-1"]}
         assert "github_get_me" in names, f"replayed eval would see an empty namespace; got {names}"
 
     def test_a_populated_namespace_is_left_alone(self):
         """Idempotent: on the normal path the model hook already filled it."""
         mw = self._mw_without_scorer()
         sentinel = (_tool("already_here"),)
-        mw._ptc_tools_by_thread["t-2"] = sentinel
+        mw._ptc_tools_by_slot["s-2"] = sentinel
 
-        mw._ensure_ptc_namespace(_req(tools=[], state={}), "t-2")
+        mw._ensure_ptc_namespace(_req(tools=[], state={"_quickjs_slot_id": "s-2"}), "t-2")
 
-        assert mw._ptc_tools_by_thread["t-2"] is sentinel
+        assert mw._ptc_tools_by_slot["s-2"] is sentinel

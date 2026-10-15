@@ -453,6 +453,12 @@ def create_model(
         callbacks=callbacks,
         http_async_client=build_attribution_http_client(),  # per-request attribution
         model_kwargs=model_kwargs,
+        # Always Chat Completions. langchain-openai routes some model names to the
+        # Responses API on its own (``gpt-6*`` with tools, ``gpt-5.6-sol``…), and our model
+        # names are gateway aliases: a ``gpt-6-sol`` alias would go to the gateway's
+        # ``/responses`` and bypass the chunk hook, thinking-block replay and cache_control
+        # restore, which all work on ``payload["messages"]``.
+        use_responses_api=False,
         **optional,
     )
 

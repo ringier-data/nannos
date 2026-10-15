@@ -651,12 +651,13 @@ class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
         update: dict[str, Any] = {"tool_call_history": history, "messages": error_messages}
         # A block is feedback FOR THE MODEL: it must run again and react. LangChain's
         # routing after this hook does that only by default — when every call already has
-        # a result and ``structured_response`` is in state, it ends the run instead. That
-        # key is a persisted channel, so from the second turn of a conversation on it is
-        # always set (by the previous turn's answer), and a block would end the turn with
-        # no answer at all; the runner then has nothing newer than the previous turn's
-        # response to report. Say where to go. Only when nothing else is pending: a jump
-        # skips the tool node, and an unblocked sibling call would be left dangling.
+        # a result and ``structured_response`` holds a value, it ends the run instead. That
+        # key is a persisted channel. langchain >= 1.3.15 clears it on each model call, but
+        # only when the graph has a ``response_format``; with the schema bound as a plain
+        # tool (thinking on, Gemini, forced_tool_choice=false aliases) a value written by an
+        # earlier ToolStrategy turn on the same thread still lingers, and a block would end
+        # the turn with no answer at all. Say where to go. Only when nothing else is pending:
+        # a jump skips the tool node, and an unblocked sibling call would be left dangling.
         blocked_ids = {info["tool_call"]["id"] for info in blocked_calls}
         still_pending = [
             tool_call

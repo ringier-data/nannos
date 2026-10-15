@@ -7,18 +7,18 @@ dependencies = [
     # A2A protocol
     "a2a-sdk[http-server]>=1.1.0,<2.0.0",
     # LangChain core
-    "langchain>=1.0.0",
+    "langchain>=1.4.5",
     "langchain-core>=0.3.0",
     "langchain-aws>=1.4.3",
     # LangGraph
     "langgraph>=1.1.0",
     "langgraph-checkpoint-aws>=1.0.1",
     # DeepAgents
-    "deepagents[quickjs]>=0.6.0,<0.7.0",
+    "deepagents[quickjs]>=0.7.25,<0.8.0",
     # Floor the langchain-quickjs wasm line (>=0.2). The pre-wasm in-process
     # engine could SIGABRT the whole pod on a GC fault; transitive via the
     # uncapped deepagents extra, so pin explicitly to prevent regression.
-    "langchain-quickjs>=0.3.2,<0.4",
+    "langchain-quickjs>=0.3.8,<0.4",  # >=0.3.7 keys REPLs by `_quickjs_slot_id`; agent_common.core.graph_utils relies on it
     # MCP adapters
     "langchain-mcp-adapters>=0.1.11",
     # HTTP client

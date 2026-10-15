@@ -165,9 +165,13 @@ def test_middleware_is_outermost_in_common_stack():
     (outermost) so its attribution scope wraps every nested model call."""
     from unittest.mock import MagicMock
 
+    from deepagents.backends.state import StateBackend
+
     from agent_common.core.graph_utils import build_common_middleware_stack
 
-    stack = build_common_middleware_stack(model=MagicMock(model_name="claude-sonnet-4.6"), backend=MagicMock())
+    # A real backend instance: deepagents >= 0.7 rejects callables (a MagicMock
+    # is callable) since backend factories were removed.
+    stack = build_common_middleware_stack(model=MagicMock(model_name="claude-sonnet-4.6"), backend=StateBackend())
     assert isinstance(stack[0], GatewayAttributionMiddleware)
 
 

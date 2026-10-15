@@ -8,7 +8,8 @@ Why a dedicated tool instead of ``read_file('/skills/<name>/SKILL.md')``:
   "a small slice". A knowledge-base skill of a few hundred lines does not fit,
   so the model pages through it with ``offset``/``limit`` — many round trips,
   and the instructions arrive fragmented and out of order.
-* ``read_file`` also prefixes every line with a ``cat -n`` number, which is
+* ``read_file`` also frames every window with a status header (``@@ lines A-B of
+  T | next offset N @@``; ``cat -n`` numbers before deepagents 0.7.14), which is
   noise for instructions the model is supposed to follow, not edit.
 
 This tool is bound natively (it is in ``_PTC_EXCLUDED_TOOL_NAMES`` so the PTC

@@ -138,3 +138,12 @@ class TestThinkingLevelCaching:
             model2 = factory._get_or_create_model("claude-sonnet-4.5", ThinkingLevel.low)
             assert model1 is model2
             assert len(factory._models) == 1
+
+
+@patch.dict(os.environ, _GW_ENV)
+def test_a_gpt6_alias_with_tools_stays_on_chat_completions():
+    """langchain-openai sends ``gpt-6*`` models with tools to the Responses API by name.
+    Our names are gateway aliases, and every hook works on Chat Completions payloads."""
+    model = create_model("gpt-6-sol")
+
+    assert model._use_responses_api({"tools": [{"type": "function", "function": {"name": "x"}}]}) is False

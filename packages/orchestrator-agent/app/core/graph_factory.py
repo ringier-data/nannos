@@ -52,8 +52,9 @@ from agent_common.middleware.steering_middleware import SteeringMiddleware
 from agent_common.middleware.storage_paths_middleware import StoragePathsInstructionMiddleware
 from agent_common.middleware.tool_status import ToolStatusMiddleware
 from agent_common.models.base import ModelType, ThinkingLevel
+from agent_common.middleware.tool_retry import FailureHandlingToolRetryMiddleware
 from deepagents import create_deep_agent
-from langchain.agents.middleware import ToolRetryMiddleware
+from langchain.agents.middleware import TodoListMiddleware
 from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -108,6 +109,9 @@ def _create_hitl_middleware(
     card, and no summary LLM call, for a tool that cannot dispatch. Only pass it
     with a list that genuinely covers everything: ``task`` and ``eval`` are exempt
     (the gate skips both), and the registry is read from the runtime context.
+    - The filesystem ``delete`` tool (deepagents >= 0.7) is covered by the
+      destructive-name floor in ``score_tool_risk`` (``_destructive_floor`` pins
+      it to >= 0.9 on every scoring path, above the 0.8 threshold).
     """
     return ConditionalHumanInTheLoopMiddleware(
         interrupt_on=None,
@@ -217,7 +221,7 @@ class GraphFactory:
             # instead of exempt (see ``_history_key`` in loop detection).
             dispatch_tools={"task", PTC_CODE_INTERPRETER_TOOL_NAME},
         )
-        self._retry_middleware = ToolRetryMiddleware(
+        self._retry_middleware = FailureHandlingToolRetryMiddleware(
             max_retries=config.MAX_RETRIES,
             backoff_factor=config.BACKOFF_FACTOR,
             retry_on=should_retry,
@@ -641,7 +645,7 @@ class GraphFactory:
         )
 
         # Outermost → innermost (for wrap_* hooks):
-        # DynamicToolDispatch[0] → StoragePaths → PromptCaching → Steering
+        # DynamicToolDispatch[0] → StoragePaths → TodoList → PromptCaching → Steering
         # → UserPreferences → LoopDetection → Auth → Retry → A2A → Todo[9]
         #
         # LiteLLMPromptCaching places the cache breakpoint after all static content (system prompt
@@ -769,6 +773,13 @@ class GraphFactory:
             context_gate_middleware,
             dynamic_tool_middleware,
             storage_paths_middleware,
+            # write_todos tool + planning state. deepagents >= 0.7 no longer includes
+            # this in create_deep_agent's defaults, so it must be added explicitly —
+            # the system prompt instructs the model to call write_todos, and the
+            # work-plan stream (TodoStatusMiddleware below) intercepts it. Placed
+            # before the prompt-caching breakpoint: its injected prose is static and
+            # belongs in the shared cached prefix.
+            TodoListMiddleware(),
             # Place the cache breakpoint right after the static system prefix
             # (system prompt + storage paths) and before the per-user content
             # appended below (steering, user preferences, playbook). The marker is

@@ -136,10 +136,11 @@ def _answered(last_ai_msg: AIMessage, tool_messages: list[ToolMessage], *, end: 
     When every call of the turn has its ToolMessage here (an approved client_action
     the browser already ran, a rejection, a corrective answer), nothing is left for
     the tools node, and langchain's model→tools edge falls through to "a structured
-    response exists → end" — and on any turn after the first, the checkpoint still
-    holds the PREVIOUS turn's structured response. The run then ended without the
-    model ever reading the answers, and the stream replayed the stale reply. Jumping
-    back to the model explicitly is what the edge would do absent that stale state.
+    response exists → end". The checkpoint can still hold an EARLIER turn's structured
+    response: langchain >= 1.3.15 clears it per model call only when the graph has a
+    ``response_format``, not with the schema bound as a plain tool. The run then ended
+    without the model ever reading the answers, and the stream replayed the stale reply.
+    Jumping back to the model explicitly is what the edge would do absent that state.
 
     ``end`` ends the turn instead: the reply then says the call was not done
     (``unanswered_turn_reply``), never the stale answer.
@@ -413,6 +414,50 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
     The ``aafter_model`` method is async-native and handles both modes.
     The sync ``after_model`` only handles static guards (no scoring).
     """
+
+    @staticmethod
+    def _process_decision(
+        decision: Any,
+        tool_call: ToolCall,
+        config: Any,
+    ) -> tuple[ToolCall | None, ToolMessage | None]:
+        """The decision contract this middleware is built on, pinned against upstream drift.
+
+        langchain >= 1.4 keeps the model's own call for an ``edit`` and substitutes the
+        reviewer's later from a ``hitl_edited_tool_calls`` state key that only its own
+        ``after_model`` writes. Our ``after_model``/``aafter_model`` replace that hook, so
+        with the inherited method an edit was silently dropped and the model's original
+        arguments ran. Here the edited call goes into the message, as before.
+
+        langchain >= 1.3.18 also wraps a reject reason as "User rejected the tool call for
+        ... with reason: <msg>". Our reasons are already addressed to the model
+        (``hitl_resume``'s ``CLICKED_REJECT_LEAD`` / ``TYPED_REFUSAL_LEAD``), and the
+        "refused this turn" check matches on those leads, so the reason is sent verbatim.
+        """
+        allowed = config["allowed_decisions"]
+        kind = decision.get("type")
+        if kind == "approve" and "approve" in allowed:
+            return tool_call, None
+        if kind == "edit" and "edit" in allowed:
+            edited = decision["edited_action"]
+            return ToolCall(type="tool_call", name=edited["name"], args=edited["args"], id=tool_call["id"]), None
+        if kind == "reject" and "reject" in allowed:
+            content = decision.get("message") or (
+                f"User rejected the tool call for `{tool_call['name']}` with id {tool_call['id']}. "
+                "The tool was not executed. Do not retry this tool call unless the user explicitly requests it."
+            )
+            return tool_call, ToolMessage(
+                content=content, name=tool_call["name"], tool_call_id=tool_call["id"], status="error"
+            )
+        if kind == "respond" and "respond" in allowed:
+            return tool_call, ToolMessage(
+                content=decision["message"], name=tool_call["name"], tool_call_id=tool_call["id"], status="success"
+            )
+        msg = (
+            f"Unexpected human decision: {decision}. Decision type {kind!r} is not allowed for tool "
+            f"{tool_call['name']!r}. Expected one of {allowed} based on the tool's configuration."
+        )
+        raise ValueError(msg)
 
     def __init__(
         self,

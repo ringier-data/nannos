@@ -10,7 +10,7 @@ dependencies = [
     "uvicorn>=0.38.0",
     "click>=8.1.8",
     "httpx>=0.28.1",
-    "langchain>=1.0.0",
+    "langchain>=1.4.5",
     "langchain-google-genai>=2.0.10",
     "google-auth>=2.36.0",
     "langchain-openai>=0.1.0",
@@ -19,11 +19,11 @@ dependencies = [
     "python-dotenv>=1.1.0",
     "sse-starlette>=2.3.6",
     "starlette>=0.46.2",
-    "deepagents[quickjs]>=0.6.0,<0.7.0",
+    "deepagents[quickjs]>=0.7.25,<0.8.0",
     # Floor the langchain-quickjs wasm line (>=0.2). The pre-wasm in-process
     # engine could SIGABRT the whole pod on a GC fault; transitive via the
     # uncapped deepagents extra, so pin explicitly to prevent regression.
-    "langchain-quickjs>=0.3.2,<0.4",
+    "langchain-quickjs>=0.3.8,<0.4",  # >=0.3.7 keys REPLs by `_quickjs_slot_id`; agent_common.core.graph_utils relies on it
     "rcplus-alloy-common>=8.6.1",
     "langchain-mcp-adapters>=0.1.11",
     "pytest>=8.4.2",

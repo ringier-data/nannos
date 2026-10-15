@@ -574,9 +574,10 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
             names.append(name)
         return descriptions, names
 
-    # Marker text that SubAgentMiddleware appends to the system prompt.
-    # Used to locate the "- general-purpose: ..." agent list and replace it
-    # with the full set of runtime-discovered agents.
+    # Marker text that SubAgentMiddleware appends to the system prompt — only when it is
+    # given a ``system_prompt``. deepagents >= 0.7 passes none by default, so the marker is
+    # normally absent and the agent list is appended (see ``_enhance_system_prompt_agents``).
+    # Kept for a configured task prompt, where the list is replaced in place.
     _SYSTEM_PROMPT_AGENT_MARKER = "Available subagent types:\n"
 
     # Marker text that SubAgentMiddleware bakes into the task tool description
@@ -675,13 +676,9 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
                 new_blocks.append(block)
 
         if not found:
-            # Marker not found — deepagents version may have changed the text.
-            # Fall back to appending the agent list.
-            logger.warning(
-                "DynamicToolDispatchMiddleware: could not find '%s' marker in system prompt; "
-                "appending agent list as fallback",
-                marker.rstrip(),
-            )
+            # The normal case since deepagents 0.7: SubAgentMiddleware writes no task prose
+            # (and so no marker) unless given a system_prompt. Append the list instead.
+            logger.debug("DynamicToolDispatchMiddleware: no '%s' marker; appending the agent list", marker.rstrip())
             new_blocks.append(
                 {
                     "type": "text",

@@ -25,6 +25,13 @@ def test_destructive_floor_flags_irreversible_verbs():
     assert _destructive_floor("destroy_index") == _DESTRUCTIVE_FLOOR_SCORE
 
 
+def test_destructive_floor_gates_filesystem_delete_tool():
+    # deepagents >= 0.7 exposes a recursive `delete` filesystem tool (it can reach
+    # the store-backed /memories/ routes). It is deliberately NOT statically
+    # guarded anywhere — this floor is what forces the HITL interrupt for it.
+    assert _destructive_floor("delete") == _DESTRUCTIVE_FLOOR_SCORE
+
+
 def test_destructive_floor_is_above_default_gate():
     # Must exceed the default HITL threshold (0.80) so it always interrupts.
     assert _DESTRUCTIVE_FLOOR_SCORE > 0.80

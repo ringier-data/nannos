@@ -10,7 +10,7 @@ retry the operation with exponential backoff.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from deepagents.backends.protocol import SandboxBackendProtocol
 
@@ -79,6 +79,37 @@ class ReadySandboxWrapper:
                     result.output.strip()[:100],
                 )
                 raise SandboxNotReadyError(f"Sandbox is not ready: {result.output.strip()[:200]}")
+
+    # ``BaseSandbox.glob``/``grep`` run their shell commands through the *inner* backend's
+    # own ``execute``, so the check above never sees them. Since deepagents 0.7.7 a
+    # not-ready sandbox reaches the model as a glob/grep error ("unexpected output") that
+    # ToolRetryMiddleware never retries; these wrappers turn it back into the retryable
+    # SandboxNotReadyError. ``**kwargs`` also tells deepagents that ``max_count`` is
+    # accepted (it inspects the class signature), so the cap still bounds the search.
+
+    def glob(self, pattern: str, path: str | None = None, **kwargs: Any) -> Any:
+        """Glob, raising SandboxNotReadyError if the sandbox isn't ready."""
+        return self._check_result_not_ready(self._backend.glob(pattern, path, **kwargs))
+
+    async def aglob(self, pattern: str, path: str | None = None, **kwargs: Any) -> Any:
+        """Async glob, raising SandboxNotReadyError if the sandbox isn't ready."""
+        return self._check_result_not_ready(await self._backend.aglob(pattern, path, **kwargs))
+
+    def grep(self, pattern: str, path: str | None = None, glob: str | None = None, **kwargs: Any) -> Any:
+        """Grep, raising SandboxNotReadyError if the sandbox isn't ready."""
+        return self._check_result_not_ready(self._backend.grep(pattern, path, glob, **kwargs))
+
+    async def agrep(self, pattern: str, path: str | None = None, glob: str | None = None, **kwargs: Any) -> Any:
+        """Async grep, raising SandboxNotReadyError if the sandbox isn't ready."""
+        return self._check_result_not_ready(await self._backend.agrep(pattern, path, glob, **kwargs))
+
+    def _check_result_not_ready(self, result: Any) -> Any:
+        """Raise SandboxNotReadyError if a glob/grep result's error says the sandbox isn't ready."""
+        error = getattr(result, "error", None)
+        if isinstance(error, str) and any(p in error.lower() for p in _NOT_READY_PATTERNS):
+            logger.warning("Sandbox not ready (search error: %s), raising retryable error", error.strip()[:100])
+            raise SandboxNotReadyError(f"Sandbox is not ready: {error.strip()[:200]}")
+        return result
 
     def upload_files(self, files: list[tuple[str, bytes]]) -> list:
         """Upload files, raising SandboxNotReadyError on transient failures."""

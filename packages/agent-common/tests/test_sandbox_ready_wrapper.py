@@ -166,3 +166,65 @@ class TestReadySandboxWrapper:
         sandbox = _FakeSandbox()
         wrapper = ReadySandboxWrapper(sandbox)
         assert isinstance(wrapper, SandboxBackendProtocol)
+
+
+class _SearchSandbox(_FakeSandbox):
+    """Search methods that run their command on the inner backend, as BaseSandbox's do."""
+
+    def __init__(self, error: str | None):
+        super().__init__()
+        self._error = error
+        self.grep_kwargs: dict = {}
+
+    def _result(self):
+        from deepagents.backends.protocol import GlobResult
+
+        return GlobResult(error=self._error) if self._error else GlobResult(matches=[])
+
+    def glob(self, pattern, path=None):
+        return self._result()
+
+    async def aglob(self, pattern, path=None):
+        return self._result()
+
+    def grep(self, pattern, path=None, glob=None, *, max_count=None):
+        self.grep_kwargs = {"max_count": max_count}
+        return self._result()
+
+    async def agrep(self, pattern, path=None, glob=None, *, max_count=None):
+        self.grep_kwargs = {"max_count": max_count}
+        return self._result()
+
+
+class TestSearchNotReady:
+    """BaseSandbox glob/grep bypass the wrapper's execute(); a not-ready sandbox must still
+    raise the retryable error instead of reaching the model as a search error."""
+
+    @pytest.mark.asyncio
+    async def test_a_not_ready_glob_raises(self):
+        wrapper = ReadySandboxWrapper(_SearchSandbox("glob helper emitted unexpected output: Sandbox is not ready"))
+
+        with pytest.raises(SandboxNotReadyError):
+            await wrapper.aglob("*.py", "/home")
+
+    @pytest.mark.asyncio
+    async def test_a_not_ready_grep_raises(self):
+        wrapper = ReadySandboxWrapper(_SearchSandbox("container is starting"))
+
+        with pytest.raises(SandboxNotReadyError):
+            await wrapper.agrep("TODO", "/home")
+
+    def test_an_ordinary_search_error_is_returned(self):
+        wrapper = ReadySandboxWrapper(_SearchSandbox("Invalid glob pattern '..': refused"))
+
+        assert wrapper.glob("..").error == "Invalid glob pattern '..': refused"
+
+    def test_max_count_reaches_the_sandbox(self):
+        from deepagents.backends.protocol import _method_accepts_max_count
+
+        sandbox = _SearchSandbox(None)
+        wrapper = ReadySandboxWrapper(sandbox)
+
+        assert _method_accepts_max_count(ReadySandboxWrapper, "grep")
+        wrapper.grep("TODO", "/home", max_count=50)
+        assert sandbox.grep_kwargs == {"max_count": 50}
