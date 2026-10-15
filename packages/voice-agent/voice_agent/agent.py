@@ -768,6 +768,9 @@ class GeminiLiveAgent:
         # Set once the caller's end-of-stream sentinel is consumed: the session ended
         # because the call did, so its end is not an error.
         self._stream_ended = False
+        # Resolved True once the Live session is open, False if it ended before that.
+        # Created in run(), like mcp_status. None until run() starts.
+        self.session_ready: asyncio.Future[bool] | None = None
 
     def build_usage_entries(self) -> list[dict]:
         """Return the session's measured spend as voice-usage report entries.
@@ -1095,6 +1098,7 @@ class GeminiLiveAgent:
             event_out: Queue of JSON-serialisable event dicts to forward to the
                        caller (audio_chunk, turn_complete, interrupted, …).
         """
+        self.session_ready = asyncio.get_running_loop().create_future()
         cancelled = False
         with trace(
             name="voice-session",
@@ -1121,6 +1125,8 @@ class GeminiLiveAgent:
                 logger.error("Voice session %s ended mid-call: %s", self.session_id, self.session_error)
                 run_tree.error = self.session_error
                 await event_out.put({"type": "error", "message": self.session_error})
+        if not self.session_ready.done():
+            self.session_ready.set_result(False)
         if cancelled:
             raise asyncio.CancelledError
 
@@ -1227,6 +1233,8 @@ class GeminiLiveAgent:
             self.model_id,
             self.voice_name,
         )
+        if self.session_ready is not None and not self.session_ready.done():
+            self.session_ready.set_result(True)
 
         t_first_audio_sent: float | None = None
         first_response_logged = False

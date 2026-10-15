@@ -270,7 +270,12 @@ async def twilio_stream(websocket: WebSocket) -> None:
         except WebSocketDisconnect:
             logger.info("Twilio WebSocket disconnected")
         except Exception:
-            logger.exception("twilio→agent error")
+            if state.get("error"):
+                # We closed the stream ourselves after the session failed; reading
+                # from a closed socket raising here is expected, not a second fault.
+                logger.info("Twilio media stream closed after voice session failure")
+            else:
+                logger.exception("twilio→agent error")
         finally:
             # Grab the agent handle first, end the session, THEN read usage. _end_session
             # sends audio_stream_end and only afterwards cancels the receive loop, so

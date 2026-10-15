@@ -13,7 +13,8 @@ Callers send a JSON object as the A2A message text::
                                            //   when sub_agent_id is absent).
         "mcp_tools": ["gcal_list_events"] // optional — gateway tools the call may
                                            //   use. Empty / absent = no tools; a
-                                           //   sub_agent_id persona's own list wins.
+                                           //   sub_agent_id persona's own list (even
+                                           //   an empty one) replaces it.
     }
 
 Phone-number resolution (security)
@@ -399,6 +400,10 @@ class VoiceAgent(BaseAgent):
 
         if agent.mcp_status is not None:
             await asyncio.shield(agent.mcp_status)
+        # Wait for the Live connection itself, so a session that fails to connect is
+        # caught before dialling instead of ringing the callee only to hang up.
+        if agent.session_ready is not None:
+            await asyncio.shield(agent.session_ready)
 
     async def _start_audio_session(
         self,
@@ -586,7 +591,7 @@ class VoiceAgent(BaseAgent):
             if agent_config.get("name") not in ("voice-agent", "voice_agent"):
                 system_prompt = agent_config.get("system_prompt")
                 voice_name = voice_name or agent_config.get("voice_name")
-                mcp_tools = agent_config.get("mcp_tools") or mcp_tools
+                mcp_tools = agent_config.get("mcp_tools") or []
                 yield AgentStreamResponse(
                     state=TaskState.TASK_STATE_WORKING,
                     content=f"Loaded sub-agent '{agent_config.get('name', sub_agent_id)}' config.",
@@ -784,7 +789,8 @@ class VoiceAgent(BaseAgent):
         # mcp_status should already be resolved or close to it.
         mcp_auth_failed = False
         session = self._active_sessions.get(prewarm_key)
-        if session and session["agent_task"].done():
+        ready = session["agent"].session_ready if session else None
+        if session and (session["agent_task"].done() or (ready is not None and ready.done() and not ready.result())):
             # The Gemini session already died during setup — dialling would connect
             # the callee to silence.
             reason = session["agent"].session_error or "Gemini Live session ended during setup"
@@ -946,7 +952,7 @@ class VoiceAgent(BaseAgent):
         if transcript:
             content = f"Call completed.\n\nTranscript:\n{lines}"
         else:
-            content = "Call ended without any conversation — neither side said anything."
+            content = "Call ended with no transcript — nothing either side said was transcribed."
         yield AgentStreamResponse(state=TaskState.TASK_STATE_COMPLETED, content=content)
 
     async def _create_outbound_voice_session(

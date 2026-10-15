@@ -149,8 +149,9 @@ class TestCallOutcome:
         voice = VoiceAgent()
 
         async def _resolve():
-            while "CA1" not in call_bridge._CALL_ANSWERED:
-                await asyncio.sleep(0.01)
+            async with asyncio.timeout(5):
+                while "CA1" not in call_bridge._CALL_ANSWERED:
+                    await asyncio.sleep(0.01)
             call_bridge._CALL_ANSWERED.pop("CA1").set_result(True)
             call_bridge._CALL_FUTURES.pop("CA1").set_result(result)
 
@@ -221,3 +222,53 @@ class TestTransportHangsUp:
             result = client.portal.call(lambda: asyncio.wait_for(loop_holder["future"], timeout=5))
 
         assert "131072" in result["error"]
+
+
+class TestDeadBeforeDialling:
+    async def test_connect_failure_is_caught_before_the_phone_rings(self):
+        """A session that cannot connect must fail the task without dialling."""
+        voice = VoiceAgent()
+        client = MagicMock()
+        client.aio.live.connect = MagicMock(side_effect=RuntimeError("1008 voice not supported"))
+        dial = MagicMock(return_value="CA2")
+        with (
+            patch.dict("os.environ", {"PUBLIC_URL": "https://voice.example.com"}),
+            patch.object(agent_mod, "build_gemini_client", return_value=client),
+            patch("voice_agent.a2a_agent.make_outbound_call", dial),
+        ):
+            responses = [
+                r
+                async for r in voice._stream_phone_call(
+                    phone_number="+41790000000",
+                    system_prompt="hi",
+                    voice_name=None,
+                    mcp_tools=[],
+                    access_token=None,
+                    context_messages=[],
+                )
+            ]
+
+        dial.assert_not_called()
+        assert responses[-1].state == TaskState.TASK_STATE_FAILED
+        assert "voice not supported" in responses[-1].content
+
+
+class TestPersonaToolList:
+    async def test_persona_list_replaces_the_callers_even_when_empty(self):
+        voice = VoiceAgent()
+        seen: dict = {}
+
+        async def _fake_call(**kwargs):
+            seen.update(kwargs)
+            yield AgentStreamResponse(state=TaskState.TASK_STATE_COMPLETED, content="Done")
+
+        persona = {"name": "sales-assistant", "system_prompt": "p", "mcp_tools": []}
+        with (
+            patch.object(VoiceAgent, "_fetch_sub_agent_config", AsyncMock(return_value=persona)),
+            patch.object(VoiceAgent, "_stream_phone_call", side_effect=_fake_call),
+        ):
+            user_config = MagicMock(phone_number="+41790000000", access_token=None, user_sub="u")
+            request = VoiceCallRequest(sub_agent_id=7, mcp_tools=["gcal_list_events"])
+            _ = [r async for r in voice._handle_phone_call(request, user_config)]
+
+        assert seen["mcp_tools"] == []
