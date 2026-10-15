@@ -1233,3 +1233,46 @@ def test_a_turn_whose_only_final_response_call_is_empty_takes_the_salvage_path()
     assert response.state == TaskState.TASK_STATE_COMPLETED
     assert response.content == "Task processing completed with validation errors."
     assert "parse_error" in (response.metadata or {})
+
+
+def _empty_final_then(*rest):
+    """A turn that made an empty-args FinalResponseSchema call, had it rejected, and went on."""
+    return {
+        "messages": [
+            HumanMessage("hi"),
+            AIMessage(content="", tool_calls=[{"name": "FinalResponseSchema", "args": {}, "id": "e1"}]),
+            ToolMessage(content="Error: Field required", tool_call_id="e1", name="FinalResponseSchema", status="error"),
+            *rest,
+        ]
+    }
+
+
+def test_a_rejected_empty_call_does_not_override_a_plain_text_answer():
+    response = StreamHandler.parse_agent_response(_empty_final_then(AIMessage(content="The real answer.")))
+
+    assert response.state == TaskState.TASK_STATE_COMPLETED
+    assert response.content == "The real answer."
+
+
+def test_a_rejected_empty_call_does_not_override_a_loop_stop():
+    from agent_common.a2a.structured_response import STOPPED_REPLY
+
+    state = _empty_final_then(
+        AIMessage(content="", tool_calls=[{"name": "task", "args": {"subagent_type": "x"}, "id": "t1"}]),
+        ToolMessage(
+            content="BLOCKED: 'task' — called 6 times with identical arguments", tool_call_id="t1", status="error"
+        ),
+    )
+
+    response = StreamHandler.parse_agent_response(state)
+
+    assert response.content.startswith(STOPPED_REPLY)
+
+
+def test_a_rejected_empty_call_does_not_override_a_truncation():
+    truncated = AIMessage(content="", response_metadata={"finish_reason": "length"})
+
+    response = StreamHandler.parse_agent_response(_empty_final_then(truncated))
+
+    assert response.state == TaskState.TASK_STATE_INPUT_REQUIRED
+    assert (response.metadata or {}).get("truncated") is True

@@ -240,9 +240,9 @@ def a2a_tracking(values: Any) -> dict[str, dict[str, Any]]:
 def final_response(values: Any) -> dict[str, Any] | None:
     """The turn's ``FinalResponseSchema`` envelope, or None if absent.
 
-    The production definition (``current_turn_final_response``): this turn's
-    newest non-empty call, never the ``structured_response`` channel, which still
-    holds an earlier turn's answer after a turn that ends without the call.
+    The production definition (``current_turn_final_response``): the call in the
+    turn's last model step (``{}`` when its args are empty), never the
+    ``structured_response`` channel, which still holds an earlier turn's answer.
     """
     if not isinstance(values, dict):
         return None

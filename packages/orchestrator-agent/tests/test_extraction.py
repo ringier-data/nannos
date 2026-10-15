@@ -178,16 +178,28 @@ def test_structured_response_channel_is_never_read():
     assert final_text(state) == "Sent."
 
 
-def test_an_empty_args_call_falls_back_to_an_older_one_this_turn():
-    state = {
+def test_the_last_model_step_decides_not_an_older_call():
+    """A rejected call makes the model step again: only the step that ended the turn counts."""
+    retried = {
         "messages": [
             HumanMessage("go"),
-            _final_call(message="fresh answer"),
             AIMessage(content="", tool_calls=[{"name": "FinalResponseSchema", "args": {}, "id": "e1"}]),
+            ToolMessage(content="Error: Field required", tool_call_id="e1", name="FinalResponseSchema", status="error"),
+            _final_call(call_id="f2", message="fresh answer"),
+        ],
+    }
+    then_plain = {
+        "messages": [
+            HumanMessage("go"),
+            _final_call(message="first try"),
+            ToolMessage(content="Error: invalid", tool_call_id="f1", name="FinalResponseSchema", status="error"),
+            AIMessage(content="The real answer."),
         ],
     }
 
-    assert final_response(state)["message"] == "fresh answer"
+    assert final_response(retried)["message"] == "fresh answer"
+    assert final_response(then_plain) is None
+    assert final_text(then_plain) == "The real answer."
 
 
 def test_a_turn_whose_only_call_is_empty_still_has_an_envelope():

@@ -60,28 +60,25 @@ def current_turn_messages(messages: list) -> list:
 
 
 def current_turn_final_response(messages: list) -> dict[str, Any] | None:
-    """The args of this turn's newest ``FinalResponseSchema`` call, or None.
+    """The args of the ``FinalResponseSchema`` call that ended this turn, or None.
 
-    The single answer source for a turn: never the persisted ``structured_response``
-    channel, which still holds an earlier turn's answer after a turn that ends without
-    the call (nannos#358). An empty-args call is skipped for an older non-empty one in
-    the same turn; when every call is empty the newest ``{}`` is returned, so callers
-    see that the turn answered, just not validly. Public for the same reason as
+    The single answer source for a turn: the call in the turn's LAST model step.
+    The run ends right after that call (ToolStrategy or the schema bound as a
+    ``return_direct`` tool), and a rejected call makes the model step again, so a
+    last step without the call means the turn ended some other way — plain text, a
+    loop stop, a truncation — and those paths must decide. Never the persisted
+    ``structured_response`` channel, which still holds an earlier turn's answer
+    (nannos#358). Empty args come back as ``{}``. Public for the same reason as
     ``current_turn_messages``.
     """
-    empty: dict[str, Any] | None = None
     for msg in reversed(current_turn_messages(messages)):
         if not isinstance(msg, AIMessage):
             continue
         for tool_call in msg.tool_calls or []:
-            if tool_call.get("name") != "FinalResponseSchema":
-                continue
-            args = tool_call.get("args") or {}
-            if args:
-                return args
-            if empty is None:
-                empty = args
-    return empty
+            if tool_call.get("name") == "FinalResponseSchema":
+                return tool_call.get("args") or {}
+        return None
+    return None
 
 
 class StreamHandler:
