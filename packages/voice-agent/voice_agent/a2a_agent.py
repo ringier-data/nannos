@@ -576,6 +576,9 @@ class VoiceAgent(BaseAgent):
         system_prompt: str | None = None
         voice_name: str | None = call_request.voice_name
         mcp_tools: list[str] = list(call_request.mcp_tools)
+        # Unknown names are refused only when the caller typed them and can retry; a
+        # persona's stored list runs with whatever subset this user has, as inbound does.
+        refuse_unknown_tools = True
 
         if sub_agent_id is not None:
             # Tier 1 — fetch the named sub-agent's config from the backend.
@@ -591,7 +594,9 @@ class VoiceAgent(BaseAgent):
             if agent_config.get("name") not in ("voice-agent", "voice_agent"):
                 system_prompt = agent_config.get("system_prompt")
                 voice_name = voice_name or agent_config.get("voice_name")
-                mcp_tools = agent_config.get("mcp_tools") or []
+                if not agent_config.get("fetch_failed"):
+                    mcp_tools = agent_config.get("mcp_tools") or []
+                    refuse_unknown_tools = False
                 yield AgentStreamResponse(
                     state=TaskState.TASK_STATE_WORKING,
                     content=f"Loaded sub-agent '{agent_config.get('name', sub_agent_id)}' config.",
@@ -643,6 +648,7 @@ class VoiceAgent(BaseAgent):
             context_messages=context_messages or [],
             sub_agent_id=sub_agent_id,
             user_sub=user_config.user_sub,
+            refuse_unknown_tools=refuse_unknown_tools,
         ):
             yield event
 
@@ -712,6 +718,7 @@ class VoiceAgent(BaseAgent):
         context_messages: list[str] | None,
         sub_agent_id: int | None = None,
         user_sub: str | None = None,
+        refuse_unknown_tools: bool = True,
     ) -> AsyncIterable[AgentStreamResponse]:
         """Initiate a Twilio phone call and hold the A2A stream open until it ends.
 
@@ -802,7 +809,12 @@ class VoiceAgent(BaseAgent):
                 content=f"Call not placed: the voice session failed to start ({reason}).",
             )
             return
-        if session and session["agent"].unknown_tools:
+        if session and session["agent"].unknown_tools and not refuse_unknown_tools:
+            logger.warning(
+                "Persona tools not offered to this user, calling without them: %s",
+                sorted(session["agent"].unknown_tools),
+            )
+        elif session and session["agent"].unknown_tools:
             # Guessed tool names: the call would connect but every tool call would fail
             # ("Unknown tool"). Refuse before dialling and hand back the real names.
             unknown = session["agent"].unknown_tools
@@ -814,8 +826,12 @@ class VoiceAgent(BaseAgent):
                 f"{', '.join(sorted(unknown))}. Tool names must match exactly."
             )
             if similar:
-                content += f" Existing tools with similar names: {', '.join(similar)}."
-            content += " Retry with exact names from that list, or without mcp_tools if the call needs no tools."
+                content += (
+                    f" Existing tools with similar names: {', '.join(similar)}."
+                    " Retry with exact names from that list, or without mcp_tools if the call needs no tools."
+                )
+            else:
+                content += " This user has no similarly named tools; retry without them."
             yield AgentStreamResponse(state=TaskState.TASK_STATE_FAILED, content=content)
             return
         if session:

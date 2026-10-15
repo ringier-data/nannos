@@ -320,3 +320,44 @@ class TestUnknownToolNames:
         assert "gmail_list_messages" in final.content
         assert "gmail_search_threads" in final.content
         assert voice._active_sessions == {}
+
+
+class TestPersonaUnknownTools:
+    async def test_persona_tools_missing_for_this_user_do_not_block_the_call(self):
+        """Only names the caller typed are refused; a persona's list runs with the subset."""
+        voice = VoiceAgent()
+        seen: dict = {}
+
+        async def _fake_call(**kwargs):
+            seen.update(kwargs)
+            yield AgentStreamResponse(state=TaskState.TASK_STATE_COMPLETED, content="Done")
+
+        persona = {"name": "sales-assistant", "system_prompt": "p", "mcp_tools": ["salesforce_find_accounts"]}
+        with (
+            patch.object(VoiceAgent, "_fetch_sub_agent_config", AsyncMock(return_value=persona)),
+            patch.object(VoiceAgent, "_stream_phone_call", side_effect=_fake_call),
+        ):
+            user_config = MagicMock(phone_number="+41790000000", access_token=None, user_sub="u")
+            _ = [r async for r in voice._handle_phone_call(VoiceCallRequest(sub_agent_id=7), user_config)]
+
+        assert seen["refuse_unknown_tools"] is False
+
+    async def test_failed_persona_fetch_keeps_the_callers_tools(self):
+        voice = VoiceAgent()
+        seen: dict = {}
+
+        async def _fake_call(**kwargs):
+            seen.update(kwargs)
+            yield AgentStreamResponse(state=TaskState.TASK_STATE_COMPLETED, content="Done")
+
+        failed = {"name": "sub-agent-7", "fetch_failed": True}
+        with (
+            patch.object(VoiceAgent, "_fetch_sub_agent_config", AsyncMock(return_value=failed)),
+            patch.object(VoiceAgent, "_stream_phone_call", side_effect=_fake_call),
+        ):
+            user_config = MagicMock(phone_number="+41790000000", access_token=None, user_sub="u")
+            request = VoiceCallRequest(sub_agent_id=7, mcp_tools=["gmail_get_message"])
+            _ = [r async for r in voice._handle_phone_call(request, user_config)]
+
+        assert seen["mcp_tools"] == ["gmail_get_message"]
+        assert seen["refuse_unknown_tools"] is True
