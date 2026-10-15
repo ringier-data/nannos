@@ -392,8 +392,10 @@ Learned the hard way; each cost real debugging time.
 - **Assertions must be turn-scoped.** The checkpointer accumulates history, so an
   unscoped read happily passes on a delegation from two turns ago. The helpers default
   to the current turn.
-- **`structured_response` is a pydantic instance, not a dict** (the graph sets
-  `response_format`). Read it with the pydantic API.
+- **Never read `structured_response` for the answer.** It is a persisted channel: after a
+  turn that ends without a `FinalResponseSchema` call it still holds an earlier turn's
+  answer (nannos#358). The answer is this turn's call; use `final_response()`, which
+  shares the production resolver `current_turn_final_response`.
 - **`include_subagent_output=true` means `message` is EMPTY** by design — the
   sub-agent's output is appended downstream. `final_text()` reproduces that; reading
   `message` alone reports an empty answer for a turn that answered at length.

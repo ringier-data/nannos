@@ -127,8 +127,9 @@ async def test_a2a_tracking_channel_is_populated_by_a_real_dispatch():
 
 
 async def test_structured_response_channel_really_is_a_pydantic_instance():
-    """Confirms the shape `final_response()` is written to survive — the channel
-    holds a validated model, not a dict, because the graph sets response_format."""
+    """The graph sets response_format, so langchain fills this channel with a validated
+    model. Nothing reads it for the answer: it persists across turns (nannos#358), so
+    `final_response()` resolves the turn's own FinalResponseSchema call instead."""
     model = ScriptedChatModel(responses=[final_response("Done.")])
 
     state = await _run(model)

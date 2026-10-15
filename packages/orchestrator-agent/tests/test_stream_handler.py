@@ -1209,3 +1209,27 @@ class TestNoInternalTextReachesTheUser:
         )
         assert response.state == TaskState.TASK_STATE_FAILED
         assert response.content == "JiraAgent failed: Done, I created the ticket."
+
+
+def test_a_turn_whose_only_final_response_call_is_empty_takes_the_salvage_path():
+    """An empty-args FinalResponseSchema call (bind-as-tool path) gets an error ToolMessage
+    the model never answered. The user must see the neutral salvage text, never the
+    model-facing tool error."""
+    state = {
+        "messages": [
+            HumanMessage("hi"),
+            AIMessage(content="", tool_calls=[{"name": "FinalResponseSchema", "args": {}, "id": "e1"}]),
+            ToolMessage(
+                content="Error invoking tool 'FinalResponseSchema' with kwargs {}: Field required. Please fix the error",
+                tool_call_id="e1",
+                name="FinalResponseSchema",
+                status="error",
+            ),
+        ]
+    }
+
+    response = StreamHandler.parse_agent_response(state)
+
+    assert response.state == TaskState.TASK_STATE_COMPLETED
+    assert response.content == "Task processing completed with validation errors."
+    assert "parse_error" in (response.metadata or {})

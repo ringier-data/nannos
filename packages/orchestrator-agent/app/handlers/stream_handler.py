@@ -60,20 +60,28 @@ def current_turn_messages(messages: list) -> list:
 
 
 def current_turn_final_response(messages: list) -> dict[str, Any] | None:
-    """The args of this turn's newest non-empty ``FinalResponseSchema`` call, or None.
+    """The args of this turn's newest ``FinalResponseSchema`` call, or None.
 
     The single answer source for a turn: never the persisted ``structured_response``
     channel, which still holds an earlier turn's answer after a turn that ends without
-    the call (nannos#358). An empty-args call is skipped for an older one in the same
-    turn. Public for the same reason as ``current_turn_messages``.
+    the call (nannos#358). An empty-args call is skipped for an older non-empty one in
+    the same turn; when every call is empty the newest ``{}`` is returned, so callers
+    see that the turn answered, just not validly. Public for the same reason as
+    ``current_turn_messages``.
     """
+    empty: dict[str, Any] | None = None
     for msg in reversed(current_turn_messages(messages)):
         if not isinstance(msg, AIMessage):
             continue
         for tool_call in msg.tool_calls or []:
-            if tool_call.get("name") == "FinalResponseSchema" and tool_call.get("args"):
-                return tool_call["args"]
-    return None
+            if tool_call.get("name") != "FinalResponseSchema":
+                continue
+            args = tool_call.get("args") or {}
+            if args:
+                return args
+            if empty is None:
+                empty = args
+    return empty
 
 
 class StreamHandler:
@@ -342,7 +350,11 @@ class StreamHandler:
         messages = (final_state.get("messages") or []) if isinstance(final_state, dict) else []
         structured_response = current_turn_final_response(messages)
         if structured_response is not None:
-            logger.info(f"[STREAM HANDLER] Found FinalResponseSchema in current turn tool_calls: {structured_response}")
+            logger.info(
+                "[STREAM HANDLER] Found FinalResponseSchema in current turn: task_state=%s",
+                structured_response.get("task_state"),
+            )
+            logger.debug(f"[STREAM HANDLER] FinalResponseSchema args: {structured_response}")
 
         # A turn that ended on a tool result the model never answered (a loop force-stop)
         # has no answer: say so instead of the fallbacks below.

@@ -190,6 +190,17 @@ def test_an_empty_args_call_falls_back_to_an_older_one_this_turn():
     assert final_response(state)["message"] == "fresh answer"
 
 
+def test_a_turn_whose_only_call_is_empty_still_has_an_envelope():
+    state = {
+        "messages": [
+            HumanMessage("go"),
+            AIMessage(content="", tool_calls=[{"name": "FinalResponseSchema", "args": {}, "id": "e1"}]),
+        ],
+    }
+
+    assert final_response(state) == {}
+
+
 def test_include_subagent_output_appends_the_delegation_result():
     """When the model passes a sub-agent's work through verbatim, the schema tells
     it to leave `message` EMPTY and the output is appended downstream. Reading
