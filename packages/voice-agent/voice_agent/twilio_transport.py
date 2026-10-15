@@ -299,6 +299,14 @@ async def twilio_stream(websocket: WebSocket) -> None:
             ):
                 if response.state == TaskState.TASK_STATE_FAILED:
                     logger.error(f"A2A agent failed: {response.content}")
+                    # The voice session is gone; keeping the media stream open would
+                    # leave the callee listening to silence. Closing it ends the
+                    # <Connect>, and with no TwiML verb after it Twilio hangs up.
+                    state["error"] = response.content
+                    try:
+                        await websocket.close()
+                    except (WebSocketDisconnect, RuntimeError):
+                        pass
                     break
 
                 # Check for audio chunks
@@ -390,7 +398,9 @@ async def twilio_stream(websocket: WebSocket) -> None:
         call_sid = state.get("call_sid") or ""
         _fut = _CALL_FUTURES.pop(call_sid, None)
         if _fut and not _fut.done():
-            _fut.set_result({"transcript": transcript, "call_sid": call_sid})
+            _fut.set_result(
+                {"transcript": transcript, "call_sid": call_sid, "error": state.get("error")}
+            )
             logger.info("Resolved A2A future for call_sid=%s", call_sid)
 
         # Report usage and mark the session complete — concurrently. They are
