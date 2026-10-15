@@ -802,6 +802,22 @@ class VoiceAgent(BaseAgent):
                 content=f"Call not placed: the voice session failed to start ({reason}).",
             )
             return
+        if session and session["agent"].unknown_tools:
+            # Guessed tool names: the call would connect but every tool call would fail
+            # ("Unknown tool"). Refuse before dialling and hand back the real names.
+            unknown = session["agent"].unknown_tools
+            similar = list(dict.fromkeys(name for names in unknown.values() for name in names))
+            self._prewarm_tasks.pop(prewarm_key, None)
+            await self._end_session(prewarm_key)
+            content = (
+                "Call not placed: mcp_tools contains names that are not tools of this user: "
+                f"{', '.join(sorted(unknown))}. Tool names must match exactly."
+            )
+            if similar:
+                content += f" Existing tools with similar names: {', '.join(similar)}."
+            content += " Retry with exact names from that list, or without mcp_tools if the call needs no tools."
+            yield AgentStreamResponse(state=TaskState.TASK_STATE_FAILED, content=content)
+            return
         if session:
             agent = session["agent"]
             if agent.mcp_status is not None:

@@ -272,3 +272,51 @@ class TestPersonaToolList:
             _ = [r async for r in voice._handle_phone_call(request, user_config)]
 
         assert seen["mcp_tools"] == []
+
+
+class TestUnknownToolNames:
+    def test_similar_names_include_the_same_server(self):
+        from voice_agent.agent import similar_tool_names
+
+        available = ["gmail_search_threads", "gmail_get_message", "gcal_list_events", "github_list_issues"]
+        assert similar_tool_names("gmail_list_messages", available) == ["gmail_get_message", "gmail_search_threads"]
+
+    async def test_guessed_names_fail_before_dialling_with_the_real_ones(self):
+        voice = VoiceAgent()
+        dial = MagicMock(return_value="CA3")
+
+        async def _fake_prewarm(self, *, session_key, **_kwargs):
+            live = GeminiLiveAgent(session_id=session_key)
+            live.unknown_tools = {"gmail_list_messages": ["gmail_get_message", "gmail_search_threads"]}
+            live.session_ready = asyncio.get_running_loop().create_future()
+            live.session_ready.set_result(True)
+            task = asyncio.create_task(asyncio.Event().wait())
+            self._active_sessions[session_key] = {
+                "agent": live,
+                "agent_task": task,
+                "audio_in": asyncio.Queue(),
+            }
+
+        with (
+            patch.dict("os.environ", {"PUBLIC_URL": "https://voice.example.com"}),
+            patch.object(VoiceAgent, "_prewarm_audio_session", _fake_prewarm),
+            patch("voice_agent.a2a_agent.make_outbound_call", dial),
+        ):
+            responses = [
+                r
+                async for r in voice._stream_phone_call(
+                    phone_number="+41790000000",
+                    system_prompt="hi",
+                    voice_name=None,
+                    mcp_tools=["gmail_list_messages", "gmail_get_message"],
+                    access_token="tok",
+                    context_messages=[],
+                )
+            ]
+
+        dial.assert_not_called()
+        final = responses[-1]
+        assert final.state == TaskState.TASK_STATE_FAILED
+        assert "gmail_list_messages" in final.content
+        assert "gmail_search_threads" in final.content
+        assert voice._active_sessions == {}

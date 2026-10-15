@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import difflib
 import json
 import logging
 import logging.handlers
@@ -583,6 +584,21 @@ async def _score_tool_risk(
     return score
 
 
+def similar_tool_names(requested: str, available: list[str], limit: int = 25) -> list[str]:
+    """Real tool names a caller probably meant by ``requested``.
+
+    Every tool from the same gateway server (the part before the first ``_``, e.g.
+    ``gmail``), closest spellings first — a guessed ``gmail_list_messages`` is rarely a
+    typo of the real ``gmail_search_threads``, but it shares the server. Falls back to
+    close spellings across all tools when the server prefix itself is wrong.
+    """
+    prefix = requested.split("_", 1)[0] + "_"
+    same_server = sorted(name for name in available if name.startswith(prefix))
+    pool = same_server or available
+    close = difflib.get_close_matches(requested, pool, n=5, cutoff=0.6)
+    return list(dict.fromkeys(close + same_server))[:limit]
+
+
 def build_live_config(
     voice_name: str = VOICE_NAME,
     system_prompt: str | None = None,
@@ -768,6 +784,10 @@ class GeminiLiveAgent:
         # Set once the caller's end-of-stream sentinel is consumed: the session ended
         # because the call did, so its end is not an error.
         self._stream_ended = False
+        # Requested tool names (mcp_tool_filter) the gateway does not offer this user,
+        # each mapped to the real names it most likely meant. Filled during MCP setup,
+        # before the call is dialled, so the caller can retry with exact names.
+        self.unknown_tools: dict[str, list[str]] = {}
         # Resolved True once the Live session is open, False if it ended before that.
         # Created in run(), like mcp_status. None until run() starts.
         self.session_ready: asyncio.Future[bool] | None = None
@@ -829,6 +849,19 @@ class GeminiLiveAgent:
         Gemini Live connect config.
         """
         tools_result = await mcp_session.list_tools()
+        if self.mcp_tool_filter:
+            available = [t.name for t in tools_result.tools]
+            offered = set(available)
+            self.unknown_tools = {
+                name: similar_tool_names(name, available)
+                for name in self.mcp_tool_filter
+                if name not in offered
+            }
+            if self.unknown_tools:
+                logger.warning(
+                    "Requested MCP tools not offered by the gateway: %s",
+                    sorted(self.unknown_tools),
+                )
         declarations: list[types.FunctionDeclaration] = []
 
         # Pre-score tool risks CONCURRENTLY. Scoring is an LLM call per tool; doing
