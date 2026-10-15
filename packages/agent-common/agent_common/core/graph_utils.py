@@ -2268,9 +2268,12 @@ def build_sub_agent_graph(
         model_name: Model to use for indexing/chunking in the document store
             pipeline.  When ``None``, ``get_default_indexing_model()`` picks
             the cheapest available provider model automatically.
-        response_format: Pre-computed structured-output strategy
-            (``AutoStrategy``, ``ToolStrategy``, ``None``, …).  Pass the
-            result of ``get_response_format()`` here.
+        response_format: Pre-computed structured-output strategy: pass the
+            result of ``get_response_format()`` (``ToolStrategy``, or ``None`` with
+            the schema bound as a tool). A strategy that answers without a
+            tool call (provider-native output) is not supported: the answer is
+            read from this turn's ``SubAgentResponseSchema`` call, never the
+            ``structured_response`` channel.
         exclude_deep_agents_middlewares: When ``True``, omits the deep-agents block
             from the common middleware stack (see ``build_common_middleware_stack``);
             intended for ``agent-runner`` which manages its own file-system lifecycle.

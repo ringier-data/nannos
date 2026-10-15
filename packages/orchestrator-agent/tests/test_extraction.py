@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from app.models.schemas import FinalResponseSchema
 from tests.support.extraction import (
     a2a_tracking,
     delegated_agents,
@@ -161,32 +160,34 @@ def test_current_turn_final_response_wins_over_stale_channel():
     assert task_state(state) == "completed"
 
 
-def test_structured_response_channel_used_when_no_tool_call_this_turn():
+def test_structured_response_channel_is_never_read():
+    """nannos#358: after a structured turn the channel still holds that answer. A turn
+    that ends in plain text has no envelope; the channel's is a previous turn's."""
     state = {
         "structured_response": {"task_state": "input_required", "message": "which john?"},
-        "messages": [HumanMessage("slack john"), AIMessage(content="")],
+        "messages": [
+            HumanMessage("slack john"),
+            _final_call(message="which john?"),
+            HumanMessage("john doe"),
+            AIMessage(content="Sent."),
+        ],
     }
 
-    assert final_text(state) == "which john?"
-    assert task_state(state) == "input_required"
+    assert final_response(state) is None
+    assert task_state(state) is None
+    assert final_text(state) == "Sent."
 
 
-def test_structured_response_may_be_a_pydantic_instance_not_a_dict():
-    """The graph is built with `response_format`, so LangGraph puts a validated
-    FinalResponseSchema *object* in this channel — the shape production actually
-    sees, and why StreamHandler reads it via getattr rather than subscripting."""
+def test_an_empty_args_call_falls_back_to_an_older_one_this_turn():
     state = {
-        "structured_response": FinalResponseSchema(task_state="input_required", message="which john?"),
-        "messages": [HumanMessage("slack john"), AIMessage(content="")],
+        "messages": [
+            HumanMessage("go"),
+            _final_call(message="fresh answer"),
+            AIMessage(content="", tool_calls=[{"name": "FinalResponseSchema", "args": {}, "id": "e1"}]),
+        ],
     }
 
-    assert final_response(state) == {
-        "task_state": "input_required",
-        "message": "which john?",
-        "include_subagent_output": False,
-    }
-    assert final_text(state) == "which john?"
-    assert task_state(state) == "input_required"
+    assert final_response(state)["message"] == "fresh answer"
 
 
 def test_include_subagent_output_appends_the_delegation_result():

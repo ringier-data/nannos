@@ -4,16 +4,7 @@ from a2a.types import TaskState
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from app.handlers import StreamHandler, current_turn_messages
-
-
-def _final_response_call(schema):
-    """The turn's answer as the orchestrator records it: a FinalResponseSchema tool call."""
-    return AIMessage(
-        content="",
-        tool_calls=[
-            {"name": "FinalResponseSchema", "args": schema.model_dump(mode="json"), "id": "final", "type": "tool_call"}
-        ],
-    )
+from tests.support.graph_harness import final_response
 
 
 class TestBuildAuthResponse:
@@ -665,8 +656,6 @@ class TestConservativeOverrideLogic:
 
     def test_llm_completed_one_blocked_one_success_trusts_llm(self):
         """Test parallel execution: LLM says completed, one blocked + one success → trust LLM."""
-        from app.models.schemas import FinalResponseSchema
-
         # Simulate parallel execution where one agent succeeded
         final_state = {
             "messages": [
@@ -691,13 +680,7 @@ class TestConservativeOverrideLogic:
                 ToolMessage(content="Ticket needs input", tool_call_id="call_1"),
                 ToolMessage(content="Email sent successfully", tool_call_id="call_2"),
                 AIMessage(content="Done - used email"),
-                _final_response_call(
-                    FinalResponseSchema(
-                        task_state=TaskState.TASK_STATE_COMPLETED,
-                        message="Email sent successfully as alternative approach",
-                        reasoning="Jira blocked but email succeeded",
-                    )
-                ),
+                final_response("Email sent successfully as alternative approach"),
             ],
             "a2a_tracking": {
                 "JiraAgent": {"requires_input": True, "is_complete": False},
@@ -713,8 +696,6 @@ class TestConservativeOverrideLogic:
 
     def test_llm_completed_all_blocked_overrides_to_input_required(self):
         """Test safety override: LLM says completed, ALL agents blocked → override to input_required."""
-        from app.models.schemas import FinalResponseSchema
-
         # LLM hallucination: says completed but all agents are blocked
         final_state = {
             "messages": [
@@ -739,13 +720,7 @@ class TestConservativeOverrideLogic:
                 ToolMessage(content="Jira needs input", tool_call_id="call_1"),
                 ToolMessage(content="Email needs input", tool_call_id="call_2"),
                 AIMessage(content="All done"),
-                _final_response_call(
-                    FinalResponseSchema(
-                        task_state=TaskState.TASK_STATE_COMPLETED,
-                        message="Tasks completed successfully",
-                        reasoning="Both completed",  # LLM hallucination
-                    )
-                ),
+                final_response("Tasks completed successfully"),
             ],
             "a2a_tracking": {
                 "JiraAgent": {"requires_input": True, "is_complete": False},
@@ -763,8 +738,6 @@ class TestConservativeOverrideLogic:
 
     def test_llm_completed_all_blocked_auth_takes_priority(self):
         """Test safety override: ALL blocked with auth + input → auth takes priority."""
-        from app.models.schemas import FinalResponseSchema
-
         final_state = {
             "messages": [
                 HumanMessage(content="Multi-agent request"),
@@ -788,11 +761,7 @@ class TestConservativeOverrideLogic:
                 ToolMessage(content="Auth needed", tool_call_id="call_1"),
                 ToolMessage(content="Input needed", tool_call_id="call_2"),
                 AIMessage(content="Done"),
-                _final_response_call(
-                    FinalResponseSchema(
-                        task_state=TaskState.TASK_STATE_COMPLETED, message="Completed", reasoning="Done"
-                    )
-                ),
+                final_response("Completed"),
             ],
             "a2a_tracking": {
                 "Agent1": {
@@ -814,8 +783,6 @@ class TestConservativeOverrideLogic:
 
     def test_llm_input_required_mixed_results_respects_llm(self):
         """Test: LLM says input_required with mixed results → respect LLM decision."""
-        from app.models.schemas import FinalResponseSchema
-
         # LLM correctly identifies need for input despite partial success
         final_state = {
             "messages": [
@@ -840,13 +807,7 @@ class TestConservativeOverrideLogic:
                 ToolMessage(content="Ticket needs project", tool_call_id="call_1"),
                 ToolMessage(content="Notified team", tool_call_id="call_2"),
                 AIMessage(content="Need project for ticket"),
-                _final_response_call(
-                    FinalResponseSchema(
-                        task_state=TaskState.TASK_STATE_INPUT_REQUIRED,
-                        message="Which project should I create the ticket in?",
-                        reasoning="Slack succeeded but Jira needs project info",
-                    )
-                ),
+                final_response("Which project should I create the ticket in?", task_state="input_required"),
             ],
             "a2a_tracking": {
                 "JiraAgent": {"requires_input": True, "is_complete": False},
@@ -862,8 +823,6 @@ class TestConservativeOverrideLogic:
 
     def test_llm_working_state_not_overridden(self):
         """Test: LLM says working, blocked agents exist → respect LLM decision."""
-        from app.models.schemas import FinalResponseSchema
-
         final_state = {
             "messages": [
                 HumanMessage(content="Long running task"),
@@ -880,13 +839,7 @@ class TestConservativeOverrideLogic:
                 ),
                 ToolMessage(content="Processing", tool_call_id="call_1"),
                 AIMessage(content="Still working"),
-                _final_response_call(
-                    FinalResponseSchema(
-                        task_state=TaskState.TASK_STATE_WORKING,
-                        message="Task is still being processed in the background",
-                        reasoning="Async operation in progress",
-                    )
-                ),
+                final_response("Task is still being processed in the background", task_state="working"),
             ],
             "a2a_tracking": {
                 "AsyncAgent": {"requires_input": True, "is_complete": False},  # Might need input later
@@ -908,8 +861,6 @@ class TestConservativeOverrideLogic:
         "Hello!" reply. The current-turn extraction MUST short-circuit when no sub-agent
         was actually invoked in the current turn.
         """
-        from app.models.schemas import FinalResponseSchema
-
         final_state = {
             "messages": [
                 # Earlier turn: file-analyzer was called and got blocked
@@ -930,13 +881,7 @@ class TestConservativeOverrideLogic:
                 # Current turn: simple greeting, no tool calls
                 HumanMessage(content="hi"),
                 AIMessage(content="Hello! How can I help you today?"),
-                _final_response_call(
-                    FinalResponseSchema(
-                        task_state=TaskState.TASK_STATE_COMPLETED,
-                        message="Hello! How can I help you today?",
-                        reasoning="Greeting response",
-                    )
-                ),
+                final_response("Hello! How can I help you today?"),
             ],
             # Stale blocked tracking from earlier turn — must NOT trigger override now
             "a2a_tracking": {
@@ -952,8 +897,6 @@ class TestConservativeOverrideLogic:
 
     def test_single_agent_blocked_overrides_when_completed(self):
         """Test: Single agent called, LLM says completed, agent blocked → override."""
-        from app.models.schemas import FinalResponseSchema
-
         final_state = {
             "messages": [
                 HumanMessage(content="Create ticket"),
@@ -970,11 +913,7 @@ class TestConservativeOverrideLogic:
                 ),
                 ToolMessage(content="Need more details", tool_call_id="call_1"),
                 AIMessage(content="Done"),
-                _final_response_call(
-                    FinalResponseSchema(
-                        task_state=TaskState.TASK_STATE_COMPLETED, message="Ticket created", reasoning="Task complete"
-                    )
-                ),
+                final_response("Ticket created"),
             ],
             "a2a_tracking": {
                 "JiraAgent": {"requires_input": True, "is_complete": False},

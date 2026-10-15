@@ -11,6 +11,7 @@ from __future__ import annotations
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from app.handlers import StreamHandler
+from tests.support.graph_harness import final_response
 
 
 def _ai_task_call(call_id: str = "c1", subagent: str = "test-agent") -> AIMessage:
@@ -24,17 +25,7 @@ def test_phantom_when_flag_set_but_no_task_call():
     state = {
         "messages": [
             HumanMessage("convert this pdf"),
-            AIMessage(
-                content="",
-                tool_calls=[
-                    {
-                        "id": "f1",
-                        "name": "FinalResponseSchema",
-                        "args": {"include_subagent_output": True, "task_state": "completed", "message": ""},
-                        "type": "tool_call",
-                    }
-                ],
-            ),
+            final_response("", include_subagent_output=True),
         ],
     }
     assert StreamHandler.is_phantom_subagent_completion(state) is True
@@ -42,21 +33,18 @@ def test_phantom_when_flag_set_but_no_task_call():
 
 def test_not_phantom_when_subagent_actually_ran():
     state = {
-        "structured_response": {"include_subagent_output": True, "task_state": "completed", "message": ""},
         "messages": [
             HumanMessage("convert this pdf"),
             _ai_task_call("c1"),
             ToolMessage(content="# markdown result", tool_call_id="c1", name="task"),
+            final_response("", include_subagent_output=True),
         ],
     }
     assert StreamHandler.is_phantom_subagent_completion(state) is False
 
 
 def test_not_phantom_when_flag_not_set():
-    state = {
-        "structured_response": {"include_subagent_output": False, "task_state": "completed", "message": "done"},
-        "messages": [HumanMessage("hi")],
-    }
+    state = {"messages": [HumanMessage("hi"), final_response("done")]}
     assert StreamHandler.is_phantom_subagent_completion(state) is False
 
 
