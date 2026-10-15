@@ -1276,3 +1276,63 @@ def test_a_rejected_empty_call_does_not_override_a_truncation():
 
     assert response.state == TaskState.TASK_STATE_INPUT_REQUIRED
     assert (response.metadata or {}).get("truncated") is True
+
+
+def _mixed_final_step(*rest, **final_args):
+    """The schema bound as a plain tool: an accepted FinalResponseSchema call made in the same
+    step as a non-return_direct tool loops back to the model (often for an empty step)."""
+    args = {"task_state": "completed", "message": "Here is X", "include_subagent_output": False, **final_args}
+    return {
+        "messages": [
+            HumanMessage("hi"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "FinalResponseSchema", "args": args, "id": "f1"},
+                    {"name": "write_todos", "args": {"todos": []}, "id": "w1"},
+                ],
+            ),
+            ToolMessage(
+                content="task_state='completed' message='Here is X'", tool_call_id="f1", name="FinalResponseSchema"
+            ),
+            ToolMessage(content="Updated todo list", tool_call_id="w1", name="write_todos"),
+            *rest,
+        ]
+    }
+
+
+def test_an_accepted_answer_mixed_with_another_tool_survives_an_empty_next_step():
+    response = StreamHandler.parse_agent_response(_mixed_final_step(AIMessage(content="")))
+
+    assert response.state == TaskState.TASK_STATE_COMPLETED
+    assert response.content == "Here is X"
+
+
+def test_an_accepted_answer_mixed_with_another_tool_wins_over_later_text():
+    response = StreamHandler.parse_agent_response(_mixed_final_step(AIMessage(content="Done.")))
+
+    assert response.content == "Here is X"
+
+
+def test_a_mixed_step_eager_completion_is_still_a_phantom():
+    state = _mixed_final_step(AIMessage(content=""), message="", include_subagent_output=True)
+
+    assert StreamHandler.is_phantom_subagent_completion(state) is True
+
+
+def test_a_rejected_call_with_args_does_not_override_a_plain_text_answer():
+    state = {
+        "messages": [
+            HumanMessage("hi"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "FinalResponseSchema", "args": {"task_state": "bogus", "message": "x"}, "id": "f1"}
+                ],
+            ),
+            ToolMessage(content="Error: invalid", tool_call_id="f1", name="FinalResponseSchema", status="error"),
+            AIMessage(content="The real answer."),
+        ]
+    }
+
+    assert StreamHandler.parse_agent_response(state).content == "The real answer."

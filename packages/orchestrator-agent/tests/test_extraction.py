@@ -178,8 +178,8 @@ def test_structured_response_channel_is_never_read():
     assert final_text(state) == "Sent."
 
 
-def test_the_last_model_step_decides_not_an_older_call():
-    """A rejected call makes the model step again: only the step that ended the turn counts."""
+def test_a_rejected_call_is_not_the_answer():
+    """A rejected call (args that do not validate) is not an answer: the model stepped again."""
     retried = {
         "messages": [
             HumanMessage("go"),
@@ -191,7 +191,7 @@ def test_the_last_model_step_decides_not_an_older_call():
     then_plain = {
         "messages": [
             HumanMessage("go"),
-            _final_call(message="first try"),
+            _final_call(message="first try", task_state="bogus"),
             ToolMessage(content="Error: invalid", tool_call_id="f1", name="FinalResponseSchema", status="error"),
             AIMessage(content="The real answer."),
         ],

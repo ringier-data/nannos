@@ -11,6 +11,7 @@ from a2a.types import TaskState
 from agent_common.a2a.event_translation import strip_state_label
 from agent_common.a2a.structured_response import unanswered_turn_reply
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from pydantic import ValidationError
 from ringier_a2a_sdk.utils.streaming import extract_text_from_content
 
 from ..models import AgentStreamResponse
@@ -60,26 +61,41 @@ def current_turn_messages(messages: list) -> list:
 
 
 def current_turn_final_response(messages: list) -> dict[str, Any] | None:
-    """The args of the ``FinalResponseSchema`` call that ended this turn, or None.
+    """The args of this turn's answer: its newest ``FinalResponseSchema`` call that was accepted.
 
-    The single answer source for a turn: the call in the turn's LAST model step.
-    The run ends right after that call (ToolStrategy or the schema bound as a
-    ``return_direct`` tool), and a rejected call makes the model step again, so a
-    last step without the call means the turn ended some other way — plain text, a
-    loop stop, a truncation — and those paths must decide. Never the persisted
-    ``structured_response`` channel, which still holds an earlier turn's answer
-    (nannos#358). Empty args come back as ``{}``. Public for the same reason as
-    ``current_turn_messages``.
+    Accepted means the args validate. That is what both bindings check: ToolStrategy
+    parses them (a failure is answered with an error ToolMessage, no status), and the
+    schema bound as a tool validates them (a failure gets ``status="error"``). A
+    rejected call makes the model step again, but the run does not always end right
+    after an accepted one — with the bound tool, a step that mixes it with another
+    tool loops back to the model — so neither the last step nor the newest call alone
+    decides. With no accepted call, a call in the turn's last model step comes back
+    as-is (``{}`` or invalid args) for the salvage path; otherwise None, and the
+    turn's other endings (plain text, a loop stop, a truncation) decide.
+
+    Never the persisted ``structured_response`` channel, which still holds an earlier
+    turn's answer (nannos#358). Public for the same reason as ``current_turn_messages``.
     """
+    from ..models.schemas import FinalResponseSchema
+
+    last_step_call: dict[str, Any] | None = None
+    last_step_seen = False
     for msg in reversed(current_turn_messages(messages)):
         if not isinstance(msg, AIMessage):
             continue
-        for tool_call in msg.tool_calls or []:
-            if tool_call.get("name") == "FinalResponseSchema":
-                return tool_call.get("args") or {}
-        return None
-    return None
-
+        calls = [c for c in msg.tool_calls or [] if c.get("name") == "FinalResponseSchema"]
+        if not last_step_seen:
+            last_step_seen = True
+            if calls:
+                last_step_call = calls[0].get("args") or {}
+        for call in calls:
+            args = call.get("args") or {}
+            try:
+                FinalResponseSchema.model_validate(args)
+            except ValidationError:
+                continue
+            return args
+    return last_step_call
 
 class StreamHandler:
     """Handles stream response generation and state parsing."""
