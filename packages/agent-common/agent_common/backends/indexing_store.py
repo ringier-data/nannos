@@ -68,24 +68,12 @@ _THOUGHT_SIGNATURE_DELIMITER = "__thought__"
 _KEY_HASH_LEN = 16
 
 
-def _legacy_assistant_namespace(_runtime: Any) -> tuple[str, ...]:
-    """Reproduce the pre-0.7 deepagents ``StoreBackend`` default namespace.
-
-    deepagents < 0.7 resolved a missing ``namespace`` to ``(assistant_id,
-    "filesystem")`` when the graph config carried ``metadata.assistant_id``, and
-    ``("filesystem",)`` otherwise. 0.7 made ``namespace`` mandatory. Existing
-    production data written by callers that never passed a factory lives under
-    these exact tuples, so the fallback must keep producing them verbatim.
-    """
-    namespace = "filesystem"
-    try:
-        cfg = get_config()
-        assistant_id = cfg.get("metadata", {}).get("assistant_id")
-    except Exception:  # noqa: BLE001 - resilient fallback, mirrors old deepagents behaviour
-        assistant_id = None
-    if assistant_id:
-        return (assistant_id, namespace)
-    return (namespace,)
+def _no_file_namespace(_runtime: Any) -> tuple[str, ...]:
+    """The namespace of a backend built only to index: file operations need a real one."""
+    raise RuntimeError(
+        "IndexingStoreBackend was built without a namespace_factory, so it can index but not "
+        "read or write files; pass the route's namespace_factory."
+    )
 
 
 def bounded_storage_key(file_path: str) -> str:
@@ -197,13 +185,13 @@ class IndexingStoreBackend(StoreBackend):
             cost_logger: Optional CostLogger for reporting LLM usage costs
             namespace_factory: Optional callable that takes a Runtime and returns
                 namespace tuple. Used to scope file storage (read/write operations).
-                If None, uses legacy assistant_id-based scoping
-                (``_legacy_assistant_namespace`` — deepagents >= 0.7 no longer
-                provides that fallback itself).
+                Every file route passes one (``build_common_middleware_stack``); omit it
+                only for an index-only backend (``semantic_search_file``), whose file
+                operations then raise instead of landing in a shared namespace.
         """
         # Pass store and namespace factory to parent StoreBackend
         # This ensures read operations (grep, read_file, etc.) are scoped correctly
-        super().__init__(store=store, namespace=namespace_factory or _legacy_assistant_namespace)
+        super().__init__(store=store, namespace=namespace_factory or _no_file_namespace)
         self._model_name = model_name
         self.documents_store: AsyncPostgresStore = store
         self._cost_logger = cost_logger

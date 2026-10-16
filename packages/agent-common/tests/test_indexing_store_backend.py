@@ -31,6 +31,9 @@ _OFFLOAD_PATH = f"/large_tool_results/{_THOUGHT_PACKED_ID}"
 _BOUNDED_PATH = f"/large_tool_results/{_GEMINI_CALL_ID}"
 
 
+_FS_NAMESPACE = lambda _rt: ("user-xyz", "filesystem")  # noqa: E731 — a route's namespace factory
+
+
 def _content_hash(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
@@ -470,7 +473,7 @@ class TestBackendOpsBoundKeys:
     async def test_awrite_writes_under_bounded_key(self, mock_agent_settings):
         mock_store = _make_store()
         mock_store.aget.return_value = None  # parent existence check: not present
-        backend = IndexingStoreBackend(store=mock_store, model_name=mock_agent_settings)
+        backend = IndexingStoreBackend(store=mock_store, model_name=mock_agent_settings, namespace_factory=_FS_NAMESPACE)
 
         # /large_tool_results/ is not eagerly indexed, so only the filesystem
         # aput (parent awrite) should fire — and it must use the bounded key.
@@ -486,7 +489,7 @@ class TestBackendOpsBoundKeys:
     async def test_aread_reads_under_bounded_key(self, mock_agent_settings):
         mock_store = _make_store()
         mock_store.aget.return_value = None  # content irrelevant; we assert the key
-        backend = IndexingStoreBackend(store=mock_store, model_name=mock_agent_settings)
+        backend = IndexingStoreBackend(store=mock_store, model_name=mock_agent_settings, namespace_factory=_FS_NAMESPACE)
 
         await backend.aread(_OFFLOAD_PATH)
 
@@ -498,7 +501,7 @@ class TestBackendOpsBoundKeys:
     async def test_index_content_chunk_keys_are_bounded(self, mock_agent_settings):
         mock_store = _make_store()
         mock_store.aget.return_value = None  # not previously indexed
-        backend = IndexingStoreBackend(store=mock_store, model_name=mock_agent_settings)
+        backend = IndexingStoreBackend(store=mock_store, model_name=mock_agent_settings, namespace_factory=_FS_NAMESPACE)
 
         with patch("agent_common.backends.indexing_store.get_config", return_value=_make_config()):
             with patch(
@@ -525,7 +528,7 @@ class TestBackendOpsBoundKeys:
     async def test_aedit_edits_under_bounded_key(self, mock_agent_settings):
         mock_store = _make_store()
         mock_store.aget.return_value = None  # file-not-found early return; we assert the key
-        backend = IndexingStoreBackend(store=mock_store, model_name=mock_agent_settings)
+        backend = IndexingStoreBackend(store=mock_store, model_name=mock_agent_settings, namespace_factory=_FS_NAMESPACE)
 
         await backend.aedit(_OFFLOAD_PATH, "old", "new")
 
@@ -535,7 +538,7 @@ class TestBackendOpsBoundKeys:
     def test_sync_read_reads_under_bounded_key(self, mock_agent_settings):
         sync_store = MagicMock()
         sync_store.get.return_value = None
-        backend = IndexingStoreBackend(store=sync_store, model_name=mock_agent_settings)
+        backend = IndexingStoreBackend(store=sync_store, model_name=mock_agent_settings, namespace_factory=_FS_NAMESPACE)
 
         backend.read(_OFFLOAD_PATH)
 
@@ -544,7 +547,7 @@ class TestBackendOpsBoundKeys:
     def test_sync_write_writes_under_bounded_key(self, mock_agent_settings):
         sync_store = MagicMock()
         sync_store.get.return_value = None  # parent existence check: not present
-        backend = IndexingStoreBackend(store=sync_store, model_name=mock_agent_settings)
+        backend = IndexingStoreBackend(store=sync_store, model_name=mock_agent_settings, namespace_factory=_FS_NAMESPACE)
 
         result = backend.write(_OFFLOAD_PATH, "huge tool result")
 
@@ -555,7 +558,7 @@ class TestBackendOpsBoundKeys:
     def test_sync_edit_edits_under_bounded_key(self, mock_agent_settings):
         sync_store = MagicMock()
         sync_store.get.return_value = None  # file-not-found early return; we assert the key
-        backend = IndexingStoreBackend(store=sync_store, model_name=mock_agent_settings)
+        backend = IndexingStoreBackend(store=sync_store, model_name=mock_agent_settings, namespace_factory=_FS_NAMESPACE)
 
         backend.edit(_OFFLOAD_PATH, "old", "new")
 

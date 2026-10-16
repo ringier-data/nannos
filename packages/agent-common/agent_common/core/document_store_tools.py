@@ -389,7 +389,9 @@ async def _semantic_search_file_impl(
         return []
 
     # JIT index (idempotent via content-hash caching in _index_content)
-    backend = IndexingStoreBackend(store=store, model_name=model_name, cost_logger=cost_logger)
+    backend = IndexingStoreBackend(
+        store=store, model_name=model_name, cost_logger=cost_logger, namespace_factory=lambda _rt: filesystem_namespace
+    )
     await backend.aensure_indexed(file_path, content)
 
     # Search the chunk namespace, filtered to this specific file. Over-fetch so
