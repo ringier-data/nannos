@@ -11,6 +11,7 @@ from __future__ import annotations
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from app.handlers import StreamHandler
+from tests.support.graph_harness import final_response
 
 
 def _ai_task_call(call_id: str = "c1", subagent: str = "test-agent") -> AIMessage:
@@ -22,10 +23,9 @@ def _ai_task_call(call_id: str = "c1", subagent: str = "test-agent") -> AIMessag
 
 def test_phantom_when_flag_set_but_no_task_call():
     state = {
-        "structured_response": {"include_subagent_output": True, "task_state": "completed", "message": ""},
         "messages": [
             HumanMessage("convert this pdf"),
-            AIMessage(content=[{"type": "text", "text": '{"task_state":"completed","include_subagent_output":true}'}]),
+            final_response("", include_subagent_output=True),
         ],
     }
     assert StreamHandler.is_phantom_subagent_completion(state) is True
@@ -33,21 +33,18 @@ def test_phantom_when_flag_set_but_no_task_call():
 
 def test_not_phantom_when_subagent_actually_ran():
     state = {
-        "structured_response": {"include_subagent_output": True, "task_state": "completed", "message": ""},
         "messages": [
             HumanMessage("convert this pdf"),
             _ai_task_call("c1"),
             ToolMessage(content="# markdown result", tool_call_id="c1", name="task"),
+            final_response("", include_subagent_output=True),
         ],
     }
     assert StreamHandler.is_phantom_subagent_completion(state) is False
 
 
 def test_not_phantom_when_flag_not_set():
-    state = {
-        "structured_response": {"include_subagent_output": False, "task_state": "completed", "message": "done"},
-        "messages": [HumanMessage("hi")],
-    }
+    state = {"messages": [HumanMessage("hi"), final_response("done")]}
     assert StreamHandler.is_phantom_subagent_completion(state) is False
 
 
@@ -77,3 +74,16 @@ def test_current_turn_final_response_tool_call_wins_over_stale_channel():
 def test_non_dict_state_is_safe():
     assert StreamHandler.is_phantom_subagent_completion(None) is False
     assert StreamHandler.is_phantom_subagent_completion("nope") is False
+
+
+def test_stale_channel_does_not_flag_a_plain_text_turn():
+    """nannos#358: the persisted ``structured_response`` channel still holds an earlier
+    turn's answer; a turn that answered in plain text made no claim at all."""
+    state = {
+        "structured_response": {"include_subagent_output": True, "task_state": "completed", "message": ""},
+        "messages": [
+            HumanMessage("what changed?"),
+            AIMessage(content="Only the condition."),
+        ],
+    }
+    assert StreamHandler.is_phantom_subagent_completion(state) is False

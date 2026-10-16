@@ -46,10 +46,9 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 
-from app.handlers import current_turn_messages
+from app.handlers import current_turn_final_response, current_turn_messages
 
 TASK_TOOL = "task"
-FINAL_RESPONSE_TOOL = "FinalResponseSchema"
 
 
 @dataclass(frozen=True)
@@ -241,37 +240,13 @@ def a2a_tracking(values: Any) -> dict[str, dict[str, Any]]:
 def final_response(values: Any) -> dict[str, Any] | None:
     """The turn's ``FinalResponseSchema`` envelope, or None if absent.
 
-    Mirrors the precedence in ``StreamHandler.is_phantom_subagent_completion``:
-    a ``FinalResponseSchema`` tool call *in the current turn* wins over the
-    ``structured_response`` channel, which can still hold a previous turn's
-    value. Asserting on the channel alone silently reads stale data.
+    The production definition (``current_turn_final_response``): the call in the
+    turn's last model step (``{}`` when its args are empty), never the
+    ``structured_response`` channel, which still holds an earlier turn's answer.
     """
     if not isinstance(values, dict):
         return None
-
-    for msg in reversed(_messages(values)):
-        if not isinstance(msg, AIMessage):
-            continue
-        for call in getattr(msg, "tool_calls", None) or []:
-            if call.get("name") == FINAL_RESPONSE_TOOL:
-                return call.get("args") or {}
-
-    structured = values.get("structured_response")
-    if structured is None:
-        return None
-    if isinstance(structured, dict):
-        return structured
-
-    # The graph is built with ``response_format``, so LangGraph populates this
-    # channel with a validated ``FinalResponseSchema`` *instance*, not a dict —
-    # which is why ``StreamHandler`` reads it via ``getattr``. Prefer the
-    # pydantic API over ``__dict__``: the latter happens to hold field values in
-    # pydantic v2, but it is an implementation detail that skips serialization
-    # (aliases, computed fields) and would silently return the wrong shape.
-    dump = getattr(structured, "model_dump", None)
-    if callable(dump):
-        return dump()
-    return dict(getattr(structured, "__dict__", {})) or None
+    return current_turn_final_response(values.get("messages") or [])
 
 
 def final_text(values: Any) -> str:

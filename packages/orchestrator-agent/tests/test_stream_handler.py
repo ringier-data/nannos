@@ -4,6 +4,7 @@ from a2a.types import TaskState
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from app.handlers import StreamHandler, current_turn_messages
+from tests.support.graph_harness import final_response
 
 
 class TestBuildAuthResponse:
@@ -119,7 +120,9 @@ class TestParseAgentResponse:
         final_state = {
             "messages": [
                 HumanMessage(content="first"),
-                AIMessage(content="", tool_calls=[{"name": "FinalResponseSchema", "args": {}, "id": "f", "type": "tool_call"}]),
+                AIMessage(
+                    content="", tool_calls=[{"name": "FinalResponseSchema", "args": {}, "id": "f", "type": "tool_call"}]
+                ),
                 HumanMessage(content="second"),
                 AIMessage(content="", tool_calls=[call]),
                 ToolMessage(content="BLOCKED: 'console_create_bug_report' — looped", tool_call_id="c1"),
@@ -653,8 +656,6 @@ class TestConservativeOverrideLogic:
 
     def test_llm_completed_one_blocked_one_success_trusts_llm(self):
         """Test parallel execution: LLM says completed, one blocked + one success → trust LLM."""
-        from app.models.schemas import FinalResponseSchema
-
         # Simulate parallel execution where one agent succeeded
         final_state = {
             "messages": [
@@ -679,12 +680,8 @@ class TestConservativeOverrideLogic:
                 ToolMessage(content="Ticket needs input", tool_call_id="call_1"),
                 ToolMessage(content="Email sent successfully", tool_call_id="call_2"),
                 AIMessage(content="Done - used email"),
+                final_response("Email sent successfully as alternative approach"),
             ],
-            "structured_response": FinalResponseSchema(
-                task_state=TaskState.TASK_STATE_COMPLETED,
-                message="Email sent successfully as alternative approach",
-                reasoning="Jira blocked but email succeeded",
-            ),
             "a2a_tracking": {
                 "JiraAgent": {"requires_input": True, "is_complete": False},
                 "EmailAgent": {"requires_input": False, "is_complete": True, "state": "TaskState.TASK_STATE_COMPLETED"},
@@ -699,8 +696,6 @@ class TestConservativeOverrideLogic:
 
     def test_llm_completed_all_blocked_overrides_to_input_required(self):
         """Test safety override: LLM says completed, ALL agents blocked → override to input_required."""
-        from app.models.schemas import FinalResponseSchema
-
         # LLM hallucination: says completed but all agents are blocked
         final_state = {
             "messages": [
@@ -725,12 +720,8 @@ class TestConservativeOverrideLogic:
                 ToolMessage(content="Jira needs input", tool_call_id="call_1"),
                 ToolMessage(content="Email needs input", tool_call_id="call_2"),
                 AIMessage(content="All done"),
+                final_response("Tasks completed successfully"),
             ],
-            "structured_response": FinalResponseSchema(
-                task_state=TaskState.TASK_STATE_COMPLETED,
-                message="Tasks completed successfully",
-                reasoning="Both completed",  # LLM hallucination
-            ),
             "a2a_tracking": {
                 "JiraAgent": {"requires_input": True, "is_complete": False},
                 "EmailAgent": {"requires_input": True, "is_complete": False},
@@ -747,8 +738,6 @@ class TestConservativeOverrideLogic:
 
     def test_llm_completed_all_blocked_auth_takes_priority(self):
         """Test safety override: ALL blocked with auth + input → auth takes priority."""
-        from app.models.schemas import FinalResponseSchema
-
         final_state = {
             "messages": [
                 HumanMessage(content="Multi-agent request"),
@@ -772,10 +761,8 @@ class TestConservativeOverrideLogic:
                 ToolMessage(content="Auth needed", tool_call_id="call_1"),
                 ToolMessage(content="Input needed", tool_call_id="call_2"),
                 AIMessage(content="Done"),
+                final_response("Completed"),
             ],
-            "structured_response": FinalResponseSchema(
-                task_state=TaskState.TASK_STATE_COMPLETED, message="Completed", reasoning="Done"
-            ),
             "a2a_tracking": {
                 "Agent1": {
                     "requires_auth": True,
@@ -796,8 +783,6 @@ class TestConservativeOverrideLogic:
 
     def test_llm_input_required_mixed_results_respects_llm(self):
         """Test: LLM says input_required with mixed results → respect LLM decision."""
-        from app.models.schemas import FinalResponseSchema
-
         # LLM correctly identifies need for input despite partial success
         final_state = {
             "messages": [
@@ -822,12 +807,8 @@ class TestConservativeOverrideLogic:
                 ToolMessage(content="Ticket needs project", tool_call_id="call_1"),
                 ToolMessage(content="Notified team", tool_call_id="call_2"),
                 AIMessage(content="Need project for ticket"),
+                final_response("Which project should I create the ticket in?", task_state="input_required"),
             ],
-            "structured_response": FinalResponseSchema(
-                task_state=TaskState.TASK_STATE_INPUT_REQUIRED,
-                message="Which project should I create the ticket in?",
-                reasoning="Slack succeeded but Jira needs project info",
-            ),
             "a2a_tracking": {
                 "JiraAgent": {"requires_input": True, "is_complete": False},
                 "SlackAgent": {"requires_input": False, "is_complete": True, "state": "TaskState.TASK_STATE_COMPLETED"},
@@ -842,8 +823,6 @@ class TestConservativeOverrideLogic:
 
     def test_llm_working_state_not_overridden(self):
         """Test: LLM says working, blocked agents exist → respect LLM decision."""
-        from app.models.schemas import FinalResponseSchema
-
         final_state = {
             "messages": [
                 HumanMessage(content="Long running task"),
@@ -860,12 +839,8 @@ class TestConservativeOverrideLogic:
                 ),
                 ToolMessage(content="Processing", tool_call_id="call_1"),
                 AIMessage(content="Still working"),
+                final_response("Task is still being processed in the background", task_state="working"),
             ],
-            "structured_response": FinalResponseSchema(
-                task_state=TaskState.TASK_STATE_WORKING,
-                message="Task is still being processed in the background",
-                reasoning="Async operation in progress",
-            ),
             "a2a_tracking": {
                 "AsyncAgent": {"requires_input": True, "is_complete": False},  # Might need input later
             },
@@ -886,8 +861,6 @@ class TestConservativeOverrideLogic:
         "Hello!" reply. The current-turn extraction MUST short-circuit when no sub-agent
         was actually invoked in the current turn.
         """
-        from app.models.schemas import FinalResponseSchema
-
         final_state = {
             "messages": [
                 # Earlier turn: file-analyzer was called and got blocked
@@ -908,12 +881,8 @@ class TestConservativeOverrideLogic:
                 # Current turn: simple greeting, no tool calls
                 HumanMessage(content="hi"),
                 AIMessage(content="Hello! How can I help you today?"),
+                final_response("Hello! How can I help you today?"),
             ],
-            "structured_response": FinalResponseSchema(
-                task_state=TaskState.TASK_STATE_COMPLETED,
-                message="Hello! How can I help you today?",
-                reasoning="Greeting response",
-            ),
             # Stale blocked tracking from earlier turn — must NOT trigger override now
             "a2a_tracking": {
                 "file-analyzer": {"requires_input": True, "is_complete": False},
@@ -928,8 +897,6 @@ class TestConservativeOverrideLogic:
 
     def test_single_agent_blocked_overrides_when_completed(self):
         """Test: Single agent called, LLM says completed, agent blocked → override."""
-        from app.models.schemas import FinalResponseSchema
-
         final_state = {
             "messages": [
                 HumanMessage(content="Create ticket"),
@@ -946,10 +913,8 @@ class TestConservativeOverrideLogic:
                 ),
                 ToolMessage(content="Need more details", tool_call_id="call_1"),
                 AIMessage(content="Done"),
+                final_response("Ticket created"),
             ],
-            "structured_response": FinalResponseSchema(
-                task_state=TaskState.TASK_STATE_COMPLETED, message="Ticket created", reasoning="Task complete"
-            ),
             "a2a_tracking": {
                 "JiraAgent": {"requires_input": True, "is_complete": False},
             },
@@ -1200,8 +1165,6 @@ class TestNoInternalTextReachesTheUser:
 
         Users read "task_state='completed' message=… include_subagent_output=False".
         """
-        from app.models.schemas import FinalResponseSchema
-
         answer = "Drafts 1 and 3 were created; draft 2 was rejected. Want me to retry it?"
         final_state = {
             "messages": [
@@ -1229,7 +1192,6 @@ class TestNoInternalTextReachesTheUser:
                     tool_call_id="f1",
                 ),
             ],
-            "structured_response": FinalResponseSchema(task_state=TaskState.TASK_STATE_COMPLETED, message=answer),
             "a2a_tracking": {"general-purpose": {"requires_input": True, "is_complete": False}},
         }
 
@@ -1247,3 +1209,130 @@ class TestNoInternalTextReachesTheUser:
         )
         assert response.state == TaskState.TASK_STATE_FAILED
         assert response.content == "JiraAgent failed: Done, I created the ticket."
+
+
+def test_a_turn_whose_only_final_response_call_is_empty_takes_the_salvage_path():
+    """An empty-args FinalResponseSchema call (bind-as-tool path) gets an error ToolMessage
+    the model never answered. The user must see the neutral salvage text, never the
+    model-facing tool error."""
+    state = {
+        "messages": [
+            HumanMessage("hi"),
+            AIMessage(content="", tool_calls=[{"name": "FinalResponseSchema", "args": {}, "id": "e1"}]),
+            ToolMessage(
+                content="Error invoking tool 'FinalResponseSchema' with kwargs {}: Field required. Please fix the error",
+                tool_call_id="e1",
+                name="FinalResponseSchema",
+                status="error",
+            ),
+        ]
+    }
+
+    response = StreamHandler.parse_agent_response(state)
+
+    assert response.state == TaskState.TASK_STATE_COMPLETED
+    assert response.content == "Task processing completed with validation errors."
+    assert "parse_error" in (response.metadata or {})
+
+
+def _empty_final_then(*rest):
+    """A turn that made an empty-args FinalResponseSchema call, had it rejected, and went on."""
+    return {
+        "messages": [
+            HumanMessage("hi"),
+            AIMessage(content="", tool_calls=[{"name": "FinalResponseSchema", "args": {}, "id": "e1"}]),
+            ToolMessage(content="Error: Field required", tool_call_id="e1", name="FinalResponseSchema", status="error"),
+            *rest,
+        ]
+    }
+
+
+def test_a_rejected_empty_call_does_not_override_a_plain_text_answer():
+    response = StreamHandler.parse_agent_response(_empty_final_then(AIMessage(content="The real answer.")))
+
+    assert response.state == TaskState.TASK_STATE_COMPLETED
+    assert response.content == "The real answer."
+
+
+def test_a_rejected_empty_call_does_not_override_a_loop_stop():
+    from agent_common.a2a.structured_response import STOPPED_REPLY
+
+    state = _empty_final_then(
+        AIMessage(content="", tool_calls=[{"name": "task", "args": {"subagent_type": "x"}, "id": "t1"}]),
+        ToolMessage(
+            content="BLOCKED: 'task' — called 6 times with identical arguments", tool_call_id="t1", status="error"
+        ),
+    )
+
+    response = StreamHandler.parse_agent_response(state)
+
+    assert response.content.startswith(STOPPED_REPLY)
+
+
+def test_a_rejected_empty_call_does_not_override_a_truncation():
+    truncated = AIMessage(content="", response_metadata={"finish_reason": "length"})
+
+    response = StreamHandler.parse_agent_response(_empty_final_then(truncated))
+
+    assert response.state == TaskState.TASK_STATE_INPUT_REQUIRED
+    assert (response.metadata or {}).get("truncated") is True
+
+
+def _mixed_final_step(*rest, **final_args):
+    """The schema bound as a plain tool: an accepted FinalResponseSchema call made in the same
+    step as a non-return_direct tool loops back to the model (often for an empty step)."""
+    args = {"task_state": "completed", "message": "Here is X", "include_subagent_output": False, **final_args}
+    return {
+        "messages": [
+            HumanMessage("hi"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "FinalResponseSchema", "args": args, "id": "f1"},
+                    {"name": "write_todos", "args": {"todos": []}, "id": "w1"},
+                ],
+            ),
+            ToolMessage(
+                content="task_state='completed' message='Here is X'", tool_call_id="f1", name="FinalResponseSchema"
+            ),
+            ToolMessage(content="Updated todo list", tool_call_id="w1", name="write_todos"),
+            *rest,
+        ]
+    }
+
+
+def test_an_accepted_answer_mixed_with_another_tool_survives_an_empty_next_step():
+    response = StreamHandler.parse_agent_response(_mixed_final_step(AIMessage(content="")))
+
+    assert response.state == TaskState.TASK_STATE_COMPLETED
+    assert response.content == "Here is X"
+
+
+def test_an_accepted_answer_mixed_with_another_tool_wins_over_later_text():
+    response = StreamHandler.parse_agent_response(_mixed_final_step(AIMessage(content="Done.")))
+
+    assert response.content == "Here is X"
+
+
+def test_a_mixed_step_eager_completion_is_still_a_phantom():
+    state = _mixed_final_step(AIMessage(content=""), message="", include_subagent_output=True)
+
+    assert StreamHandler.is_phantom_subagent_completion(state) is True
+
+
+def test_a_rejected_call_with_args_does_not_override_a_plain_text_answer():
+    state = {
+        "messages": [
+            HumanMessage("hi"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "FinalResponseSchema", "args": {"task_state": "bogus", "message": "x"}, "id": "f1"}
+                ],
+            ),
+            ToolMessage(content="Error: invalid", tool_call_id="f1", name="FinalResponseSchema", status="error"),
+            AIMessage(content="The real answer."),
+        ]
+    }
+
+    assert StreamHandler.parse_agent_response(state).content == "The real answer."

@@ -11,6 +11,7 @@ from a2a.types import TaskState
 from agent_common.a2a.event_translation import strip_state_label
 from agent_common.a2a.structured_response import unanswered_turn_reply
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from pydantic import ValidationError
 from ringier_a2a_sdk.utils.streaming import extract_text_from_content
 
 from ..models import AgentStreamResponse
@@ -58,6 +59,43 @@ def current_turn_messages(messages: list) -> list:
         )
         return current_turn
 
+
+def current_turn_final_response(messages: list) -> dict[str, Any] | None:
+    """The args of this turn's answer: its newest ``FinalResponseSchema`` call that was accepted.
+
+    Accepted means the args validate. That is what both bindings check: ToolStrategy
+    parses them (a failure is answered with an error ToolMessage, no status), and the
+    schema bound as a tool validates them (a failure gets ``status="error"``). A
+    rejected call makes the model step again, but the run does not always end right
+    after an accepted one — with the bound tool, a step that mixes it with another
+    tool loops back to the model — so neither the last step nor the newest call alone
+    decides. With no accepted call, a call in the turn's last model step comes back
+    as-is (``{}`` or invalid args) for the salvage path; otherwise None, and the
+    turn's other endings (plain text, a loop stop, a truncation) decide.
+
+    Never the persisted ``structured_response`` channel, which still holds an earlier
+    turn's answer (nannos#358). Public for the same reason as ``current_turn_messages``.
+    """
+    from ..models.schemas import FinalResponseSchema
+
+    last_step_call: dict[str, Any] | None = None
+    last_step_seen = False
+    for msg in reversed(current_turn_messages(messages)):
+        if not isinstance(msg, AIMessage):
+            continue
+        calls = [c for c in msg.tool_calls or [] if c.get("name") == "FinalResponseSchema"]
+        if not last_step_seen:
+            last_step_seen = True
+            if calls:
+                last_step_call = calls[0].get("args") or {}
+        for call in calls:
+            args = call.get("args") or {}
+            try:
+                FinalResponseSchema.model_validate(args)
+            except ValidationError:
+                continue
+            return args
+    return last_step_call
 
 class StreamHandler:
     """Handles stream response generation and state parsing."""
@@ -114,28 +152,8 @@ class StreamHandler:
         if not isinstance(final_state, dict):
             return False
 
-        # Resolve the structured response (current-turn tool call wins over the
-        # possibly-stale ``structured_response`` channel), mirroring
-        # ``parse_agent_response``.
-        structured: Any = None
-        messages = final_state.get("messages", [])
-        if messages:
-            for msg in reversed(current_turn_messages(messages)):
-                if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
-                    for tool_call in msg.tool_calls:
-                        if tool_call.get("name") == "FinalResponseSchema":
-                            structured = tool_call.get("args", {})
-                            break
-                if structured is not None:
-                    break
-        if structured is None:
-            structured = final_state.get("structured_response")
-
-        if isinstance(structured, dict):
-            include = bool(structured.get("include_subagent_output", False))
-        else:
-            include = bool(getattr(structured, "include_subagent_output", False))
-        if not include:
+        structured = current_turn_final_response(final_state.get("messages") or [])
+        if not (structured and structured.get("include_subagent_output", False)):
             return False
 
         # include_subagent_output=true is only consistent if a sub-agent actually
@@ -339,63 +357,32 @@ class StreamHandler:
         logger.debug(f"Final state for response parsing: {final_state}")
         logger.debug(f"Final state type: {type(final_state)}")
 
-        # PRIORITY: Extract FinalResponseSchema from current turn's tool_calls
-        # This ensures we get the LATEST response, not a stale one from checkpointer state
-        # The structured_response in final_state may be from a previous turn/model
-        structured_response = None
-
-        if isinstance(final_state, dict):
-            messages = final_state.get("messages", [])
-            if messages:
-                # Extract current turn messages only (after last HumanMessage)
-                turn_messages = current_turn_messages(messages)
-
-                # Search backwards through current turn for FinalResponseSchema tool call
-                for msg in reversed(turn_messages):
-                    if isinstance(msg, AIMessage) and hasattr(msg, "tool_calls") and msg.tool_calls:
-                        for tool_call in msg.tool_calls:
-                            if tool_call.get("name") == "FinalResponseSchema":
-                                structured_response = tool_call.get("args", {})
-                                logger.info(
-                                    f"[STREAM HANDLER] Found FinalResponseSchema in current turn tool_calls: {structured_response}"
-                                )
-                                break
-                        if structured_response:
-                            break
+        # The answer is this turn's FinalResponseSchema call — never the persisted
+        # ``structured_response`` channel (see ``current_turn_final_response``). Every
+        # response format the orchestrator uses yields that call.
+        messages = (final_state.get("messages") or []) if isinstance(final_state, dict) else []
+        structured_response = current_turn_final_response(messages)
+        if structured_response is not None:
+            logger.info(
+                "[STREAM HANDLER] Found FinalResponseSchema in current turn: task_state=%s",
+                structured_response.get("task_state"),
+            )
+            logger.debug(f"[STREAM HANDLER] FinalResponseSchema args: {structured_response}")
 
         # A turn that ended on a tool result the model never answered (a loop force-stop)
-        # has no answer: say so, rather than fall back to ``structured_response`` below —
-        # a persisted channel still holding the PREVIOUS turn's answer.
-        if not structured_response and isinstance(final_state, dict):
-            turn = current_turn_messages(final_state.get("messages") or [])
-            stopped = unanswered_turn_reply(turn, "FinalResponseSchema")
+        # has no answer: say so instead of the fallbacks below.
+        if structured_response is None:
+            stopped = unanswered_turn_reply(current_turn_messages(messages), "FinalResponseSchema")
             if stopped is not None:
                 logger.warning("[STREAM HANDLER] Turn ended on an unanswered tool result; reporting it as the reply")
                 return AgentStreamResponse(state=TaskState.TASK_STATE_COMPLETED, content=stopped)
 
-        # FALLBACK: Check structured_response from final_state (may be set by AutoStrategy for OpenAI)
-        # Only use if we didn't find a tool call in the current turn
-        if not structured_response and isinstance(final_state, dict) and "structured_response" in final_state:
-            structured_response = final_state.get("structured_response")
-            logger.info(
-                f"[STREAM HANDLER] Using structured_response from final_state (fallback): {structured_response}"
-            )
-
         if structured_response is not None:
-            # Parse structured response using Pydantic model validation
-            # This handles both dict (from tool_calls) and object (already validated) formats
+            # Validate the call's args (normalizes task_state)
             from ..models.schemas import FinalResponseSchema
 
             try:
-                if isinstance(structured_response, dict):
-                    # Parse dict into FinalResponseSchema (validates and normalizes task_state)
-                    parsed = FinalResponseSchema.model_validate(structured_response)
-                elif isinstance(structured_response, FinalResponseSchema):
-                    # Already a validated FinalResponseSchema
-                    parsed = structured_response
-                else:
-                    # Try to convert to dict and parse
-                    parsed = FinalResponseSchema.model_validate(structured_response.__dict__)
+                parsed = FinalResponseSchema.model_validate(structured_response)
 
                 # Extract validated fields (map the short name to the protobuf TaskState enum)
                 task_state = parsed.a2a_state
@@ -406,10 +393,7 @@ class StreamHandler:
                 # task_state) fails validation this is the only remaining copy
                 # of the answer — FinalResponseTextStripMiddleware has already
                 # removed any plain-text duplicate from the AIMessage.
-                if isinstance(structured_response, dict):
-                    salvaged = structured_response.get("message")
-                else:
-                    salvaged = getattr(structured_response, "message", None)
+                salvaged = structured_response.get("message")
                 if not (isinstance(salvaged, str) and salvaged.strip()):
                     salvaged = "Task processing completed with validation errors."
                 return AgentStreamResponse(
@@ -419,7 +403,7 @@ class StreamHandler:
                 )
 
             logger.info(
-                f"[STREAM HANDLER] Agent determined task_state: {task_state} (raw: {structured_response.get('task_state') if isinstance(structured_response, dict) else 'N/A'})"
+                f"[STREAM HANDLER] Agent determined task_state: {task_state} (raw: {structured_response.get('task_state')})"
             )
             logger.debug(f"[STREAM HANDLER] Message: {message}")
 

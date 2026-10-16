@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from app.models.schemas import FinalResponseSchema
 from tests.support.extraction import (
     a2a_tracking,
     delegated_agents,
@@ -161,32 +160,57 @@ def test_current_turn_final_response_wins_over_stale_channel():
     assert task_state(state) == "completed"
 
 
-def test_structured_response_channel_used_when_no_tool_call_this_turn():
+def test_structured_response_channel_is_never_read():
+    """nannos#358: after a structured turn the channel still holds that answer. A turn
+    that ends in plain text has no envelope; the channel's is a previous turn's."""
     state = {
         "structured_response": {"task_state": "input_required", "message": "which john?"},
-        "messages": [HumanMessage("slack john"), AIMessage(content="")],
+        "messages": [
+            HumanMessage("slack john"),
+            _final_call(message="which john?"),
+            HumanMessage("john doe"),
+            AIMessage(content="Sent."),
+        ],
     }
 
-    assert final_text(state) == "which john?"
-    assert task_state(state) == "input_required"
+    assert final_response(state) is None
+    assert task_state(state) is None
+    assert final_text(state) == "Sent."
 
 
-def test_structured_response_may_be_a_pydantic_instance_not_a_dict():
-    """The graph is built with `response_format`, so LangGraph puts a validated
-    FinalResponseSchema *object* in this channel — the shape production actually
-    sees, and why StreamHandler reads it via getattr rather than subscripting."""
+def test_a_rejected_call_is_not_the_answer():
+    """A rejected call (args that do not validate) is not an answer: the model stepped again."""
+    retried = {
+        "messages": [
+            HumanMessage("go"),
+            AIMessage(content="", tool_calls=[{"name": "FinalResponseSchema", "args": {}, "id": "e1"}]),
+            ToolMessage(content="Error: Field required", tool_call_id="e1", name="FinalResponseSchema", status="error"),
+            _final_call(call_id="f2", message="fresh answer"),
+        ],
+    }
+    then_plain = {
+        "messages": [
+            HumanMessage("go"),
+            _final_call(message="first try", task_state="bogus"),
+            ToolMessage(content="Error: invalid", tool_call_id="f1", name="FinalResponseSchema", status="error"),
+            AIMessage(content="The real answer."),
+        ],
+    }
+
+    assert final_response(retried)["message"] == "fresh answer"
+    assert final_response(then_plain) is None
+    assert final_text(then_plain) == "The real answer."
+
+
+def test_a_turn_whose_only_call_is_empty_still_has_an_envelope():
     state = {
-        "structured_response": FinalResponseSchema(task_state="input_required", message="which john?"),
-        "messages": [HumanMessage("slack john"), AIMessage(content="")],
+        "messages": [
+            HumanMessage("go"),
+            AIMessage(content="", tool_calls=[{"name": "FinalResponseSchema", "args": {}, "id": "e1"}]),
+        ],
     }
 
-    assert final_response(state) == {
-        "task_state": "input_required",
-        "message": "which john?",
-        "include_subagent_output": False,
-    }
-    assert final_text(state) == "which john?"
-    assert task_state(state) == "input_required"
+    assert final_response(state) == {}
 
 
 def test_include_subagent_output_appends_the_delegation_result():

@@ -244,6 +244,39 @@ class TestAgentExecutorStreamHandling:
         text_parts = [p.text for p in final_msg.parts if p.WhichOneof("content") == "text"]
         assert "".join(text_parts).strip() != ""
 
+    async def test_handle_stream_item_completed_short_schema_summary_keeps_streamed_answer(self, dynamodb_table):
+        """With the response schema bound as a plain tool (thinking on), the model streams its
+        answer as text and then calls the schema with a short SUMMARY of it ("Greeted the user
+        and offered assistance."). The streamed text is the answer: a shorter terminal message
+        must not be sent, or the client replaces the answer with the summary (nannos#358)."""
+        from app.models.responses import AgentStreamResponse
+
+        executor = OrchestratorDeepAgentExecutor()
+        updater = Mock()
+        updater.add_artifact = AsyncMock()
+        updater.update_status = AsyncMock()
+        task = Mock()
+        task.context_id = "ctx-123"
+        task.id = "task-456"
+
+        await executor._handle_stream_item(
+            AgentStreamResponse(
+                state=TaskState.TASK_STATE_COMPLETED,
+                content="Greeted the user and offered assistance with console features.",
+            ),
+            updater,
+            task,
+            is_final=True,
+            streaming_artifact_id="artifact-1",
+            first_chunk_sent=True,
+            streamed_text="Hey there! I'm here to help you with the Nannos console. I can assist you with "
+            "sub-agents, scheduled jobs, skills and playbooks, and your settings.",
+        )
+
+        status_call = updater.update_status.call_args
+        assert status_call[0][1] is None
+        assert status_call[1].get("metadata") is None
+
     async def test_handle_stream_item_streaming_first_chunk_creates_artifact(self, dynamodb_table):
         """Regression: the FIRST streaming chunk for an artifact_id must be a create (append=False).
 

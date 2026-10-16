@@ -4,8 +4,8 @@ This is the mock tier's top end: the graph, middleware stack, dispatch path and
 state channels are all production code from ``GraphFactory``; only the LLM and
 the sub-agents are substituted. Tests written against it exercise wiring that
 message-level unit tests cannot reach — whether ``task`` is bound with the right
-``subagent_type`` enum, whether ``a2a_tracking`` actually fills, what shape
-``structured_response`` really has.
+``subagent_type`` enum, whether ``a2a_tracking`` actually fills, which call
+the turn actually answered with.
 
 Runs with no gateway and no credentials, so it belongs in the normal suite.
 

@@ -250,10 +250,16 @@ class StructuredResponseMixin:
         This eliminates guessing based on message patterns - the LLM explicitly
         declares its task state just like the orchestrator does.
 
-        Extraction order:
-        1. result["structured_response"] (AutoStrategy / ToolStrategy on OpenAI)
-        2. Tool call messages named "SubAgentResponseSchema" (Bedrock+thinking)
-        3. Fallback to last message content with "completed" state (shouldn't happen)
+        Extraction order, over THIS turn's messages only:
+        1. A "SubAgentResponseSchema" tool message or tool call (ToolStrategy, or the
+           schema bound as a plain tool)
+        2. Fallback to the last message's content with "completed" state
+
+        ``result["structured_response"]`` is never read: it is a persisted state
+        channel, so after one structured turn it still holds that answer on every
+        later turn that ends in plain text (nannos#358). Every response format
+        ``get_response_format`` picks produces a tool call, so the turn's messages
+        always carry this turn's answer.
 
         Args:
             result: The LangGraph agent's result dict
@@ -278,11 +284,6 @@ class StructuredResponseMixin:
         if stopped is not None:
             logger.warning(f"Run of '{agent_name}' ended on an unanswered tool result; reporting it as the reply")
             return self._build_success_response(stopped, context_id=context_id, task_id=task_id)  # type: ignore[attr-defined]
-
-        # Check for structured_response (AutoStrategy for OpenAI)
-        structured_response = result.get("structured_response")
-        if structured_response and isinstance(structured_response, SubAgentResponseSchema):
-            return self._build_response_from_schema(structured_response, context_id, task_id)
 
         # Check messages for tool call with SubAgentResponseSchema (Bedrock)
         logger.info(f"Translating agent result for '{agent_name}'")
