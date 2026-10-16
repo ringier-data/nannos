@@ -73,6 +73,7 @@ class TestOnlyACompleteDiscoveryIsCached:
         user = SimpleNamespace(
             id="user-1",
             language="en",
+            timezone="UTC",
             custom_prompt=None,
             local_subagents=[],
             agent_metadata={},

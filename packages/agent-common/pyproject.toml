@@ -88,6 +88,10 @@ dev = [
     "aiobotocore>=2.15.0",
     # In-memory span exporter, to assert on recorded spans.
     "opentelemetry-sdk>=1.27.0",
+    # Optional extras the test suite imports (thinking-block round trip, Foundry costs):
+    # a plain `uv run pytest` installs no extras.
+    "langchain-openai>=0.1.0",
+    "foundry-platform-sdk==1.63.0",
 ]
 
 [tool.pytest.ini_options]

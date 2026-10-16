@@ -114,6 +114,8 @@ provides-extras = ["openai", "google", "anthropic", "foundry", "docstore", "sand
 [package.metadata.requires-dev]
 dev = [
     { name = "aiobotocore", specifier = ">=2.15.0" },
+    { name = "foundry-platform-sdk", specifier = "==1.63.0" },
+    { name = "langchain-openai", specifier = ">=0.1.0" },
     { name = "langgraph-checkpoint-postgres", specifier = ">=2.0.11" },
     { name = "opentelemetry-sdk", specifier = ">=1.27.0" },
     { name = "psycopg", specifier = ">=3.2.0" },
