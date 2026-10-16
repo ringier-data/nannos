@@ -444,7 +444,7 @@ def create_model(
     optional: dict = {}
     if max_tokens is not None:
         optional["max_tokens"] = max_tokens
-    return ChatOpenAI(
+    model = ChatOpenAI(
         base_url=_gateway_base_url(),
         api_key=_gateway_api_key(),
         model=model_type,
@@ -461,6 +461,15 @@ def create_model(
         use_responses_api=False,
         **optional,
     )
+    # No context window from langchain-openai's built-in profiles: they are keyed by model
+    # name, and ours are gateway aliases (``gpt-6-sol`` gets OpenAI's 1.05M; the Azure
+    # deployment takes 922k). deepagents sizes summarization from it (0.85 × window, keep
+    # 10%), so that alias alone would compact at ~890k tokens, not the 170k every other
+    # alias uses — each long-conversation call then costing ~5×. Without it all aliases
+    # share the fixed defaults; an oversized request is still recovered on the gateway's 400.
+    if model.profile and "max_input_tokens" in model.profile:
+        model.profile = {k: v for k, v in model.profile.items() if k != "max_input_tokens"}
+    return model
 
 
 class EmbeddingModelNotConfigured(RuntimeError):

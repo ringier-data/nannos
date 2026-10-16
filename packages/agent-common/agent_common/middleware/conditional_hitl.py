@@ -439,8 +439,23 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         if kind == "approve" and "approve" in allowed:
             return tool_call, None
         if kind == "edit" and "edit" in allowed:
-            edited = decision["edited_action"]
-            return ToolCall(type="tool_call", name=edited["name"], args=edited["args"], id=tool_call["id"]), None
+            edited = decision.get("edited_action")
+            if edited:
+                return ToolCall(type="tool_call", name=edited["name"], args=edited["args"], id=tool_call["id"]), None
+            # The card's "Request changes" sends the user's words, not new arguments: the
+            # call is not run, and the model revises it (the revised call is asked again).
+            # Read as an edited_action, it raised KeyError and ended the turn in an error.
+            said = (decision.get("message") or "").strip()
+            return tool_call, ToolMessage(
+                content=(
+                    "The user did not approve this call and asked for changes, so it was NOT executed."
+                    + (f' Their request: "{said}".' if said else "")
+                    + " Send a revised call that does what they asked, or ask them if it is unclear."
+                ),
+                name=tool_call["name"],
+                tool_call_id=tool_call["id"],
+                status="error",
+            )
         if kind == "reject" and "reject" in allowed:
             content = decision.get("message") or (
                 f"User rejected the tool call for `{tool_call['name']}` with id {tool_call['id']}. "

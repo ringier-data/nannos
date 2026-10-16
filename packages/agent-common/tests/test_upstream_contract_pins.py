@@ -33,6 +33,18 @@ def test_an_edit_replaces_the_models_arguments():
     assert call["id"] == "call-1"
 
 
+def test_request_changes_without_new_arguments_is_not_run_and_reaches_the_model():
+    """The card's "Request changes" sends words, not an edited_action: read as one it
+    raised KeyError and ended the turn in "An unexpected error occurred"."""
+    decision = {"type": "edit", "message": "use b@example.com instead"}
+
+    _, message = ConditionalHumanInTheLoopMiddleware._process_decision(decision, _CALL, _CONFIG)
+
+    assert message is not None and message.status == "error"
+    assert "NOT executed" in message.content
+    assert "use b@example.com instead" in message.content
+
+
 def test_a_reject_reason_reaches_the_model_verbatim():
     """langchain >= 1.3.18 wraps a reason as "... with reason: <msg>"; our reasons are
     pre-framed and the refused-this-turn check matches on their lead."""

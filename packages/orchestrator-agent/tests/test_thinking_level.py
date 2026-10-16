@@ -147,3 +147,15 @@ def test_a_gpt6_alias_with_tools_stays_on_chat_completions():
     model = create_model("gpt-6-sol")
 
     assert model._use_responses_api({"tools": [{"type": "function", "function": {"name": "x"}}]}) is False
+
+
+@patch.dict(os.environ, _GW_ENV)
+def test_a_gateway_alias_carries_no_built_in_context_window():
+    """langchain-openai's profile for ``gpt-6-sol`` (1.05M) would make deepagents compact
+    at ~890k tokens instead of the 170k every other alias uses."""
+    from deepagents.middleware.summarization import compute_summarization_defaults
+
+    model = create_model("gpt-6-sol")
+
+    assert "max_input_tokens" not in (model.profile or {})
+    assert compute_summarization_defaults(model)["trigger"] == ("tokens", 170000)
