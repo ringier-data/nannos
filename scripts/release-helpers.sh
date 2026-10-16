@@ -415,3 +415,30 @@ build_with_pane() {
   fi
   return $rc
 }
+
+# Network errors worth retrying: registry/proxy 5xx and rate limits, apt mirror
+# and DNS timeouts, dropped connections. Matched against the tail of the
+# output only, so an earlier recovered error does not mask a real failure.
+TRANSIENT_BUILD_ERRORS='Bad Gateway|Service Unavailable|Gateway Time-?out|Too Many Requests|toomanyrequests|timed out|i/o timeout|TLS handshake timeout|connection reset|connection refused|Failed to fetch|Temporary failure resolving|unexpected EOF'
+
+# Run a command, retrying with backoff when it fails on a transient network
+# error. Any other failure returns immediately. Gives up after 3 attempts and
+# returns the last exit code. Output is merged into stdout.
+# Usage: with_retries docker buildx build ...
+with_retries() {
+  local attempt rc=0 out rcf
+  out=$(mktemp) rcf=$(mktemp)
+  for attempt in 1 2 3; do
+    { "$@" && echo 0 > "$rcf" || echo $? > "$rcf"; } 2>&1 | tee "$out"
+    rc=$(<"$rcf")
+    if [[ $rc -eq 0 ]]; then break; fi
+    if ! tail -50 "$out" | grep -Eiq "$TRANSIENT_BUILD_ERRORS"; then break; fi
+    if [[ $attempt -lt 3 ]]; then
+      printf '\n\033[1;33m🔁 Attempt %d hit a network error (exit %d), retrying in %ds...\033[0m\n' \
+        "$attempt" "$rc" "$((attempt * 15))" >&2
+      sleep $((attempt * 15))
+    fi
+  done
+  rm -f "$out" "$rcf"
+  return "$rc"
+}

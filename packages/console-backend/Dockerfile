@@ -35,7 +35,8 @@ ARG API_PORT
 ENV API_PORT=${API_PORT}
 
 # Install postgresql-client (required by migrate.sh for psql)
-RUN apt-get update && apt-get install -y --no-install-recommends postgresql-client && rm -rf /var/lib/apt/lists/*
+RUN echo 'Acquire::Retries "5"; Acquire::http::Timeout "30";' > /etc/apt/apt.conf.d/80-retries && \
+    apt-get update && apt-get install -y --no-install-recommends postgresql-client && rm -rf /var/lib/apt/lists/*
 
 # Copy rambler binary for running migrations
 COPY --from=rambler-source /rambler /usr/local/bin/rambler
@@ -75,7 +76,8 @@ ARG WORKDIR
 # poppler-utils provides pdfinfo/pdftoppm for PDF thumbnail rendering via pdf2image.
 # LibreOffice (soffice) is NOT installed here — all PPTX conversion is
 # delegated to the soffice-worker pod running in its own cgroup.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN echo 'Acquire::Retries "5"; Acquire::http::Timeout "30";' > /etc/apt/apt.conf.d/80-retries && \
+    apt-get update && apt-get install -y --no-install-recommends \
     poppler-utils && rm -rf /var/lib/apt/lists/*
 
 WORKDIR ${WORKDIR}

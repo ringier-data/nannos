@@ -720,7 +720,7 @@ build-pkg pkg:
     T=$SECONDS
 
     build_with_pane "$PKG" "$LOGFILE" \
-      docker buildx build --platform "$PLATFORM" \
+      with_retries docker buildx build --platform "$PLATFORM" \
       "${BUILD_CTX_ARGS[@]}" \
       ${TARGET_ARGS[@]+"${TARGET_ARGS[@]}"} \
       -t "${IMAGE}:${TAG}" "${DIR}"
@@ -734,7 +734,7 @@ build-pkg pkg:
       trap 'printf "${RED}❌ Push failed.${RESET} Full log: ${DIM}%s${RESET}\n" "$LOGFILE"; tail -20 "$LOGFILE"; exit 1' ERR
 
       build_with_pane "$PKG" "$LOGFILE" \
-        docker buildx build --platform "$PLATFORM" \
+        with_retries docker buildx build --platform "$PLATFORM" \
         "${BUILD_CTX_ARGS[@]}" \
         ${TARGET_ARGS[@]+"${TARGET_ARGS[@]}"} \
         -t "${IMAGE}:${TAG}" --push "${DIR}"
