@@ -19,9 +19,9 @@ found nothing, and is persisted with a *real* schema hash — so it never
 self-corrects, and per-argument risk matching stays off for that tool
 permanently (see #199 / #201).
 
-Parametrized over ``ALL_MODELS`` rather than ``one_model_per_provider()``,
-because the behaviour diverges per *model* and not per provider: aliases sharing
-a provider disagree with each other, so collapsing to one per provider would
+Parametrized over ``ALL_MODELS`` rather than ``one_model_per_behaviour()``,
+because the scoring output diverges per *model*, not per harness behaviour:
+aliases the harness drives alike disagree with each other, so collapsing them would
 discard exactly the signal this exists for. One short structured call per model,
 which is cheap next to the orchestrator turns in this directory.
 

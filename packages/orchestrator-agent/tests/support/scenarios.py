@@ -72,6 +72,18 @@ class SubAgentSpec:
     The work is unfinished rather than wrong, and the orchestrator is supposed to
     relay the question rather than answer it itself."""
 
+    reply_padding: int = 0
+    """When set, ``reply`` is buried in the middle of about this many characters of
+    filler records. Large enough, the result is offloaded to ``/large_tool_results/``
+    and the model only sees a preview: the answer is reachable only by reading the
+    offloaded file (what deepagents' dropped filesystem prompt used to teach)."""
+
+    @property
+    def full_reply(self) -> str:
+        if not self.reply_padding:
+            return self.reply
+        return _padded(self.reply, self.reply_padding)
+
     @property
     def outcome_message(self) -> str | None:
         """The message a non-success terminal state carries, if any."""
@@ -101,6 +113,20 @@ class Expectations:
     tools_forbidden: list[str] = field(default_factory=list)
     task_state: str | None = None
     response_contains: list[str] = field(default_factory=list)
+    files_written_under: str | None = None
+    """A ``write_file``/``edit_file`` call this turn must target a path under this prefix."""
+
+
+def _padded(needle: str, size: int) -> str:
+    """``needle`` in the middle of ``size`` characters of plausible, distinct records."""
+    record = "ORDER-{n:05d} | customer C-{c:04d} | status shipped | total {t:,.2f} CHF\n"
+    half: list[str] = []
+    n = 0
+    while sum(map(len, half)) < size // 2:
+        half.append(record.format(n=n, c=(n * 37) % 9000, t=100 + (n * 7919) % 50000 / 3))
+        n += 1
+    tail = [record.format(n=n + i, c=((n + i) * 37) % 9000, t=100 + ((n + i) * 7919) % 50000 / 3) for i in range(len(half))]
+    return "".join(half) + needle.rstrip("\n") + "\n" + "".join(tail)
 
 
 @dataclass(frozen=True)
@@ -118,7 +144,7 @@ class Scenario:
             MockSubAgent(
                 s.name,
                 s.description,
-                reply=s.reply,
+                reply=s.full_reply,
                 input_modes=list(s.input_modes),
                 error=s.fails,
                 input_required=s.needs_input,
@@ -190,6 +216,7 @@ def _load_one(filename: str, seen: dict[str, str]) -> list[Scenario]:
                         input_modes=tuple(s.get("input_modes") or ("text",)),
                         fails=s.get("fails"),
                         needs_input=s.get("needs_input"),
+                        reply_padding=int(s.get("reply_padding") or 0),
                     )
                     for s in (entry.get("subagents") or [])
                 ],
@@ -210,6 +237,7 @@ def _load_one(filename: str, seen: dict[str, str]) -> list[Scenario]:
                     tools_forbidden=list(tools_cfg.get("forbidden") or []),
                     task_state=expect.get("task_state"),
                     response_contains=list(expect.get("response_contains") or []),
+                    files_written_under=expect.get("files_written_under"),
                 ),
             )
         )
@@ -282,6 +310,28 @@ def assert_scenario(scenario: Scenario, state: Any, agents: list[MockSubAgent]) 
         text = final_text(state).lower()
         for needle in expect.response_contains:
             assert needle.lower() in text, f"[{scenario.id}] response missing {needle!r}; got: {text[:300]}"
+
+    if expect.files_written_under:
+        paths = written_paths(state)
+        assert any(p.startswith(expect.files_written_under) for p in paths), (
+            f"[{scenario.id}] expected a file written under {expect.files_written_under!r}, got {paths}"
+        )
+
+
+def written_paths(state: Any) -> list[str]:
+    """``file_path`` of every ``write_file``/``edit_file`` call this turn."""
+    from langchain_core.messages import AIMessage
+
+    from app.handlers import current_turn_messages
+
+    messages = (state or {}).get("messages") or [] if isinstance(state, dict) else []
+    return [
+        str((call.get("args") or {}).get("file_path") or "")
+        for msg in current_turn_messages(messages)
+        if isinstance(msg, AIMessage)
+        for call in msg.tool_calls or []
+        if call.get("name") in {"write_file", "edit_file"}
+    ]
 
 
 def _assert_outcomes_propagated(scenario: Scenario, state: Any) -> None:

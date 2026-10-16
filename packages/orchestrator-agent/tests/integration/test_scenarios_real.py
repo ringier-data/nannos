@@ -30,7 +30,7 @@ from tests.support.scenarios import (
     load_scenarios,
 )
 
-from .conftest import one_model_per_provider
+from .conftest import one_model_per_behaviour
 
 SCENARIOS = load_scenarios("core_routing.yaml", "failure_propagation.yaml")
 
@@ -91,7 +91,7 @@ def _summarize_messages(values: dict) -> str:
 
 
 @pytest.mark.langsmith
-@pytest.mark.parametrize("model_type", one_model_per_provider())
+@pytest.mark.parametrize("model_type", one_model_per_behaviour())
 @pytest.mark.parametrize("scenario", SCENARIOS, ids=[s.id for s in SCENARIOS])
 async def test_scenario_against_real_model(
     scenario,

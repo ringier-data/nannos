@@ -21,7 +21,7 @@ from app.models.responses import AgentStreamResponse
 from .conftest import (
     ALL_MODELS,
     THINKING_MODELS,
-    one_model_per_provider,
+    one_model_per_behaviour,
 )
 
 logger = logging.getLogger(__name__)
@@ -153,7 +153,7 @@ async def test_thinking_model_streaming(
 @pytest.mark.langsmith
 @pytest.mark.parametrize(
     "model_type",
-    one_model_per_provider(),
+    one_model_per_behaviour(),
 )
 async def test_static_tools_available(
     model_type: ModelType,
@@ -193,7 +193,7 @@ async def test_static_tools_available(
 @pytest.mark.langsmith
 @pytest.mark.parametrize(
     "model_type",
-    one_model_per_provider(),
+    one_model_per_behaviour(),
 )
 async def test_multiturn_context_preservation(
     model_type: ModelType,

@@ -29,7 +29,7 @@ from app.models.responses import AgentStreamResponse
 
 from .conftest import (
     ALL_MODELS,
-    one_model_per_provider,
+    one_model_per_behaviour,
 )
 
 logger = logging.getLogger(__name__)
@@ -231,7 +231,7 @@ async def test_simple_prompt_event_sequence(
 @pytest.mark.langsmith
 @pytest.mark.parametrize(
     "model_type",
-    one_model_per_provider(),
+    one_model_per_behaviour(),
 )
 async def test_time_tool_invocation_events(
     model_type: ModelType,
@@ -289,7 +289,7 @@ async def test_time_tool_invocation_events(
 @pytest.mark.langsmith
 @pytest.mark.parametrize(
     "model_type",
-    one_model_per_provider(),
+    one_model_per_behaviour(),
 )
 async def test_event_ids_consistent(
     model_type: ModelType,
