@@ -1,0 +1,75 @@
+# Behaviours deepagents' own prompt prose used to teach (removed in deepagents 0.7:
+# BASE_AGENT_PROMPT, the task-tool usage prose, the filesystem / large-result guidance).
+#
+# Real tier only (tests/integration/test_prompt_guidance_real.py), run several times
+# per model on main (deepagents 0.6.x, prose present) and on the bump branch (prose
+# gone) to compare pass ratios. Each scenario isolates one behaviour; keep the
+# expectations to outcomes, not wording.
+
+- id: answer_buried_in_a_large_result
+  description: >-
+    A sub-agent result too large for the context is offloaded to /large_tool_results/;
+    the model sees a preview only and must read the offloaded file to find the answer.
+  input:
+    query: "Ask the order ledger for this month's orders and tell me the exact total of order ORDER-77341."
+  subagents:
+    - name: order-ledger
+      description: "Returns the full order ledger for a period, one line per order. Use for anything about orders and their totals."
+      reply: "ORDER-77341 | customer C-0420 | status shipped | total 91,250.40 CHF"
+      reply_padding: 120000
+  expect:
+    delegations:
+      required: [order-ledger]
+    response_contains: ["91,250.40"]
+
+- id: remember_a_preference
+  description: >-
+    "Remember this for later" should be written to long-term memory (/memories/),
+    not just acknowledged.
+  input:
+    query: "Please remember for all future conversations: my weekly reports should be a one-page PDF with the executive summary first."
+  subagents:
+    - name: slack-notifier
+      description: "Sends messages to Slack channels and users. Use for anything involving Slack."
+      reply: "Message delivered."
+  expect:
+    delegations:
+      forbidden: [slack-notifier]
+    files_written_under: "/memories/"
+
+- id: hand_the_subagent_full_context
+  description: >-
+    Sub-agents are stateless: the instruction must carry the identifiers from the
+    user's message, not "the customer" or "them".
+  input:
+    query: "Our customer is ACME AG, customer number C-7731. Ask the CRM agent which of their invoices are still open."
+  subagents:
+    - name: crm-agent
+      description: "Answers questions about customers, contacts, invoices and deals in the CRM."
+      reply: "Open invoices for C-7731: INV-2210 (4,100 CHF), INV-2234 (980 CHF)."
+  expect:
+    delegations:
+      required: [crm-agent]
+    instructions:
+      crm-agent: ["C-7731"]
+    response_contains: ["INV-2210"]
+
+- id: plan_a_multi_step_request
+  description: A request with three dependent steps should be tracked as a todo list and done in order.
+  input:
+    query: "Do three things for me: first get our Q3 revenue from the analyst, then send that number to @john.doe on Slack, and finally tell me when both are done."
+  subagents:
+    - name: revenue-analyst
+      description: "Runs data queries and analytical jobs. Use for fetching or computing data."
+      reply: "Q3 revenue: 12.4M CHF."
+    - name: slack-notifier
+      description: "Sends messages to Slack channels and users. Use for anything involving Slack."
+      reply: "Message delivered to @john.doe."
+  expect:
+    delegations:
+      required: [revenue-analyst, slack-notifier]
+      ordered: true
+    instructions:
+      slack-notifier: ["12.4"]
+    tools:
+      required: [write_todos]

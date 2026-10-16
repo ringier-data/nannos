@@ -26,8 +26,9 @@ build_sub_agent_graph
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 import contextvars
+import dataclasses
 import difflib
 import logging
 import os
@@ -48,17 +49,17 @@ if TYPE_CHECKING:
 from deepagents.backends.composite import CompositeBackend
 from deepagents.backends.protocol import BackendProtocol
 from deepagents.backends.state import StateBackend
-from deepagents.middleware import FilesystemMiddleware, SummarizationMiddleware
+from deepagents.middleware import FilesystemMiddleware, SummarizationMiddleware, UnsupportedContentMiddleware
 from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
 from deepagents.middleware.summarization import compute_summarization_defaults
 from langchain.agents import create_agent
-from langchain.agents.middleware import AgentMiddleware, ToolRetryMiddleware
+from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import PrivateStateAttr
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import ToolMessage
 from langchain_quickjs import CodeInterpreterMiddleware
 from langchain_quickjs._prompt import to_camel_case
-from langchain_quickjs.middleware import REPLState, _resolve_thread_id
+from langchain_quickjs.middleware import REPLState
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.config import get_config
 from langgraph.graph.state import CompiledStateGraph
@@ -84,6 +85,8 @@ from agent_common.core.ptc_discovery import (
 from agent_common.core.ptc_signatures import render_tools_namespace
 from agent_common.middleware.continue_on_truncation import ContinueOnTruncationMiddleware
 from agent_common.middleware.premature_final_response import PrematureFinalResponseMiddleware
+from agent_common.middleware.turn_scoped_response import TurnScopedResponseMiddleware
+from agent_common.middleware.tool_retry import FailureHandlingToolRetryMiddleware
 from agent_common.middleware.conversation_context_tools_middleware import (
     ContextGatedTool,
     ConversationContextToolsMiddleware,
@@ -262,6 +265,7 @@ def _should_retry_tool_error(exc: Exception) -> bool:
     Only retries errors that may succeed on a subsequent attempt:
     - HTTP 5xx server errors (temporary server issues)
     - Network errors: connection failures, timeouts
+    - SandboxNotReadyError: the sandbox is still starting
 
     Does NOT retry (non-transient / deterministic):
     - GraphBubbleUp (LangGraph interrupt mechanism — must propagate)
@@ -284,7 +288,10 @@ def _should_retry_tool_error(exc: Exception) -> bool:
         # Network-level errors (ConnectError, TimeoutException, etc.) are transient
         return True
 
-    return False
+    # A sandbox still starting (ReadySandboxWrapper); with backoff it is ready within ~30s.
+    from agent_common.core.sandbox_ready_wrapper import SandboxNotReadyError
+
+    return isinstance(exc, SandboxNotReadyError)
 
 
 # Read-only filesystem tools: safe to expose via PTC ``eval``. They can never
@@ -295,6 +302,12 @@ _PTC_READONLY_FS_TOOLS: frozenset[str] = frozenset({"ls", "read_file", "glob", "
 # per-call risk guard (inside the PTC wrapper) re-applies the user's HITL/bypass
 # rules at call time, so they are exposed (and hidden from the model) like every
 # other PTC-exposed tool.
+#
+# ``delete`` (deepagents >= 0.7) is deliberately NOT part of this baseline: the
+# risk scorer's destructive-name floor (``_destructive_floor``) gates it for HITL
+# approval on every call, and ``interrupt()`` cannot be raised from inside the
+# ``eval`` bridge (see ``_PTC_EXCLUDED_TOOL_NAMES``), so it must stay natively
+# bound where the interrupt path works.
 _PTC_MUTATING_FS_TOOLS: frozenset[str] = frozenset({"write_file", "edit_file"})
 
 # Sandbox tools exposed via PTC *only when the backend supports execution*
@@ -584,6 +597,39 @@ def _is_top_level_return_parse_error(result: Any) -> bool:
     if not isinstance(content, str):
         return False
     return 'type="SyntaxError"' in content and _TOP_LEVEL_RETURN_ERROR_MARKER in content
+
+
+_QUICKJS_SLOT_KEY = "_quickjs_slot_id"
+
+
+def _quickjs_slot_of(state: Any) -> str | None:
+    """The private QuickJS REPL slot id langchain-quickjs keeps in graph state, or None."""
+    slot_id = state.get(_QUICKJS_SLOT_KEY) if isinstance(state, Mapping) else getattr(state, _QUICKJS_SLOT_KEY, None)
+    return slot_id if isinstance(slot_id, str) and slot_id else None
+
+
+def _with_quickjs_slot(request: Any) -> Any:
+    """Give an ``eval`` tool request a slot id when its state has none.
+
+    langchain-quickjs >= 0.3.7 writes the slot id in ``before_agent`` and its ``eval``
+    tool raises without one. A thread interrupted mid-``eval`` by an older version
+    resumes straight into the tool node, so ``before_agent`` never ran for it. In
+    ``mode="call"`` every ``eval`` gets a fresh REPL anyway, so any new id is
+    equivalent; it is injected into both the request state and the tool runtime (the
+    tool reads ``runtime.state``) and is not persisted.
+    """
+    state = getattr(request, "state", None)
+    if _quickjs_slot_of(state) is not None or not isinstance(state, Mapping):
+        return request
+    from langchain_quickjs.middleware import _new_slot_id
+
+    patched = {**state, _QUICKJS_SLOT_KEY: _new_slot_id()}
+    runtime = getattr(request, "runtime", None)
+    overrides: dict[str, Any] = {"state": patched}
+    if runtime is not None and dataclasses.is_dataclass(runtime):
+        overrides["runtime"] = dataclasses.replace(runtime, state=patched)
+    logger.info("[PTC] eval resumed without a QuickJS slot id (pre-0.3.7 thread); using a fresh one")
+    return request.override(**overrides)
 
 
 class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
@@ -988,10 +1034,13 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
             # the ``tools.*`` namespace.
             return self._base_prompt(ptc_attached=False) + _TOP_LEVEL_RETURN_RULE
         exposed = [t for t in self._ptc if isinstance(t, BaseTool) and t.name != self._tool_name]
-        thread_id = _resolve_thread_id(self._fallback_thread_id)
-        repl = self._registry.get(thread_id)
-        repl.install_tools(exposed)
-        self._ptc_tools_by_thread[thread_id] = tuple(exposed)
+        # langchain-quickjs >= 0.3.7 keys REPLs by a private per-state slot id (written by
+        # its ``before_agent``), not by thread id. In ``mode="call"`` each ``eval`` installs
+        # ``_ptc_tools_by_slot[slot]`` on a fresh REPL, so the cache below is what counts.
+        slot_id = _quickjs_slot_of(getattr(request, "state", None))
+        if slot_id is not None:
+            self._registry.get(slot_id).install_tools(exposed)
+            self._ptc_tools_by_slot[slot_id] = tuple(exposed)
         render_set, discovery_note = self._render_partition(exposed)
         # Cache the rendered body by the set of *rendered* names (+ a discovery marker).
         # In core-only mode this set is user-invariant and stable across turns, so the
@@ -1152,7 +1201,7 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
             raise TypeError(msg)
         return Command(update=merged, goto=result.goto, graph=result.graph, resume=result.resume)
 
-    async def _run_eval_with_guidance(self, request: Any, handler: Any, thread_id: Any) -> Any:
+    async def _run_eval_with_guidance(self, request: Any, handler: Any) -> Any:
         """Run ``eval`` with the top-level-``return`` retry, then annotate a ``not a function``.
 
         A ``TypeError: not a function`` on ``tools.<x>`` almost always means the model used
@@ -1165,7 +1214,7 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         code = ((getattr(request, "tool_call", None) or {}).get("args") or {}).get("code")
         if not isinstance(code, str):
             return result
-        exposed = self._ptc_tools_by_thread.get(thread_id) or ()
+        exposed = self._ptc_tools_for(request)
         hint = _not_a_function_hint(code, (t.name for t in exposed if isinstance(t, BaseTool)))
         if not hint:
             return result
@@ -1223,6 +1272,7 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         tool_call = getattr(request, "tool_call", None) or {}
         if tool_call.get("name") != self._tool_name:
             return await handler(request)
+        request = _with_quickjs_slot(request)
         runtime = getattr(request, "runtime", None)
         thread_id = resolve_ptc_thread_id(runtime)
         # Serialize ``eval`` per thread. Two paths reach one ``thread_id`` at once: a
@@ -1275,25 +1325,30 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
             # turn came back with "tools.X is not a function" and the agent duly
             # reported that its tools do not exist. The rebuild has nothing to do with
             # HITL, so it does not belong on the HITL path.
-            self._ensure_ptc_namespace(request, thread_id)
+            self._ensure_ptc_namespace(request)
             try:
                 if not self._ptc_enabled or self._ptc_risk_scorer is None:
-                    result = await self._run_eval_with_guidance(request, handler, thread_id)
+                    result = await self._run_eval_with_guidance(request, handler)
                     return self._with_tool_call_history(result, turn)
                 return await self._run_guarded_eval(request, handler, thread_id, turn)
             finally:
                 end_ptc_turn(thread_id)
 
-    def _ensure_ptc_namespace(self, request: Any, thread_id: Any) -> None:
+    def _ptc_tools_for(self, request: Any) -> tuple:
+        """The ``tools.*`` installed in this request's REPL slot (empty when none)."""
+        return self._ptc_tools_by_slot.get(_quickjs_slot_of(getattr(request, "state", None)) or "") or ()
+
+    def _ensure_ptc_namespace(self, request: Any) -> None:
         """Make sure this thread's ``tools.*`` bridges exist before ``eval`` runs.
 
         Idempotent: on the normal path the model-call hook has already filled the
         cache and this is a dict lookup.
         """
-        if not self._ptc_enabled or self._ptc_tools_by_thread.get(thread_id):
+        slot_id = _quickjs_slot_of(getattr(request, "state", None))
+        if not self._ptc_enabled or slot_id is None or self._ptc_tools_by_slot.get(slot_id):
             return
         rebuilt = tuple(self._collect_ptc_tools(request))
-        self._ptc_tools_by_thread[thread_id] = rebuilt
+        self._ptc_tools_by_slot[slot_id] = rebuilt
         logger.info(
             "[PTC] rebuilt the eval namespace for a replayed tool node: %d tools", len(rebuilt)
         )
@@ -1316,7 +1371,7 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
             # actually let through are announced below, once their decisions are known.
             replay = ask_round > 0 or resume_will_return()
             with tool_status_suppressed(replay):
-                result = await self._run_eval_with_guidance(request, handler, thread_id)
+                result = await self._run_eval_with_guidance(request, handler)
             pending = take_ptc_pending(thread_id)
             if not pending:
                 return self._with_tool_call_history(result, turn)
@@ -1333,7 +1388,7 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
             # Best-effort: on failure the client shows raw args.
             from agent_common.core.tool_call_summarizer import attach_summaries
 
-            ptc_tools = self._ptc_tools_by_thread.get(thread_id) or ()
+            ptc_tools = self._ptc_tools_for(request)
             descriptions = {t.name: t.description or "" for t in ptc_tools}
             await attach_summaries(
                 hitl_request["action_requests"],
@@ -1705,7 +1760,7 @@ class _FilesystemMiddlewareWithDocstoreHint(FilesystemMiddleware):
         self,
         message: ToolMessage,
         resolved_backend: BackendProtocol,
-    ) -> tuple[ToolMessage, dict | None]:
+    ) -> tuple[ToolMessage, bool]:
         processed_message, files_update = super()._process_large_message(message, resolved_backend)
         # Only append when eviction actually happened (a new ToolMessage was created)
         if processed_message is not message:
@@ -1725,7 +1780,7 @@ class _FilesystemMiddlewareWithDocstoreHint(FilesystemMiddleware):
         self,
         message: ToolMessage,
         resolved_backend: BackendProtocol,
-    ) -> tuple[ToolMessage, dict | None]:
+    ) -> tuple[ToolMessage, bool]:
         processed_message, files_update = await super()._aprocess_large_message(message, resolved_backend)
         if processed_message is not message:
             processed_message = ToolMessage(
@@ -1854,6 +1909,7 @@ def build_common_middleware_stack(
         GatewayAttributionMiddleware(),
         ContinueOnTruncationMiddleware(),
         PrematureFinalResponseMiddleware(),
+        TurnScopedResponseMiddleware(),
     ]
     # One loop-detection policy for the stack. It sits near the end of the stack
     # (below) and is also handed to the code interpreter so the PTC guard applies
@@ -1930,7 +1986,7 @@ def build_common_middleware_stack(
         ]
         middleware += [
             PatchToolCallsMiddleware(),
-            ToolRetryMiddleware(
+            FailureHandlingToolRetryMiddleware(
                 max_retries=5,
                 backoff_factor=2.0,
                 retry_on=_should_retry_tool_error,
@@ -1975,6 +2031,11 @@ def build_common_middleware_stack(
     middleware += [
         loop_detection,
         ToolSchemaCleaningMiddleware(),
+        # Innermost, as ``create_deep_agent`` places it. deepagents >= 0.7.19 moved the
+        # unsupported-media scrub (e.g. an inline .docx read from /attachments/ that the
+        # model cannot take) out of FilesystemMiddleware into this middleware, which only
+        # ``create_deep_agent`` adds by itself — this stack goes through ``create_agent``.
+        UnsupportedContentMiddleware(),
     ]
     return middleware
 

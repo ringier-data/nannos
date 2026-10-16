@@ -21,26 +21,26 @@ dependencies = [
 
 [project.optional-dependencies]
 langgraph = [
-    "langchain>=0.3.18",
+    "langchain>=1.4.5",
     "langchain-aws>=1.4.3",
     "langgraph>=1.1.0",
     "langgraph-checkpoint-aws>=0.1.4",
     "langchain-mcp-adapters>=0.0.6",
-    "deepagents[quickjs]>=0.6.0,<0.7.0",
-    "langchain-quickjs>=0.3.2,<0.4",  # wasm line (>=0.2); pre-wasm engine could SIGABRT the pod on a GC fault
+    "deepagents[quickjs]>=0.7.25,<0.8.0",
+    "langchain-quickjs>=0.3.8,<0.4",  # wasm line; pre-wasm engine could SIGABRT the pod. >=0.3.7 keys REPLs by `_quickjs_slot_id`
     "boto3>=1.35.0",
     "langgraph-checkpoint-postgres>=3.1.0",
     "psycopg[binary]>=3.1.0",
     "psycopg-pool>=3.1.0",
 ]
 langgraph-google = [
-    "langchain>=0.3.18",
+    "langchain>=1.4.5",
     "langchain-google-genai>=0.1.0",
     "langgraph>=1.1.0",
     "langgraph-checkpoint-aws>=0.1.4",
     "langchain-mcp-adapters>=0.0.6",
-    "deepagents[quickjs]>=0.6.0,<0.7.0",
-    "langchain-quickjs>=0.3.2,<0.4",  # wasm line (>=0.2); pre-wasm engine could SIGABRT the pod on a GC fault
+    "deepagents[quickjs]>=0.7.25,<0.8.0",
+    "langchain-quickjs>=0.3.8,<0.4",  # wasm line; pre-wasm engine could SIGABRT the pod. >=0.3.7 keys REPLs by `_quickjs_slot_id`
     "boto3>=1.35.0",
 ]
 google-embeddings = [
@@ -58,13 +58,13 @@ dev = [
     # In-memory span exporter, to assert on recorded spans.
     "opentelemetry-sdk>=1.27.0",
     # Include langgraph dependencies for comprehensive testing
-    "langchain>=0.3.18",
+    "langchain>=1.4.5",
     "langchain-aws>=1.4.3",
     "langgraph>=1.1.0",
     "langgraph-checkpoint-aws>=0.1.4",
     "langchain-mcp-adapters>=0.0.6",
-    "deepagents[quickjs]>=0.6.0,<0.7.0",
-    "langchain-quickjs>=0.3.2,<0.4",  # wasm line (>=0.2); pre-wasm engine could SIGABRT the pod on a GC fault
+    "deepagents[quickjs]>=0.7.25,<0.8.0",
+    "langchain-quickjs>=0.3.8,<0.4",  # wasm line; pre-wasm engine could SIGABRT the pod. >=0.3.7 keys REPLs by `_quickjs_slot_id`
     "boto3>=1.35.0",
 ]
 

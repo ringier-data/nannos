@@ -43,6 +43,7 @@ from agent_common.middleware.ptc_guard import PTC_CODE_INTERPRETER_TOOL_NAME
 from agent_common.middleware.tool_status import RISK_ASSESSMENT_STATUS_TOOL, TOOL_STATUS_EVENT
 from agent_common.models.base import DEFAULT_THINKING_LEVEL, ModelType, ThinkingLevel
 from langchain.messages import HumanMessage
+from langchain_core.exceptions import ContextOverflowError
 from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
 from langgraph.errors import GraphRecursionError
 from langgraph.graph.state import CompiledStateGraph
@@ -1483,6 +1484,20 @@ class OrchestratorDeepAgent:
                 "I've made some progress, but the task requires more steps than I can complete in one go. "
                 "Would you like me to continue from where I left off, or would you prefer to break this down into smaller tasks?",
                 interrupt_reason="recursion_limit",
+            )
+
+        except ContextOverflowError as e:
+            # deepagents' summarization already compacted the history and retried once, and
+            # the request still does not fit the model: retrying the same conversation cannot
+            # succeed, so do not tell the user to "try again".
+            logger.error("Conversation exceeds the model's context window after compaction: %s", e)
+            yield AgentStreamResponse(
+                state=TaskState.TASK_STATE_FAILED,
+                content=(
+                    "This conversation has grown too long for the model to handle, even after I "
+                    "condensed the earlier parts. Please start a new conversation — you can paste "
+                    "in anything from this one that I should keep in mind."
+                ),
             )
 
         except Exception as e:

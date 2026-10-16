@@ -22,7 +22,7 @@ from app.models.responses import AgentStreamResponse
 from .conftest import (
     ALL_MODELS,
     models_sharing_a_provider,
-    one_model_per_provider,
+    one_model_per_behaviour,
 )
 
 logger = logging.getLogger(__name__)
@@ -55,7 +55,7 @@ async def collect_stream(agent, prompt: str, user_config: UserConfig, config: di
 @pytest.mark.langsmith
 @pytest.mark.parametrize(
     "model_type",
-    one_model_per_provider(),
+    one_model_per_behaviour(),
 )
 async def test_static_tools_bound_to_graph(
     model_type: ModelType,
@@ -92,7 +92,7 @@ async def test_static_tools_bound_to_graph(
 @pytest.mark.langsmith
 @pytest.mark.parametrize(
     "model_type",
-    one_model_per_provider()[:1],  # one model to keep it fast
+    one_model_per_behaviour()[:1],  # one model to keep it fast
 )
 async def test_concurrent_streams_isolated(
     model_type: ModelType,
@@ -163,7 +163,7 @@ async def test_concurrent_streams_isolated(
 @pytest.mark.langsmith
 @pytest.mark.parametrize(
     "model_type",
-    one_model_per_provider(),
+    one_model_per_behaviour(),
 )
 async def test_long_response_streams_incrementally(
     model_type: ModelType,
@@ -246,7 +246,7 @@ async def test_short_prompt_completes(
 @pytest.mark.langsmith
 @pytest.mark.parametrize(
     "model_type",
-    one_model_per_provider(),
+    one_model_per_behaviour(),
 )
 async def test_streaming_chunks_are_word_aligned(
     model_type: ModelType,

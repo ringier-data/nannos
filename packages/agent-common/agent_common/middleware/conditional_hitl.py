@@ -133,21 +133,16 @@ def _client_action_tool_message(decision: dict[str, Any], tool_call: ToolCall) -
 def _answered(last_ai_msg: AIMessage, tool_messages: list[ToolMessage], *, end: bool = False) -> dict[str, Any]:
     """The state update for tool calls this middleware answered itself.
 
-    When every call of the turn has its ToolMessage here (an approved client_action
-    the browser already ran, a rejection, a corrective answer), nothing is left for
-    the tools node, and langchain's model→tools edge falls through to "a structured
-    response exists → end" — and on any turn after the first, the checkpoint still
-    holds the PREVIOUS turn's structured response. The run then ended without the
-    model ever reading the answers, and the stream replayed the stale reply. Jumping
-    back to the model explicitly is what the edge would do absent that stale state.
-
+    With every call answered here (an approved client_action the browser already ran, a
+    rejection, a corrective answer), langchain's model→tools edge goes back to the model
+    on its own: ``structured_response`` is per turn (``TurnScopedResponseMiddleware``).
     ``end`` ends the turn instead: the reply then says the call was not done
-    (``unanswered_turn_reply``), never the stale answer.
+    (``unanswered_turn_reply``).
     """
     update: dict[str, Any] = {"messages": [last_ai_msg, *tool_messages]}
     answered = {m.tool_call_id for m in tool_messages}
-    if tool_messages and all(call["id"] in answered for call in last_ai_msg.tool_calls):
-        update["jump_to"] = "end" if end else "model"
+    if end and tool_messages and all(call["id"] in answered for call in last_ai_msg.tool_calls):
+        update["jump_to"] = "end"
     return update
 
 
@@ -412,7 +407,90 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
 
     The ``aafter_model`` method is async-native and handles both modes.
     The sync ``after_model`` only handles static guards (no scoring).
+
+    **Why the hook is replaced, not wrapped.** LangChain's ``after_model`` is configured
+    per tool through ``interrupt_on`` (a ``when`` predicate, a ``description``, the
+    ``allowed_decisions``) and then calls ``interrupt()`` and reads ``["decisions"]``
+    itself. That cannot express what this middleware needs:
+
+    - deciding to ask is async (an LLM risk score per new tool), while ``when`` is sync;
+    - a third outcome besides "run" and "ask": answering a call without running it —
+      a call the user refused earlier this turn, an unresolvable tool name, a save held
+      back until its fill ran, a ``client_action`` the browser already executed. Through
+      ``when`` each of these would read "don't interrupt", and LangChain would RUN it;
+    - a resume that is not always ``{"decisions": [...]}``: typed words and
+      authorization answers, read by ``hitl_resume.decisions_from_resume`` (async);
+    - cards carrying ``_call_id``, ``_risk_metadata`` and generated summaries.
+
+    So both hooks are ours, and only the per-decision step is shared with LangChain, through
+    ``_process_decision`` (overridden below). The inherited ``wrap_tool_call`` is a no-op
+    here: it applies edits from ``hitl_edited_tool_calls``, a key only LangChain's own
+    ``after_model`` writes. ``tests/test_upstream_contract_pins.py`` pins the contract, so
+    a LangChain release that changes it fails there first.
     """
+
+    @staticmethod
+    def _process_decision(
+        decision: Any,
+        tool_call: ToolCall,
+        config: Any,
+    ) -> tuple[ToolCall | None, ToolMessage | None]:
+        """The decision contract this middleware is built on, pinned against upstream drift.
+
+        langchain >= 1.4 keeps the model's own call for an ``edit`` and substitutes the
+        reviewer's later from a ``hitl_edited_tool_calls`` state key that only its own
+        ``after_model`` writes. Our ``after_model``/``aafter_model`` replace that hook, so
+        with the inherited method an edit was silently dropped and the model's original
+        arguments ran. Here the edited call goes into the message, as before.
+
+        An ``edit`` without an ``edited_action`` is the card's "Request changes": the user's
+        words, no new arguments. The call is not run and the words reach the model, which
+        sends a revised call (asked again); LangChain reads ``edited_action`` and raises.
+
+        langchain >= 1.3.18 also wraps a reject reason as "User rejected the tool call for
+        ... with reason: <msg>". Our reasons are already addressed to the model
+        (``hitl_resume``'s ``CLICKED_REJECT_LEAD`` / ``TYPED_REFUSAL_LEAD``), and the
+        "refused this turn" check matches on those leads, so the reason is sent verbatim.
+        """
+        allowed = config["allowed_decisions"]
+        kind = decision.get("type")
+        if kind == "approve" and "approve" in allowed:
+            return tool_call, None
+        if kind == "edit" and "edit" in allowed:
+            edited = decision.get("edited_action")
+            if edited:
+                return ToolCall(type="tool_call", name=edited["name"], args=edited["args"], id=tool_call["id"]), None
+            # The card's "Request changes" sends the user's words, not new arguments: the
+            # call is not run, and the model revises it (the revised call is asked again).
+            # Read as an edited_action, it raised KeyError and ended the turn in an error.
+            said = (decision.get("message") or "").strip()
+            return tool_call, ToolMessage(
+                content=(
+                    "The user did not approve this call and asked for changes, so it was NOT executed."
+                    + (f' Their request: "{said}".' if said else "")
+                    + " Send a revised call that does what they asked, or ask them if it is unclear."
+                ),
+                name=tool_call["name"],
+                tool_call_id=tool_call["id"],
+                status="error",
+            )
+        if kind == "reject" and "reject" in allowed:
+            content = decision.get("message") or (
+                f"User rejected the tool call for `{tool_call['name']}` with id {tool_call['id']}. "
+                "The tool was not executed. Do not retry this tool call unless the user explicitly requests it."
+            )
+            return tool_call, ToolMessage(
+                content=content, name=tool_call["name"], tool_call_id=tool_call["id"], status="error"
+            )
+        if kind == "respond" and "respond" in allowed:
+            return tool_call, ToolMessage(
+                content=decision["message"], name=tool_call["name"], tool_call_id=tool_call["id"], status="success"
+            )
+        msg = (
+            f"Unexpected human decision: {decision}. Decision type {kind!r} is not allowed for tool "
+            f"{tool_call['name']!r}. Expected one of {allowed} based on the tool's configuration."
+        )
+        raise ValueError(msg)
 
     def __init__(
         self,
@@ -473,7 +551,7 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
 
         return bool(condition(tool_call.get("args", {})))
 
-    @hook_config(can_jump_to=["model"])
+    @hook_config(can_jump_to=["end"])
     def after_model(self, state: AgentState[Any], runtime: Runtime[ContextT]) -> dict[str, Any] | None:
         """Sync handler: only processes static interrupt_on guards.
 
@@ -593,7 +671,7 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         scores = asyncio.gather(*(score(p) for p in pending), return_exceptions=True)
         return await await_with_keepalive(scores, source="tool-risk-scoring", on_slow=_say_why)
 
-    @hook_config(can_jump_to=["model", "end"])
+    @hook_config(can_jump_to=["end"])
     async def aafter_model(self, state: AgentState[Any], runtime: Runtime[ContextT]) -> dict[str, Any] | None:
         """Async handler: combines static guards + dynamic risk scoring.
 

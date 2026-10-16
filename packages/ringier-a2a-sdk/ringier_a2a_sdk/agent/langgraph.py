@@ -18,6 +18,7 @@ from typing import Literal
 
 from a2a.types import Message, Task, TaskState
 from deepagents import create_deep_agent
+from langchain.agents.middleware import TodoListMiddleware
 from langchain.agents.middleware.types import AgentMiddleware
 from langchain.agents.structured_output import AutoStrategy
 from langchain_core.language_models import BaseChatModel
@@ -225,6 +226,9 @@ class LangGraphAgent(BaseAgent):
         """Return agent middleware with schema cleaning and steering support.
 
         Includes:
+        - TodoListMiddleware: write_todos tool + planning state (deepagents >= 0.7 no
+          longer includes it in create_deep_agent's defaults; the work-plan detection
+          in _process_stream_event relies on it)
         - ToolSchemaCleaningMiddleware: cleans MCP tool schemas before binding
         - SteeringMiddleware: injects pending user follow-up messages before each LLM call
 
@@ -232,10 +236,11 @@ class LangGraphAgent(BaseAgent):
         super()._get_middleware() and extend the list to preserve these.
 
         Returns:
-            List of middleware: [ToolSchemaCleaningMiddleware, SteeringMiddleware]
+            List of middleware: [TodoListMiddleware, ToolSchemaCleaningMiddleware, SteeringMiddleware]
         """
 
         return [
+            TodoListMiddleware(),
             ToolSchemaCleaningMiddleware(),
             SteeringMiddleware(get_pending_messages=self.get_pending_messages),
         ]

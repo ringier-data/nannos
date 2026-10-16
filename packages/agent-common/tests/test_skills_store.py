@@ -64,6 +64,26 @@ async def test_read_bundled_file(backend):
 
 
 @pytest.mark.asyncio
+async def test_a_windowed_read_reports_its_range_for_paging(backend):
+    """deepagents' read_file header shows "lines A-B of T | next offset N" from these
+    fields; a hand-sliced result left the model without a paging hint."""
+    result = await backend.aread("/skills/incident-triage/SKILL.md", offset=1, limit=2)
+
+    assert result.error is None
+    assert (result.start_line, result.end_line) == (2, 3)
+    assert result.total_lines > 3 and result.next_offset == 3
+
+
+@pytest.mark.asyncio
+async def test_a_degenerate_window_is_clamped(backend):
+    """A negative offset reads from line 1 (it used to return the file's last lines)."""
+    result = await backend.aread("/skills/incident-triage/SKILL.md", offset=-1, limit=1)
+
+    assert result.start_line == 1
+    assert result.file_data["content"].startswith("---")
+
+
+@pytest.mark.asyncio
 async def test_read_bundled_file_reference(backend):
     result = await backend.aread("/skills/incident-triage/references/runbook.md")
     assert result.error is None

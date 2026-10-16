@@ -20,15 +20,14 @@ RETURN_ERROR = (
 class _Request:
     """Minimal ToolCallRequest stand-in with the immutable ``override`` used by the middleware."""
 
-    def __init__(self, tool_call, runtime=None):
+    def __init__(self, tool_call, runtime=None, state=None):
         self.tool_call = tool_call
         self.runtime = runtime
         self.tools = []
-        self.state = {}
+        self.state = {} if state is None else state
 
     def override(self, **kw):
-        new = _Request(kw.get("tool_call", self.tool_call), self.runtime)
-        return new
+        return _Request(kw.get("tool_call", self.tool_call), kw.get("runtime", self.runtime), kw.get("state", self.state))
 
 
 def _base_tool(name: str) -> StructuredTool:
@@ -120,10 +119,10 @@ async def test_not_a_function_hint_with_discovery_attached(monkeypatch):
     """Core-only mode (tools.search exposed): snake_case → camelCase, synonyms → search, unknown → search."""
     mw = _mw()
     monkeypatch.setattr(gu, "resolve_ptc_thread_id", lambda runtime: "t1")
-    mw._ptc_tools_by_thread["t1"] = (_mcp_tool("github_get_me"), _mcp_tool("github_list_commits"), _mcp_tool("search"))
+    mw._ptc_tools_by_slot["s1"] = (_mcp_tool("github_get_me"), _mcp_tool("github_list_commits"), _mcp_tool("search"))
     handler = AsyncMock(return_value=_msg(NOT_A_FUNCTION))
     code = "const me = await tools.github_get_me({});\nawait tools.search_tools({query: 'x'});\nawait tools.githubListCommits({});\nawait tools.frobnicate({})"
-    req = _Request({"name": mw._tool_name, "args": {"code": code}, "id": "c1"})
+    req = _Request({"name": mw._tool_name, "args": {"code": code}, "id": "c1"}, state={"_quickjs_slot_id": "s1"})
 
     out = await mw.awrap_tool_call(req, handler)
 
@@ -141,10 +140,10 @@ async def test_not_a_function_hint_without_discovery_lists_callables_and_points_
     """Inline mode (the orchestrator): no tools.search — never suggest it; list what is callable."""
     mw = _mw()
     monkeypatch.setattr(gu, "resolve_ptc_thread_id", lambda runtime: "t1")
-    mw._ptc_tools_by_thread["t1"] = (_mcp_tool("read_file"), _mcp_tool("get_current_time"))
+    mw._ptc_tools_by_slot["s1"] = (_mcp_tool("read_file"), _mcp_tool("get_current_time"))
     handler = AsyncMock(return_value=_msg(NOT_A_FUNCTION))
     code = "await tools.console_grep_mcp_tools({ query: 'github' });\nawait tools.github_get_me({});\nawait tools.search_tools({})"
-    req = _Request({"name": mw._tool_name, "args": {"code": code}, "id": "c1"})
+    req = _Request({"name": mw._tool_name, "args": {"code": code}, "id": "c1"}, state={"_quickjs_slot_id": "s1"})
 
     out = await mw.awrap_tool_call(req, handler)
 

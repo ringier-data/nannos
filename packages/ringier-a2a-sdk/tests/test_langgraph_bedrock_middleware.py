@@ -4,6 +4,7 @@ import os
 from unittest.mock import MagicMock, patch
 
 import pytest
+from langchain.agents.middleware import TodoListMiddleware
 from langchain_aws.middleware.prompt_caching import BedrockPromptCachingMiddleware
 from langchain_core.messages import HumanMessage
 
@@ -40,11 +41,13 @@ class TestLangGraphBedrockAgentMiddleware:
         middleware = agent._get_middleware()
 
         # Verify that all middlewares are included in the correct order
-        # Order: Prompt caching first (outer), then schema cleaning, then steering (inner)
-        assert len(middleware) == 3
+        # Order: Prompt caching first (outer), then todo list (explicit since
+        # deepagents 0.7), then schema cleaning, then steering (inner)
+        assert len(middleware) == 4
         assert isinstance(middleware[0], BedrockPromptCachingMiddleware)
-        assert isinstance(middleware[1], ToolSchemaCleaningMiddleware)
-        assert isinstance(middleware[2], SteeringMiddleware)
+        assert isinstance(middleware[1], TodoListMiddleware)
+        assert isinstance(middleware[2], ToolSchemaCleaningMiddleware)
+        assert isinstance(middleware[3], SteeringMiddleware)
 
     @patch.dict(os.environ, {"AWS_BEDROCK_REGION": "us-east-1"})
     @patch("boto3.client")
@@ -79,12 +82,13 @@ class TestLangGraphBedrockAgentMiddleware:
         middleware = agent._get_middleware()
 
         # Verify that all middlewares are present in the correct order
-        # Prompt caching (outer) → Schema cleaning → Steering → Custom (innermost/added last)
-        assert len(middleware) == 4
+        # Prompt caching (outer) → TodoList → Schema cleaning → Steering → Custom (innermost/added last)
+        assert len(middleware) == 5
         assert isinstance(middleware[0], BedrockPromptCachingMiddleware)
-        assert isinstance(middleware[1], ToolSchemaCleaningMiddleware)
-        assert isinstance(middleware[2], SteeringMiddleware)
-        assert isinstance(middleware[3], CustomMiddleware)
+        assert isinstance(middleware[1], TodoListMiddleware)
+        assert isinstance(middleware[2], ToolSchemaCleaningMiddleware)
+        assert isinstance(middleware[3], SteeringMiddleware)
+        assert isinstance(middleware[4], CustomMiddleware)
 
     def test_middleware_filters_invalid_tools(self):
         """Test that ToolSchemaCleaningMiddleware filters out invalid tools."""

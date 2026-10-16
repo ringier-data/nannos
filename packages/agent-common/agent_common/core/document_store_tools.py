@@ -30,7 +30,7 @@ from object_storage import IObjectStorageService
 from ringier_a2a_sdk.cost_tracking import CostLogger
 
 from agent_common.backends.attachments_store import get_current_attachments_backend
-from agent_common.backends.indexing_store import IndexingStoreBackend, bounded_storage_key
+from agent_common.backends.indexing_store import IndexingStoreBackend
 
 
 class FilesystemState(dict):
@@ -353,13 +353,6 @@ async def _semantic_search_file_impl(
     config = get_config()
     metadata = config.get("metadata", {}) if config else {}
 
-    # Bound the path to the same key the backend stores under, so the direct
-    # store.aget below and the value["file_path"] == file_path filter further down
-    # both match what IndexingStoreBackend._index_content wrote. Without this, a
-    # raw Gemini __thought__ id reads/filters under the un-bounded path and finds
-    # nothing. Idempotent and prefix-preserving, so namespace routing is unaffected.
-    file_path = bounded_storage_key(file_path)
-
     namespaces = _resolve_namespaces_for_path(file_path, user_id, metadata)
     if namespaces is None:
         raise ToolException(f"Cannot scope '{file_path}' for semantic search: missing conversation/assistant context.")
@@ -389,7 +382,9 @@ async def _semantic_search_file_impl(
         return []
 
     # JIT index (idempotent via content-hash caching in _index_content)
-    backend = IndexingStoreBackend(store=store, model_name=model_name, cost_logger=cost_logger)
+    backend = IndexingStoreBackend(
+        store=store, model_name=model_name, cost_logger=cost_logger, namespace_factory=lambda _rt: filesystem_namespace
+    )
     await backend.aensure_indexed(file_path, content)
 
     # Search the chunk namespace, filtered to this specific file. Over-fetch so

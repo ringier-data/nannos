@@ -55,6 +55,33 @@ def _validate_path(path: str) -> str:
     return path
 
 
+#: Lines per ``aread`` call: enough for any file in one read.
+_WHOLE_FILE_LINES = 10**9
+
+
+class _CopyReadError(Exception):
+    """A source that cannot be copied, with a message for the model."""
+
+
+async def _read_whole_text(backend: BackendProtocol, path: str) -> str:
+    """The whole text of ``path``. ``aread`` returns a ``ReadResult`` (not a string) one window
+    of lines at a time; ask for all of it at once (a store-backed read fetches the whole
+    document per call) and follow ``next_offset`` should a backend still page."""
+    parts: list[str] = []
+    offset = 0
+    while True:
+        result = await backend.aread(path, offset=offset, limit=_WHOLE_FILE_LINES)
+        if result.error:
+            raise _CopyReadError(f"Could not read source file '{path}': {result.error}")
+        file_data = result.file_data or {}
+        if file_data.get("encoding", "utf-8") != "utf-8":
+            raise _CopyReadError(f"'{path}' is a binary file; only text files can be copied to memory.")
+        parts.append(file_data.get("content") or "")
+        if not result.next_offset:
+            return "".join(parts)
+        offset = result.next_offset
+
+
 def create_copy_file_tool(backend: BackendProtocol) -> BaseTool:
     """Create tool for copying files to long-term memory without LLM context loading.
 
@@ -118,7 +145,9 @@ def create_copy_file_tool(backend: BackendProtocol) -> BaseTool:
 
             # Read from source using backend (routes to correct backend via CompositeBackend)
             try:
-                source_content = await resolved_backend.aread(source_path)
+                source_content = await _read_whole_text(resolved_backend, source_path)
+            except _CopyReadError as e:
+                return f"Error: {e}"
             except Exception as e:
                 logger.error(f"Failed to read source file '{source_path}': {e}")
                 return f"Error: Could not read source file '{source_path}'. Make sure it exists and is accessible. Details: {str(e)}"

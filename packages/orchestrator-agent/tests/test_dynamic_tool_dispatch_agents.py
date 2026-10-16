@@ -115,22 +115,18 @@ class TestEnhanceSystemPromptAgents:
     def middleware(self):
         return DynamicToolDispatchMiddleware()
 
-    def test_replaces_general_purpose_with_all_agents(self, middleware):
-        original = _make_system_message_with_agents("- general-purpose: GP agent")
+    def test_appends_every_runtime_agent_once(self, middleware):
+        original = SystemMessage(content_blocks=[{"type": "text", "text": "Base prompt."}])
         ctx = _make_context(subagent_registry=SAMPLE_REGISTRY)
 
         result = middleware._enhance_system_prompt_agents(original, ctx)
 
-        # Find the block containing the agent marker (bug report guidance is appended after)
+        assert result.content_blocks[0] == {"type": "text", "text": "Base prompt."}
         marker = DynamicToolDispatchMiddleware._SYSTEM_PROMPT_AGENT_MARKER
-        agent_blocks = [b for b in result.content_blocks if isinstance(b, dict) and marker in b.get("text", "")]
-        assert len(agent_blocks) == 1
-        agent_text = agent_blocks[0]["text"]
-        assert '<agent name="general-purpose">' in agent_text
-        assert '<agent name="file-analyzer">' in agent_text
-        assert '<agent name="jira-agent">' in agent_text
-        # Should NOT have duplicate marker entries
-        assert agent_text.count(marker) == 1
+        combined = "".join(b["text"] for b in result.content_blocks if isinstance(b, dict))
+        assert combined.count(marker) == 1
+        for name in ("general-purpose", "file-analyzer", "jira-agent"):
+            assert f'<agent name="{name}">' in combined
 
     def test_returns_none_when_system_message_is_none(self, middleware):
         ctx = _make_context(subagent_registry=SAMPLE_REGISTRY)
@@ -141,34 +137,6 @@ class TestEnhanceSystemPromptAgents:
         ctx = _make_context(subagent_registry={})
         result = middleware._enhance_system_prompt_agents(original, ctx)
         assert result is original
-
-    def test_fallback_appends_when_marker_missing(self, middleware):
-        """When the marker is absent, should append as a new block."""
-        original = SystemMessage(
-            content_blocks=[
-                {"type": "text", "text": "No marker here — just a normal prompt."},
-            ]
-        )
-        ctx = _make_context(subagent_registry=SAMPLE_REGISTRY)
-
-        result = middleware._enhance_system_prompt_agents(original, ctx)
-
-        combined = "".join(b["text"] for b in result.content_blocks if isinstance(b, dict))
-        assert '<agent name="file-analyzer">' in combined
-        assert '<agent name="jira-agent">' in combined
-
-    def test_handles_multiple_agent_lines(self, middleware):
-        """Replace when the original already had multiple lines."""
-        original = _make_system_message_with_agents("- general-purpose: GP agent\n- old-agent: Old description")
-        ctx = _make_context(subagent_registry=SAMPLE_REGISTRY)
-
-        result = middleware._enhance_system_prompt_agents(original, ctx)
-        marker = DynamicToolDispatchMiddleware._SYSTEM_PROMPT_AGENT_MARKER
-        agent_blocks = [b for b in result.content_blocks if isinstance(b, dict) and marker in b.get("text", "")]
-        assert len(agent_blocks) == 1
-        agent_text = agent_blocks[0]["text"]
-        assert "old-agent" not in agent_text
-        assert '<agent name="jira-agent">' in agent_text
 
 
 # ===========================================================================

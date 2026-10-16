@@ -138,3 +138,35 @@ class TestThinkingLevelCaching:
             model2 = factory._get_or_create_model("claude-sonnet-4.5", ThinkingLevel.low)
             assert model1 is model2
             assert len(factory._models) == 1
+
+
+@patch.dict(os.environ, _GW_ENV)
+def test_a_gpt6_alias_with_tools_stays_on_chat_completions():
+    """langchain-openai sends ``gpt-6*`` models with tools to the Responses API by name.
+    Our names are gateway aliases, and every hook works on Chat Completions payloads."""
+    model = create_model("gpt-6-sol")
+
+    assert model._use_responses_api({"tools": [{"type": "function", "function": {"name": "x"}}]}) is False
+
+
+@patch.dict(os.environ, _GW_ENV)
+def test_a_gateway_alias_carries_no_built_in_context_window():
+    """langchain-openai's profile for ``gpt-6-sol`` (1.05M) would make deepagents compact
+    at ~890k tokens instead of the 170k every other alias uses."""
+    from deepagents.middleware.summarization import compute_summarization_defaults
+
+    model = create_model("gpt-6-sol")
+
+    assert "max_input_tokens" not in (model.profile or {})
+    assert compute_summarization_defaults(model)["trigger"] == ("tokens", 170000)
+
+
+@patch.dict(os.environ, _GW_ENV)
+def test_a_small_built_in_context_window_is_kept():
+    """Below the 170k default the window still matters: a 128k model compacts before it overflows."""
+    from deepagents.middleware.summarization import compute_summarization_defaults
+
+    model = create_model("gpt-4o")
+
+    assert (model.profile or {}).get("max_input_tokens") == 128000
+    assert compute_summarization_defaults(model)["trigger"] == ("fraction", 0.85)

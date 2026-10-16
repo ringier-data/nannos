@@ -27,6 +27,7 @@ from langgraph.types import Command
 from pydantic import BaseModel, Field
 
 from agent_common.middleware.conditional_hitl import ConditionalHumanInTheLoopMiddleware, _answered
+from agent_common.middleware.turn_scoped_response import TurnScopedResponseMiddleware
 
 
 class Answer(BaseModel):
@@ -132,7 +133,71 @@ async def test_every_turn_reads_its_own_answered_calls(decision):
     assert len(answered) == 1
 
 
-def test_answered_jumps_only_when_nothing_is_left_for_the_tools_node():
+def _build_plain_tool(model: _ScriptedModel, checkpointer, *, turn_scoped: bool):
+    """The same agent with ``Answer`` bound as a plain (return_direct) tool and no
+    ``response_format``: langchain never clears ``structured_response`` in this graph."""
+
+    def _client_action(kind: str, target_type: str, target_id: str) -> str:
+        return "ran"
+
+    def _answer(text: str) -> str:
+        return text
+
+    tools = [
+        StructuredTool.from_function(
+            func=_client_action, name="client_action", description="act", args_schema=_ClientActionArgs
+        ),
+        StructuredTool.from_function(
+            func=_answer, name="Answer", description="the reply", args_schema=Answer, return_direct=True
+        ),
+    ]
+    middleware = [ConditionalHumanInTheLoopMiddleware(interrupt_on={"client_action": True})]
+    if turn_scoped:
+        middleware.insert(0, TurnScopedResponseMiddleware())
+    return create_agent(model=model, tools=tools, middleware=middleware, checkpointer=checkpointer)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("turn_scoped", [True, False], ids=["turn_scoped", "control_without_it"])
+async def test_a_model_switch_does_not_end_the_turn_on_the_previous_answer(turn_scoped):
+    """Turn 1 answers through ToolStrategy, which leaves ``structured_response`` set; turn 2
+    runs on a plain-tool graph (another model, or thinking turned on) on the same thread.
+    Its answered calls must still reach the model."""
+    model = _ScriptedModel()
+    checkpointer = InMemorySaver()
+    config = {"configurable": {"thread_id": f"switch-{turn_scoped}"}}
+
+    strategy_graph = create_agent(
+        model=model,
+        tools=[
+            StructuredTool.from_function(
+                func=lambda kind, target_type, target_id: "ran",
+                name="client_action",
+                description="act",
+                args_schema=_ClientActionArgs,
+            )
+        ],
+        middleware=[ConditionalHumanInTheLoopMiddleware(interrupt_on={"client_action": True})],
+        response_format=ToolStrategy(Answer),
+        checkpointer=checkpointer,
+    )
+    first = await _turn(strategy_graph, model, config, 1, APPROVED_BY_BROWSER)
+    assert first["structured_response"].text == "turn 1 done"
+
+    plain_graph = _build_plain_tool(model, checkpointer, turn_scoped=turn_scoped)
+    calls_before = model.calls
+    second = await _turn(plain_graph, model, config, 2, APPROVED_BY_BROWSER)
+
+    reached_model = model.calls > calls_before + 1
+    if turn_scoped:
+        assert reached_model, "the answered call never reached the model"
+        assert second["messages"][-1].content == "turn 2 done"
+    else:
+        # Without the per-turn reset the previous turn's answer ends the run: the bug.
+        assert not reached_model
+
+
+def test_answered_ends_the_turn_only_when_asked_and_nothing_is_left():
     ai = AIMessage(
         content="",
         tool_calls=[
@@ -142,9 +207,9 @@ def test_answered_jumps_only_when_nothing_is_left_for_the_tools_node():
     )
     one = ToolMessage(content="x", tool_call_id="1")
     two = ToolMessage(content="y", tool_call_id="2")
-    assert "jump_to" not in _answered(ai, [one])
-    assert _answered(ai, [one, two])["jump_to"] == "model"
-    assert "jump_to" not in _answered(ai, [])
+    assert "jump_to" not in _answered(ai, [one, two])
+    assert "jump_to" not in _answered(ai, [one], end=True)
+    assert _answered(ai, [one, two], end=True)["jump_to"] == "end"
 
 
 _SAVE = {"kind": "invoke", "target_type": "S", "target_id": "1", "action": "save"}

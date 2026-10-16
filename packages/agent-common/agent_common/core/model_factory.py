@@ -444,7 +444,7 @@ def create_model(
     optional: dict = {}
     if max_tokens is not None:
         optional["max_tokens"] = max_tokens
-    return ChatOpenAI(
+    model = ChatOpenAI(
         base_url=_gateway_base_url(),
         api_key=_gateway_api_key(),
         model=model_type,
@@ -453,8 +453,28 @@ def create_model(
         callbacks=callbacks,
         http_async_client=build_attribution_http_client(),  # per-request attribution
         model_kwargs=model_kwargs,
+        # Always Chat Completions. langchain-openai routes some model names to the
+        # Responses API on its own (``gpt-6*`` with tools, ``gpt-5.6-sol``…), and our model
+        # names are gateway aliases: a ``gpt-6-sol`` alias would go to the gateway's
+        # ``/responses`` and bypass the chunk hook, thinking-block replay and cache_control
+        # restore, which all work on ``payload["messages"]``.
+        use_responses_api=False,
         **optional,
     )
+    # No large context window from langchain-openai's built-in profiles: they are keyed by
+    # model name, and ours are gateway aliases (``gpt-6-sol`` gets OpenAI's 1.05M; the Azure
+    # deployment takes 922k). deepagents sizes summarization from it (0.85 × window, keep
+    # 10%), so that alias alone would compact at ~890k tokens, not the fixed 170k the others
+    # use — each long-conversation call then costing ~5×. A window below that default is
+    # kept: it makes a small-context model (128k) compact before it overflows.
+    window = (model.profile or {}).get("max_input_tokens")
+    if isinstance(window, int) and window > _SUMMARIZATION_DEFAULT_TRIGGER_TOKENS:
+        model.profile = {k: v for k, v in model.profile.items() if k != "max_input_tokens"}
+    return model
+
+
+#: deepagents' summarization trigger for a model with no context window in its profile.
+_SUMMARIZATION_DEFAULT_TRIGGER_TOKENS = 170_000
 
 
 class EmbeddingModelNotConfigured(RuntimeError):

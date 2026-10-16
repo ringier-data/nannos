@@ -36,6 +36,7 @@ explicitly — ``-m integration`` or ``RUN_INTEGRATION_TESTS=1`` — and skips w
 no gateway is reachable, rather than failing mid-call.
 """
 
+import json
 import logging
 import os
 import uuid
@@ -117,6 +118,7 @@ from agent_common.core.model_factory import (
     _gateway_models,  # no public accessor for model_info; see _is_chat_model
     assert_gateway_configured,
     get_available_models,
+    get_model_capabilities,
     get_model_provider,
 )
 from agent_common.models.base import ModelType, ThinkingLevel
@@ -685,22 +687,35 @@ def models_sharing_a_provider() -> list[tuple[ModelType, ModelType]]:
     return [(models[0], models[1]) for models in by_provider.values() if len(models) >= 2]
 
 
-def one_model_per_provider() -> list[ModelType]:
-    """One model per backing provider — a cheap smoke set across the fleet.
+def _behaviour(model: ModelType) -> str:
+    """What decides how the harness drives a model: its provider plus its capability record.
 
-    Provider comes from the gateway's model_info rather than the alias string:
-    Vertex also hosts Claude and Llama, so name-matching would mis-group them.
-    Models whose provider cannot be resolved are grouped under "unknown" so they
-    are still covered exactly once instead of silently dropped.
+    Both come from the gateway's model_info rather than the alias string: Vertex also
+    hosts Claude and Llama, so name-matching would mis-group them. The record splits a
+    provider where the harness takes another path — a Claude 5.x on Bedrock rejects a
+    forced tool_choice and always thinks, so it gets the schema as a plain tool, unlike a
+    Claude 4.x on the same provider. Unresolvable parts read as "unknown"/empty, so such
+    a model is still covered once instead of silently dropped.
+    """
+    try:
+        provider = get_model_provider(model) or "unknown"
+        record = get_model_capabilities(model)
+    except Exception:
+        provider, record = "unknown", {}
+    return f"{provider}:{json.dumps(record, sort_keys=True, default=str)}"
+
+
+def one_model_per_behaviour() -> list[ModelType]:
+    """One model per distinct harness behaviour (see ``_behaviour``) — a cheap smoke set.
+
+    A second model the harness drives exactly like one already chosen adds cost, not
+    coverage; a model on a known provider with a different capability record is kept.
     """
     seen: set[str] = set()
     result: list[ModelType] = []
     for model in ALL_MODELS:
-        try:
-            provider = get_model_provider(model) or "unknown"
-        except Exception:
-            provider = "unknown"
-        if provider not in seen:
-            seen.add(provider)
+        behaviour = _behaviour(model)
+        if behaviour not in seen:
+            seen.add(behaviour)
             result.append(model)
     return result

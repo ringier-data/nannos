@@ -33,7 +33,7 @@ from deepagents.backends.protocol import (
     ReadResult,
     WriteResult,
 )
-from deepagents.backends.utils import _get_file_type, create_file_data
+from deepagents.backends.utils import _get_file_type, create_file_data, slice_read_response
 
 from agent_common.backends.skills_store import SkillsStoreBackend
 
@@ -130,9 +130,9 @@ class AttachmentsStoreBackend(BackendProtocol):
         except UnicodeDecodeError:
             return ReadResult(file_data=create_file_data(base64.b64encode(raw).decode("ascii"), encoding="base64"))
 
-        lines = text.splitlines(keepends=True)
-        sliced = lines[offset : offset + limit]
-        return ReadResult(file_data=create_file_data("".join(sliced), encoding="utf-8"))
+        # The shared slicer, as deepagents' own backends use: clamps degenerate windows and
+        # reports the line range and next offset that read_file's status header shows.
+        return slice_read_response(create_file_data(text, encoding="utf-8"), offset, limit)
 
     async def als(self, path: str) -> LsResult:
         normalized = path.rstrip("/") + "/"

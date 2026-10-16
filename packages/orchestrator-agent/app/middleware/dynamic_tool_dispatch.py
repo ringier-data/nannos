@@ -574,9 +574,10 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
             names.append(name)
         return descriptions, names
 
-    # Marker text that SubAgentMiddleware appends to the system prompt.
-    # Used to locate the "- general-purpose: ..." agent list and replace it
-    # with the full set of runtime-discovered agents.
+    # Marker text that SubAgentMiddleware appends to the system prompt — only when it is
+    # given a ``system_prompt``. deepagents >= 0.7 passes none by default, so the marker is
+    # normally absent and the agent list is appended (see ``_enhance_system_prompt_agents``).
+    # Kept for a configured task prompt, where the list is replaced in place.
     _SYSTEM_PROMPT_AGENT_MARKER = "Available subagent types:\n"
 
     # Marker text that SubAgentMiddleware bakes into the task tool description
@@ -620,25 +621,14 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
     def _enhance_system_prompt_agents(
         self, system_message: SystemMessage | None, user_context: GraphRuntimeContext
     ) -> SystemMessage | None:
-        """Replace the agent list in the system prompt with all runtime agents.
+        """Append the runtime agent list (and the bug-report guidance) to the system message.
 
-        ``SubAgentMiddleware`` appends a text block to the system message that
-        contains ``TASK_SYSTEM_PROMPT`` followed by
-        ``"Available subagent types:\n- general-purpose: ..."``.
+        Sub-agents are discovered per request, so the graph's prompt cannot list them.
+        deepagents >= 0.7 writes no agent list of its own into the system prompt
+        (``SubAgentMiddleware`` adds one only when given a ``system_prompt``, which
+        ``create_deep_agent`` never passes), so there is nothing to replace: append it.
 
-        Because sub-agents are discovered at request time (not graph-creation
-        time), the list only contains "general-purpose".  This method finds
-        that marker and replaces the ``- name: desc`` lines that follow with
-        the full set from ``user_context.subagent_registry``.
-
-        Args:
-            system_message: The current system message (may be ``None``).
-            user_context: Runtime context carrying the subagent registry.
-
-        Returns:
-            A new ``SystemMessage`` with the agent list replaced, or the
-            original message unchanged if the marker was not found or the
-            registry is empty.
+        Returns the original message unchanged when it is ``None`` or the registry is empty.
         """
         if system_message is None or not user_context.subagent_registry:
             return system_message
@@ -647,52 +637,14 @@ class DynamicToolDispatchMiddleware(AgentMiddleware[AgentState, GraphRuntimeCont
         if not agent_descs:
             return system_message
 
-        new_agent_block = "\n".join(agent_descs)
-        marker = self._SYSTEM_PROMPT_AGENT_MARKER
-
-        # The marker + subsequent agent entries may appear in any content block.
-        # We replace in the first block where the marker is found.
-        # Pattern: marker text followed by either:
-        #   - Old format: lines starting with "- " (from SubAgentMiddleware)
-        #   - New format: <agent>...</agent> XML blocks (from our enhancement)
-        pattern = re.compile(
-            re.escape(marker) + r"(?:(?:- .+(?:\n|$))+|(?:<agent[\s\S]*?</agent>\n?)+)",
-            re.MULTILINE,
+        agent_list = "\n\n" + self._SYSTEM_PROMPT_AGENT_MARKER + "\n".join(agent_descs)
+        return SystemMessage(
+            content_blocks=[
+                *system_message.content_blocks,
+                {"type": "text", "text": agent_list},
+                {"type": "text", "text": self._BUG_REPORT_TOOL_GUIDANCE},
+            ]
         )
-
-        found = False
-        new_blocks: list[ContentBlock] = []
-        for block in system_message.content_blocks:
-            if found or not isinstance(block, dict) or block.get("type") != "text":
-                new_blocks.append(block)
-                continue
-            text: str = block.get("text", "")
-            if marker in text:
-                new_text = pattern.sub(marker + new_agent_block, text, count=1)
-                new_blocks.append({"type": "text", "text": new_text})
-                found = True
-            else:
-                new_blocks.append(block)
-
-        if not found:
-            # Marker not found — deepagents version may have changed the text.
-            # Fall back to appending the agent list.
-            logger.warning(
-                "DynamicToolDispatchMiddleware: could not find '%s' marker in system prompt; "
-                "appending agent list as fallback",
-                marker.rstrip(),
-            )
-            new_blocks.append(
-                {
-                    "type": "text",
-                    "text": f"\n\n{marker}" + new_agent_block,
-                }
-            )
-
-        # Append bug report tool guidance if the tool is available
-        new_blocks.append({"type": "text", "text": self._BUG_REPORT_TOOL_GUIDANCE})
-
-        return SystemMessage(content_blocks=new_blocks)
 
     @staticmethod
     def _catalog_gap(user_context: GraphRuntimeContext) -> tuple[int, int]:

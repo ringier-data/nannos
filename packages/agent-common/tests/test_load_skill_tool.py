@@ -42,7 +42,7 @@ class TestLoadSkillTool:
         assert "line 1: consent details" in out
         assert "line 600: consent details" in out
         assert len(out) > 20_000  # would not fit an eval result
-        assert "\t" not in out  # no cat -n prefixes
+        assert "\t" not in out and "@@ lines" not in out  # no read_file framing
 
     def test_lists_bundled_files_with_virtual_paths(self):
         out = create_load_skill_tool(_skills()).invoke({"name": "alloy-kb"})

@@ -28,8 +28,12 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from deepagents.backends.protocol import EditResult, GlobResult, GrepResult, LsResult, ReadResult, WriteResult
+from deepagents.backends.protocol import (
+    DeleteResult,
+    WriteResult,
+)
 from deepagents.backends.store import StoreBackend
+from deepagents.backends.utils import file_data_to_string
 from langgraph.config import get_config
 from langgraph.store.postgres.aio import AsyncPostgresStore
 from ringier_a2a_sdk.cost_tracking import CostLogger
@@ -45,56 +49,37 @@ from agent_common.core.semantic_chunking import TITAN_EMBED_MAX_CHARS, chunk_wit
 
 logger = logging.getLogger(__name__)
 
-# Largest store key we will ever write. The Postgres store primary key
-# (``store_pkey``) indexes ``prefix + key``, and a btree entry cannot exceed
-# ~2704 bytes (1/3 of an 8 KiB page). Gemini tool-call ids arrive from the
-# LiteLLM gateway with the thought-signature packed into the id
-# (``call_<id>__thought__<base64-sig>`` — an intentional, non-configurable
-# LiteLLM behaviour, see BerriAI/litellm#17949). Offload paths derived from such
-# ids (``/large_tool_results/<id>`` and their ``#chunk_N`` keys) blow past the
-# btree limit and the write raises ``ProgramLimitExceeded``. Capping the key well
-# under the limit leaves ample headroom for the namespace ``prefix``.
-_MAX_STORAGE_KEY_BYTES = 200
-_THOUGHT_SIGNATURE_DELIMITER = "__thought__"
-_KEY_HASH_LEN = 16
+
+def _no_file_namespace(_runtime: Any) -> tuple[str, ...]:
+    """The namespace of a backend built only to index: file operations need a real one."""
+    raise RuntimeError(
+        "IndexingStoreBackend was built without a namespace_factory, so it can index but not "
+        "read or write files; pass the route's namespace_factory."
+    )
 
 
-def bounded_storage_key(file_path: str) -> str:
-    """Map a (possibly oversized) file path to a bounded, stable store key.
+def _documents_namespace(file_path: str, metadata: dict[str, Any], user_id: str | None) -> tuple[str, ...] | None:
+    """Where a file's index entry and chunks live; ``None`` (logged) when the run lacks the scope.
 
-    Tool-result paths can embed a LiteLLM Gemini thought-signature in the
-    tool-call id. The signature is load-bearing for the Gemini round-trip and must
-    stay on the message, but it must NOT leak into the store key (the Postgres
-    btree primary key cannot index a value larger than ~2704 bytes). This:
-
-    1. Drops the ``__thought__<sig>`` tail, but ONLY for ``/large_tool_results/``
-       paths (the sole place tool-call ids appear). The part before the delimiter
-       is Gemini's genuine per-call id, so distinct tool calls keep distinct
-       (collision-free) keys. Scoping to that prefix means a legitimate user
-       filename that happens to contain ``__thought__`` (a ``/memories/`` or
-       ``/channel_memories/`` path) is never silently truncated.
-    2. Hard-caps the remaining length with a content-hash suffix, applied to ANY
-       path, so no provider convention (now or future) can overflow the index even
-       if the ``__thought__`` delimiter changes or disappears.
-
-    Idempotent: applying it to an already-bounded key returns it unchanged, so it
-    is safe to call at every store boundary (write, read, edit, indexing, search).
-    A true no-op for normal paths (those at/under 200 bytes without a tool-result
-    thought-signature).
+    - /large_tool_results/ and /attachments/: (conversation_id, "tool_results") - conversation-scoped
+    - /channel_memories/: (assistant_id, "documents") - channel-scoped
+    - anything else (/memories/): (user_id, "documents") - user-scoped
     """
-    base = file_path
-    if file_path.startswith("/large_tool_results/"):
-        base = file_path.split(_THOUGHT_SIGNATURE_DELIMITER, 1)[0]
-    encoded = base.encode("utf-8")
-    if len(encoded) <= _MAX_STORAGE_KEY_BYTES:
-        return base
-    digest = hashlib.sha256(encoded).hexdigest()[:_KEY_HASH_LEN]
-    # Reserve room for "_" + digest so the result stays within the cap (hence
-    # idempotent on a second pass). Decode with "ignore" so a multi-byte char
-    # split at the truncation boundary can't raise.
-    keep = _MAX_STORAGE_KEY_BYTES - _KEY_HASH_LEN - 1
-    truncated = encoded[:keep].decode("utf-8", "ignore")
-    return f"{truncated}_{digest}"
+    if file_path.startswith(("/large_tool_results/", "/attachments/")):
+        conversation_id = metadata.get("conversation_id")
+        if not conversation_id:
+            logger.error(f"Cannot scope the index of {file_path}: conversation_id missing from metadata.")
+            return None
+        return (conversation_id, "tool_results")
+    if file_path.startswith("/channel_memories/"):
+        assistant_id = metadata.get("assistant_id")
+        if not assistant_id:
+            logger.error(f"Cannot scope the index of channel file {file_path}: assistant_id missing from metadata.")
+            return None
+        return (assistant_id, "documents")
+    if not user_id:
+        return None
+    return (user_id, "documents")
 
 
 class IndexingStoreBackend(StoreBackend):
@@ -144,58 +129,66 @@ class IndexingStoreBackend(StoreBackend):
             cost_logger: Optional CostLogger for reporting LLM usage costs
             namespace_factory: Optional callable that takes a Runtime and returns
                 namespace tuple. Used to scope file storage (read/write operations).
-                If None, uses legacy assistant_id-based scoping.
+                Every file route passes one (``build_common_middleware_stack``); omit it
+                only for an index-only backend (``semantic_search_file``), whose file
+                operations then raise instead of landing in a shared namespace.
         """
         # Pass store and namespace factory to parent StoreBackend
         # This ensures read operations (grep, read_file, etc.) are scoped correctly
-        super().__init__(store=store, namespace=namespace_factory)
+        super().__init__(store=store, namespace=namespace_factory or _no_file_namespace)
         self._model_name = model_name
         self.documents_store: AsyncPostgresStore = store
         self._cost_logger = cost_logger
 
-    # ------------------------------------------------------------------
-    # Key-bounding op overrides
-    #
-    # Every store key is run through ``bounded_storage_key`` before it reaches the
-    # Postgres store so an oversized tool-call id (Gemini ``__thought__`` packing)
-    # cannot overflow the btree primary key. The transform is idempotent and a
-    # no-op for normal paths, and is applied uniformly to write AND read/edit/grep/
-    # glob/ls so the agent can still address a file by the (long) path it was handed
-    # in the eviction message. ``_index_content`` and ``_semantic_search_file_impl``
-    # apply the same transform at their own direct-store boundaries.
-    # ------------------------------------------------------------------
+    async def adelete(self, file_path: str) -> DeleteResult:
+        """Delete a file or directory and its search index.
 
-    def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> ReadResult:
-        return super().read(bounded_storage_key(file_path), offset, limit)
+        Left to ``StoreBackend``, the file went but its index entry and chunks stayed, so
+        ``docstore_search`` kept returning a deleted memory. Only the async path does this:
+        the delete tool runs ``adelete`` in our graphs. The delete is recursive, so
+        the files it removes are listed first, the way ``StoreBackend.adelete`` selects them.
+        """
+        base = file_path.rstrip("/")
+        items = await self._asearch_store_paginated(self._get_store(), self._get_namespace())
+        removed = {
+            key: self._content_hash_of(item)
+            for item in items
+            if (key := str(item.key)) == base or key.startswith(base + "/")
+        }
+        result = await super().adelete(file_path)
+        if not result.error:
+            await asyncio.gather(*(self._drop_index(key, content_hash) for key, content_hash in removed.items()))
+        return result
 
-    async def aread(self, file_path: str, offset: int = 0, limit: int = 2000) -> ReadResult:
-        return await super().aread(bounded_storage_key(file_path), offset, limit)
+    def _content_hash_of(self, item: Any) -> str | None:
+        """The hash ``_index_content`` records for this stored file's text (``None`` if unreadable)."""
+        try:
+            text = file_data_to_string(self._convert_store_item_to_file_data(item))
+        except (TypeError, ValueError):
+            return None
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-    def write(self, file_path: str, content: str) -> WriteResult:
-        # Parent sync write does no indexing (matching prior behaviour); only the
-        # async awrite path indexes. Here we just bound the key.
-        return super().write(bounded_storage_key(file_path), content)
+    async def _drop_index(self, file_path: str, content_hash: str | None) -> None:
+        """Remove a file's index entry and its chunks, if they index this file's content.
 
-    def edit(self, file_path: str, old_string: str, new_string: str, replace_all: bool = False) -> EditResult:
-        return super().edit(bounded_storage_key(file_path), old_string, new_string, replace_all)
-
-    async def aedit(
-        self, file_path: str, old_string: str, new_string: str, replace_all: bool = False
-    ) -> EditResult:
-        return await super().aedit(bounded_storage_key(file_path), old_string, new_string, replace_all)
-
-    def ls(self, path: str) -> LsResult:
-        return super().ls(bounded_storage_key(path))
-
-    def grep(self, pattern: str, path: str | None = None, glob: str | None = None) -> GrepResult:
-        # Bound the path filter too: the agent is handed the (long, raw) offload
-        # path in the eviction message, but the blob is stored under the bounded
-        # key, so an exact-path grep on the raw path would otherwise match nothing.
-        # A directory prefix like "/large_tool_results/" is short and unchanged.
-        return super().grep(pattern, bounded_storage_key(path) if path else path, glob)
-
-    def glob(self, pattern: str, path: str = "/") -> GlobResult:
-        return super().glob(pattern, bounded_storage_key(path))
+        Routed paths reach the backend with the route prefix stripped, so a personal and
+        a channel file of the same name share one index key (last write wins). An entry
+        whose hash is another file's content belongs to that file, which still exists.
+        """
+        metadata = get_config().get("metadata", {})
+        namespace = _documents_namespace(file_path, metadata, metadata.get("user_id"))
+        if namespace is None:
+            return
+        entry = await self.documents_store.aget(namespace=namespace, key=file_path)
+        if entry is None:
+            return
+        indexed_hash = entry.value.get("content_hash")
+        if content_hash and indexed_hash and indexed_hash != content_hash:
+            logger.info(f"Kept the search index of '{file_path}': it indexes another file of the same name")
+            return
+        keys = [*entry.value.get("chunk_keys", []), file_path]
+        await asyncio.gather(*(self.documents_store.adelete(namespace=namespace, key=key) for key in keys))
+        logger.info(f"Dropped the search index of deleted '{file_path}' ({len(keys) - 1} chunks)")
 
     async def awrite(self, file_path: str, content: str) -> WriteResult:
         """Write file and automatically index content.
@@ -210,12 +203,6 @@ class IndexingStoreBackend(StoreBackend):
         Returns:
             WriteResult from parent write operation
         """
-        # Bound the key up-front so both the filesystem write and the indexing
-        # below key off the same bounded path (see bounded_storage_key). The
-        # ``/large_tool_results/`` prefix is preserved, so the routing checks below
-        # still work.
-        file_path = bounded_storage_key(file_path)
-
         # Call parent to write file to filesystem namespace
         result = await super().awrite(file_path, content)
 
@@ -270,14 +257,6 @@ class IndexingStoreBackend(StoreBackend):
             file_path: Path of the file
             content: File content to index
         """
-        # Bound the key the same way the filesystem write does, so the file-index
-        # entry and every ``{file_path}#chunk_{i}`` key stay under the btree limit
-        # (a raw Gemini ``__thought__`` id makes the chunk keys even longer than the
-        # filesystem key). Idempotent: when called from ``awrite`` the path is
-        # already bounded; when called from ``aensure_indexed`` (the lazy
-        # semantic_search_file path) it is the raw agent-supplied path.
-        file_path = bounded_storage_key(file_path)
-
         # Get user_id and user_sub from runtime metadata or tags
         config = get_config()
         metadata_dict = config.get("metadata", {})
@@ -333,40 +312,9 @@ class IndexingStoreBackend(StoreBackend):
         try:
             # Detect if this is a large tool result
             is_large_tool_result = file_path.startswith("/large_tool_results/")
-            # Attachments are ephemeral, conversation-scoped files indexed lazily
-            # (JIT) by ``semantic_search_file``. They share the conversation's
-            # ``tool_results`` chunk namespace so the search finds them.
-            is_attachment = file_path.startswith("/attachments/")
-
-            # Determine namespace based on file path:
-            # - /large_tool_results/ and /attachments/: (conversation_id, "tool_results") - conversation-scoped
-            # - /memories/: (user_id, "documents") - user-scoped
-            # - /channel_memories/: (assistant_id, "documents") - channel-scoped
-            if is_large_tool_result or is_attachment:
-                conversation_id_ns = metadata_dict.get("conversation_id")
-                if not conversation_id_ns:
-                    logger.error(
-                        f"Cannot index {file_path}: conversation_id missing from metadata. "
-                        f"Conversation-scoped files require conversation context for proper scoping."
-                    )
-                    return
-                namespace = (conversation_id_ns, "tool_results")
-                logger.debug(f"Using conversation-scoped namespace for {file_path}: {namespace}")
-            elif file_path.startswith("/channel_memories/"):
-                # Channel files: assistant-scoped namespace
-                assistant_id = metadata_dict.get("assistant_id")
-                if not assistant_id:
-                    logger.error(
-                        f"Cannot index channel file {file_path}: assistant_id missing from metadata. "
-                        f"Channel files require assistant context for proper scoping."
-                    )
-                    return
-                namespace = (assistant_id, "documents")
-                logger.debug(f"Using channel-scoped namespace for channel file: {namespace}")
-            else:
-                # User files (/memories/): user-scoped namespace
-                namespace = (user_id, "documents")
-                logger.debug(f"Using user-scoped namespace for personal file: {namespace}")
+            namespace = _documents_namespace(file_path, metadata_dict, user_id)
+            if namespace is None:
+                return
 
             # Content-hash caching: skip re-indexing when content is unchanged,
             # re-vectorise when it differs. This makes both eager (awrite) and

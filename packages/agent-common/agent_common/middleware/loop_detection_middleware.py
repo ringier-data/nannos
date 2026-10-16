@@ -480,7 +480,7 @@ class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
             return None
         return {"tool_call_history": carried}
 
-    @hook_config(can_jump_to=["model", "end"])
+    @hook_config(can_jump_to=["end"])
     async def aafter_model(
         self,
         state: LoopDetectionState,
@@ -648,21 +648,6 @@ class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
             f"{[info['tool_name'] for info in blocked_calls]}"
         )
 
-        update: dict[str, Any] = {"tool_call_history": history, "messages": error_messages}
-        # A block is feedback FOR THE MODEL: it must run again and react. LangChain's
-        # routing after this hook does that only by default — when every call already has
-        # a result and ``structured_response`` is in state, it ends the run instead. That
-        # key is a persisted channel, so from the second turn of a conversation on it is
-        # always set (by the previous turn's answer), and a block would end the turn with
-        # no answer at all; the runner then has nothing newer than the previous turn's
-        # response to report. Say where to go. Only when nothing else is pending: a jump
-        # skips the tool node, and an unblocked sibling call would be left dangling.
-        blocked_ids = {info["tool_call"]["id"] for info in blocked_calls}
-        still_pending = [
-            tool_call
-            for tool_call in last_ai_message.tool_calls
-            if tool_call.get("id") not in blocked_ids and tool_call.get("id") not in already_answered
-        ]
-        if not still_pending:
-            update["jump_to"] = "model"
-        return update
+        # A block is feedback FOR THE MODEL: langchain's model→tools edge sends the run back
+        # to it (``structured_response`` is per turn, see ``TurnScopedResponseMiddleware``).
+        return {"tool_call_history": history, "messages": error_messages}
