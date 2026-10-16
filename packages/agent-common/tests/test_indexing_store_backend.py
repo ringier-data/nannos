@@ -641,3 +641,27 @@ class TestDeleteDropsTheIndex:
 
         assert result.error is None
         assert (await backend.aread(_BOUNDED_PATH)).error
+
+    async def test_a_same_named_file_on_another_route_keeps_its_index(self):
+        """Routes strip their prefix, so /memories/notes.md and /channel_memories/notes.md
+        both index under /notes.md: deleting the channel file must not drop the index of the
+        personal one that is still there."""
+        from langgraph.store.memory import InMemoryStore
+
+        store = InMemoryStore()
+        personal = IndexingStoreBackend(store=store, namespace_factory=lambda _rt: ("user-xyz", "filesystem"))
+        channel = IndexingStoreBackend(store=store, namespace_factory=lambda _rt: ("asst-abc", "filesystem"))
+        with patch.object(IndexingStoreBackend, "_index_content", AsyncMock()):
+            await personal.awrite("/notes.md", "my private notes")
+            await channel.awrite("/notes.md", "the team's notes")
+        await store.aput(  # the personal file was indexed last
+            self._DOCS, "/notes.md", {"chunk_keys": ["/notes.md#chunk_0"], "content_hash": _content_hash("my private notes")}
+        )
+        await store.aput(self._DOCS, "/notes.md#chunk_0", {"text": "x"})
+
+        with patch("agent_common.backends.indexing_store.get_config", return_value=_make_config()):
+            assert (await channel.adelete("/notes.md")).error is None
+            assert await self._index_keys(store) == {"/notes.md", "/notes.md#chunk_0"}
+
+            assert (await personal.adelete("/notes.md")).error is None
+            assert await self._index_keys(store) == set()

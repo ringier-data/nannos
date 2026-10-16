@@ -38,6 +38,7 @@ from deepagents.backends.protocol import (
     WriteResult,
 )
 from deepagents.backends.store import StoreBackend
+from deepagents.backends.utils import file_data_to_string
 from langgraph.config import get_config
 from langgraph.store.postgres.aio import AsyncPostgresStore
 from ringier_a2a_sdk.cost_tracking import CostLogger
@@ -265,20 +266,41 @@ class IndexingStoreBackend(StoreBackend):
         file_path = bounded_storage_key(file_path)
         base = file_path.rstrip("/")
         items = await self._asearch_store_paginated(self._get_store(), self._get_namespace())
-        removed = [key for item in items if (key := str(item.key)) == base or key.startswith(base + "/")]
+        removed = {
+            key: self._content_hash_of(item)
+            for item in items
+            if (key := str(item.key)) == base or key.startswith(base + "/")
+        }
         result = await super().adelete(file_path)
         if not result.error:
-            await asyncio.gather(*(self._drop_index(key) for key in removed))
+            await asyncio.gather(*(self._drop_index(key, content_hash) for key, content_hash in removed.items()))
         return result
 
-    async def _drop_index(self, file_path: str) -> None:
-        """Remove a file's index entry and its chunks, if it was indexed."""
+    def _content_hash_of(self, item: Any) -> str | None:
+        """The hash ``_index_content`` records for this stored file's text (``None`` if unreadable)."""
+        try:
+            text = file_data_to_string(self._convert_store_item_to_file_data(item))
+        except (TypeError, ValueError):
+            return None
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    async def _drop_index(self, file_path: str, content_hash: str | None) -> None:
+        """Remove a file's index entry and its chunks, if they index this file's content.
+
+        Routed paths reach the backend with the route prefix stripped, so a personal and
+        a channel file of the same name share one index key (last write wins). An entry
+        whose hash is another file's content belongs to that file, which still exists.
+        """
         metadata = get_config().get("metadata", {})
         namespace = _documents_namespace(file_path, metadata, metadata.get("user_id"))
         if namespace is None:
             return
         entry = await self.documents_store.aget(namespace=namespace, key=file_path)
         if entry is None:
+            return
+        indexed_hash = entry.value.get("content_hash")
+        if content_hash and indexed_hash and indexed_hash != content_hash:
+            logger.info(f"Kept the search index of '{file_path}': it indexes another file of the same name")
             return
         keys = [*entry.value.get("chunk_keys", []), file_path]
         await asyncio.gather(*(self.documents_store.adelete(namespace=namespace, key=key) for key in keys))

@@ -23,6 +23,9 @@ class MockSandboxHandle:
     def execute(self, command: str, *, timeout: int | None = None):
         return type("ExecuteResponse", (), {"output": "", "exit_code": 0})()
 
+    async def aexecute(self, command: str, *, timeout: int | None = None):
+        return self.execute(command, timeout=timeout)
+
     def close(self) -> None:
         self.closed = True
 
@@ -164,3 +167,37 @@ async def test_skills_hash_preserved_on_reuse():
 
     reused = await pool.acquire("s1", "a1")
     assert reused.skills_hash == "abc123"
+
+
+class _StartingSandbox(MockSandboxHandle):
+    """Answers "not ready" for the first ``starting`` probes, as a cold Gatana sandbox does."""
+
+    def __init__(self, starting: int):
+        super().__init__()
+        self.probes = 0
+        self._starting = starting
+
+    async def aexecute(self, command: str, *, timeout: int | None = None):
+        self.probes += 1
+        output = "Sandbox is not ready" if self.probes <= self._starting else ""
+        return type("ExecuteResponse", (), {"output": output, "exit_code": 0})()
+
+
+@pytest.mark.asyncio
+async def test_a_new_sandbox_is_ready_before_it_is_handed_out(monkeypatch):
+    """Every tool then finds it up, glob included (its tool turns exceptions into text)."""
+    monkeypatch.setattr("agent_common.core.sandbox_pool._READY_POLL_S", 0)
+    sandbox = _StartingSandbox(starting=2)
+
+    async def create():
+        return sandbox
+
+    pool = SandboxPool(create_fn=create, capacity=2, warm_ttl=60.0)
+    entry = await pool.acquire("session-1", "agent")
+
+    assert entry.backend is sandbox
+    assert sandbox.probes == 3
+
+    await pool.release("session-1", "agent")
+    await pool.acquire("session-1", "agent")  # warm reuse: already known to be up
+    assert sandbox.probes == 3

@@ -26,6 +26,34 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+#: How long a new sandbox may take to start before the tools are left to report it.
+_READY_TIMEOUT_S = 120.0
+_READY_POLL_S = 2.0
+
+
+async def _wait_until_ready(backend: BaseSandbox) -> None:
+    """Poll a no-op command until a freshly provisioned sandbox stops answering "not ready".
+
+    Provisioning returns before the container is up, and the tools cannot all wait for
+    it: deepagents' glob tool turns any exception into text for the model, so a
+    not-ready glob was never retried. Waiting once here covers every tool.
+    """
+    from agent_common.core.sandbox_ready_wrapper import _is_not_ready_text
+
+    deadline = time.monotonic() + _READY_TIMEOUT_S
+    while True:
+        try:
+            text = (await backend.aexecute("true")).output
+        except Exception as exc:  # noqa: BLE001 — a transport error reads like any other answer
+            text = str(exc)
+        if not _is_not_ready_text(text):
+            return
+        if time.monotonic() >= deadline:
+            logger.warning("Sandbox still not ready after %.0fs; continuing", _READY_TIMEOUT_S)
+            return
+        await asyncio.sleep(_READY_POLL_S)
+
+
 @dataclass
 class PooledSandbox:
     """A sandbox instance managed by the pool."""
@@ -138,7 +166,9 @@ class SandboxPool:
                 in_use_count + 1,
                 self._capacity,
             )
-            return entry
+        # Outside the lock: a cold start must not hold up other acquires.
+        await _wait_until_ready(entry.backend)
+        return entry
 
     async def release(self, session_id: str, sub_agent_name: str) -> None:
         """Release a sandbox back to the pool for warm reuse.
