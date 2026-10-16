@@ -842,7 +842,7 @@ export CODE_INTERPRETER_PTC="${CODE_INTERPRETER_PTC:-0}"
 export PUBLIC_URL="${PUBLIC_URL:-}"
 # Optional settings reach the services only when set: an empty one is not "unset" to them
 # (agent-runner's sandbox pool fails on int("") of an empty SANDBOX_POOL_CAPACITY).
-for _var in SANDBOX_PROVIDER SANDBOX_POOL_CAPACITY SANDBOX_WARM_TTL GATANA_ORG_ID GATANA_API_KEY GATANA_ORG_CAPACITY; do
+for _var in SANDBOX_PROVIDER SANDBOX_POOL_CAPACITY SANDBOX_WARM_TTL GATANA_ORG_ID GATANA_API_KEY GATANA_ORG_CAPACITY GATANA_BASE_URL; do
   if [[ -n "${!_var:-}" ]]; then export "${_var?}"; else unset "$_var"; fi
 done
 
