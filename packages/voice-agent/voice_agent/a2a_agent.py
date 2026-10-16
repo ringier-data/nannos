@@ -11,6 +11,10 @@ Callers send a JSON object as the A2A message text::
                                            //   the backend and used for the call.
         "system_prompt": "You are …",     // optional — explicit prompt (only used
                                            //   when sub_agent_id is absent).
+        "mcp_tools": ["gcal_list_events"] // optional — gateway tools the call may
+                                           //   use. Empty / absent = no tools; a
+                                           //   sub_agent_id persona's own list (even
+                                           //   an empty one) replaces it.
     }
 
 Phone-number resolution (security)
@@ -187,9 +191,21 @@ class VoiceCallRequest(BaseModel):
         default=None,
         description="Gemini Live voice name, e.g. 'Kore'",
     )
+    mcp_tools: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Exact names of the MCP gateway tools the call may use, e.g. ['gcal_list_events']. "
+            "Leave empty when the call needs no tools: the call then gets none."
+        ),
+    )
 
 
 JSON_SCHEMA = VoiceCallRequest.model_json_schema()
+
+
+def _redact_call_inputs(inputs: dict) -> dict:
+    """Trace inputs of a phone call without the caller's bearer token."""
+    return {key: ("<redacted>" if key == "access_token" and value else value) for key, value in inputs.items()}
 
 
 class VoiceAgent(BaseAgent):
@@ -302,6 +318,13 @@ class VoiceAgent(BaseAgent):
 
         voice = voice_name or "Kore"
 
+        # No tool list means no tools — never the user's whole gateway catalogue. That
+        # catalogue can run to hundreds of tools whose declarations overflow the Live
+        # context window (1007 mid-call) and cost an LLM risk score each at setup.
+        if not mcp_tools:
+            mcp_headers = None
+            access_token = None
+
         if mcp_headers:
             logger.info("Using pre-built MCP headers (session=%s)", session_key)
         elif access_token:
@@ -382,6 +405,10 @@ class VoiceAgent(BaseAgent):
 
         if agent.mcp_status is not None:
             await asyncio.shield(agent.mcp_status)
+        # Wait for the Live connection itself, so a session that fails to connect is
+        # caught before dialling instead of ringing the callee only to hang up.
+        if agent.session_ready is not None:
+            await asyncio.shield(agent.session_ready)
 
     async def _start_audio_session(
         self,
@@ -553,7 +580,10 @@ class VoiceAgent(BaseAgent):
         sub_agent_id = call_request.sub_agent_id
         system_prompt: str | None = None
         voice_name: str | None = call_request.voice_name
-        mcp_tools: list = []
+        mcp_tools: list[str] = list(call_request.mcp_tools)
+        # Unknown names are refused only when the caller typed them and can retry; a
+        # persona's stored list runs with whatever subset this user has, as inbound does.
+        refuse_unknown_tools = True
 
         if sub_agent_id is not None:
             # Tier 1 — fetch the named sub-agent's config from the backend.
@@ -569,11 +599,15 @@ class VoiceAgent(BaseAgent):
             if agent_config.get("name") not in ("voice-agent", "voice_agent"):
                 system_prompt = agent_config.get("system_prompt")
                 voice_name = voice_name or agent_config.get("voice_name")
-                mcp_tools = agent_config.get("mcp_tools") or []
-                yield AgentStreamResponse(
-                    state=TaskState.TASK_STATE_WORKING,
-                    content=f"Loaded sub-agent '{agent_config.get('name', sub_agent_id)}' config.",
+                if not agent_config.get("fetch_failed"):
+                    mcp_tools = agent_config.get("mcp_tools") or []
+                    refuse_unknown_tools = False
+                loaded = (
+                    f"Could not load sub-agent {sub_agent_id} config; calling with the request's own settings."
+                    if agent_config.get("fetch_failed")
+                    else f"Loaded sub-agent '{agent_config.get('name', sub_agent_id)}' config."
                 )
+                yield AgentStreamResponse(state=TaskState.TASK_STATE_WORKING, content=loaded)
 
         # Tier 2 — explicit system_prompt in the message body.
         # Checked even when sub_agent_id was set, so the orchestrator's LLM
@@ -621,6 +655,7 @@ class VoiceAgent(BaseAgent):
             context_messages=context_messages or [],
             sub_agent_id=sub_agent_id,
             user_sub=user_config.user_sub,
+            refuse_unknown_tools=refuse_unknown_tools,
         ):
             yield event
 
@@ -678,7 +713,7 @@ class VoiceAgent(BaseAgent):
         )
         return result
 
-    @traceable(name="voice-phone-call", run_type="tool")
+    @traceable(name="voice-phone-call", run_type="tool", process_inputs=_redact_call_inputs)
     async def _stream_phone_call(
         self,
         *,
@@ -690,6 +725,7 @@ class VoiceAgent(BaseAgent):
         context_messages: list[str] | None,
         sub_agent_id: int | None = None,
         user_sub: str | None = None,
+        refuse_unknown_tools: bool = True,
     ) -> AsyncIterable[AgentStreamResponse]:
         """Initiate a Twilio phone call and hold the A2A stream open until it ends.
 
@@ -767,6 +803,51 @@ class VoiceAgent(BaseAgent):
         # mcp_status should already be resolved or close to it.
         mcp_auth_failed = False
         session = self._active_sessions.get(prewarm_key)
+        ready = session["agent"].session_ready if session else None
+        if session and (session["agent_task"].done() or (ready is not None and ready.done() and not ready.result())):
+            # The Gemini session already died during setup — dialling would connect
+            # the callee to silence.
+            reason = session["agent"].session_error or "Gemini Live session ended during setup"
+            logger.error("Pre-warmed session %s is dead before dialling: %s", prewarm_key, reason)
+            self._prewarm_tasks.pop(prewarm_key, None)
+            await self._end_session(prewarm_key)
+            yield AgentStreamResponse(
+                state=TaskState.TASK_STATE_FAILED,
+                content=f"Call not placed: the voice session failed to start ({reason}).",
+            )
+            return
+        dropped_note = ""
+        if session and session["agent"].unknown_tools and not refuse_unknown_tools:
+            dropped = sorted(session["agent"].unknown_tools)
+            logger.warning("Persona tools not offered to this user, calling without them: %s", dropped)
+            dropped_note = (
+                f"The persona's tools {', '.join(dropped)} are not available to this user; "
+                "the call ran without them."
+            )
+            yield AgentStreamResponse(state=TaskState.TASK_STATE_WORKING, content=dropped_note)
+        elif session and session["agent"].unknown_tools:
+            # Guessed tool names: the call would connect but every tool call would fail
+            # ("Unknown tool"). Refuse before dialling and hand back the real names.
+            unknown = session["agent"].unknown_tools
+            similar = list(dict.fromkeys(name for names in unknown.values() for name in names))
+            self._prewarm_tasks.pop(prewarm_key, None)
+            await self._end_session(prewarm_key)
+            content = (
+                "Call not placed: mcp_tools contains names that are not tools of this user: "
+                f"{', '.join(sorted(unknown))}. Tool names must match exactly."
+            )
+            if similar:
+                content += (
+                    f" Existing tools with similar names: {', '.join(similar)}."
+                    " Retry with exact names from that list, or without mcp_tools if the call needs no tools."
+                )
+            else:
+                content += (
+                    " This user has no tools of that service — it is likely not connected. Tell the user "
+                    "instead of calling, or retry without mcp_tools only if the call needs no tools."
+                )
+            yield AgentStreamResponse(state=TaskState.TASK_STATE_FAILED, content=content)
+            return
         if session:
             agent = session["agent"]
             if agent.mcp_status is not None:
@@ -903,13 +984,23 @@ class VoiceAgent(BaseAgent):
 
         # Format the transcript for the caller
         transcript: list[dict] = result.get("transcript", [])
+        lines = "\n".join(f"{'Caller' if t['role'] == 'user' else 'Agent'}: {t['text']}" for t in transcript)
+        logger.info("Call %s finished with %d transcript entries", call_sid, len(transcript))
+
+        session_error = result.get("error")
+        if session_error:
+            content = f"Call failed: the voice session broke off mid-call and the call was ended ({session_error})."
+            if lines:
+                content += f"\n\nPartial transcript:\n{lines}"
+            yield AgentStreamResponse(state=TaskState.TASK_STATE_FAILED, content=content)
+            return
+
         if transcript:
-            lines = "\n".join(f"{'Caller' if t['role'] == 'user' else 'Agent'}: {t['text']}" for t in transcript)
             content = f"Call completed.\n\nTranscript:\n{lines}"
         else:
-            content = "Call completed — no transcript recorded."
-
-        logger.info("Call %s finished with %d transcript entries", call_sid, len(transcript))
+            content = "Call ended with no transcript — nothing either side said was transcribed."
+        if dropped_note:
+            content += f"\n\nNote: {dropped_note}"
         yield AgentStreamResponse(state=TaskState.TASK_STATE_COMPLETED, content=content)
 
     async def _create_outbound_voice_session(

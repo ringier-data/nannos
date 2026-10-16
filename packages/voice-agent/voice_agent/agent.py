@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import difflib
 import json
 import logging
 import logging.handlers
@@ -583,6 +584,21 @@ async def _score_tool_risk(
     return score
 
 
+def similar_tool_names(requested: str, available: list[str], limit: int = 25) -> list[str]:
+    """Real tool names a caller probably meant by ``requested``.
+
+    Every tool from the same gateway server (the part before the first ``_``, e.g.
+    ``gmail``), closest spellings first — a guessed ``gmail_list_messages`` is rarely a
+    typo of the real ``gmail_search_threads``, but it shares the server. Falls back to
+    close spellings across all tools when the server prefix itself is wrong.
+    """
+    prefix = requested.split("_", 1)[0] + "_"
+    same_server = sorted(name for name in available if name.startswith(prefix))
+    pool = same_server or available
+    close = difflib.get_close_matches(requested, pool, n=5, cutoff=0.6)
+    return list(dict.fromkeys(close + same_server))[:limit]
+
+
 def build_live_config(
     voice_name: str = VOICE_NAME,
     system_prompt: str | None = None,
@@ -762,6 +778,19 @@ class GeminiLiveAgent:
         # Tool risk-scoring spend (a separate model, direct to Vertex). These ARE
         # per-call deltas, so they accumulate.
         self.risk_scorer_usage: dict[str, int] = {}
+        # Why the Live session died, when it ended without our end-of-stream sentinel
+        # (server close, API error such as 1007 context overflow, connect failure).
+        self.session_error: str | None = None
+        # Set once the caller's end-of-stream sentinel is consumed: the session ended
+        # because the call did, so its end is not an error.
+        self._stream_ended = False
+        # Requested tool names (mcp_tool_filter) the gateway does not offer this user,
+        # each mapped to the real names it most likely meant. Filled during MCP setup,
+        # before the call is dialled, so the caller can retry with exact names.
+        self.unknown_tools: dict[str, list[str]] = {}
+        # Resolved True once the Live session is open, False if it ended before that.
+        # Created in run(), like mcp_status. None until run() starts.
+        self.session_ready: asyncio.Future[bool] | None = None
 
     def build_usage_entries(self) -> list[dict]:
         """Return the session's measured spend as voice-usage report entries.
@@ -820,6 +849,19 @@ class GeminiLiveAgent:
         Gemini Live connect config.
         """
         tools_result = await mcp_session.list_tools()
+        if self.mcp_tool_filter:
+            available = [t.name for t in tools_result.tools]
+            offered = set(available)
+            self.unknown_tools = {
+                name: similar_tool_names(name, available)
+                for name in self.mcp_tool_filter
+                if name not in offered
+            }
+            if self.unknown_tools:
+                logger.warning(
+                    "Requested MCP tools not offered by the gateway: %s",
+                    sorted(self.unknown_tools),
+                )
         declarations: list[types.FunctionDeclaration] = []
 
         # Pre-score tool risks CONCURRENTLY. Scoring is an LLM call per tool; doing
@@ -1089,13 +1131,14 @@ class GeminiLiveAgent:
             event_out: Queue of JSON-serialisable event dicts to forward to the
                        caller (audio_chunk, turn_complete, interrupted, …).
         """
+        self.session_ready = asyncio.get_running_loop().create_future()
         cancelled = False
         with trace(
             name="voice-session",
             run_type="chain",
             inputs={"session_id": self.session_id, "voice_name": self.voice_name},
             metadata={"session_id": self.session_id} if self.session_id else None,
-        ):
+        ) as run_tree:
             try:
                 await self._run_impl(audio_in, event_out)
             except asyncio.CancelledError:
@@ -1105,6 +1148,18 @@ class GeminiLiveAgent:
                 # preserve cancellation semantics for the awaiting _end_session.
                 cancelled = True
                 logger.info("Voice session run cancelled (normal teardown)")
+            except Exception as exc:
+                logger.exception("Voice session failed")
+                self.session_error = self.session_error or f"{type(exc).__name__}: {exc}"
+            if not cancelled and not self._stream_ended:
+                # The Live session is gone while the call is still up. Without this the
+                # caller hears silence until they hang up and the call reports success.
+                self.session_error = self.session_error or "Gemini Live session closed unexpectedly"
+                logger.error("Voice session %s ended mid-call: %s", self.session_id, self.session_error)
+                run_tree.error = self.session_error
+                await event_out.put({"type": "error", "message": self.session_error})
+        if not self.session_ready.done():
+            self.session_ready.set_result(False)
         if cancelled:
             raise asyncio.CancelledError
 
@@ -1167,6 +1222,7 @@ class GeminiLiveAgent:
                     logger.exception(
                         "Gemini live session crashed (url=%s)", self.mcp_gateway_url
                     )
+                    self.session_error = self.session_error or f"{type(exc).__name__}: {exc}"
                     return
                 logger.error(
                     "MCP gateway connection FAILED (url=%s) — running this call WITHOUT tools, "
@@ -1210,6 +1266,8 @@ class GeminiLiveAgent:
             self.model_id,
             self.voice_name,
         )
+        if self.session_ready is not None and not self.session_ready.done():
+            self.session_ready.set_result(True)
 
         t_first_audio_sent: float | None = None
         first_response_logged = False
@@ -1242,6 +1300,7 @@ class GeminiLiveAgent:
                 while True:
                     chunk = await audio_in.get()
                     if chunk is None:
+                        self._stream_ended = True
                         break  # end-of-stream sentinel
                     if isinstance(chunk, str):
                         # Text injection — sent as a complete user turn, bypasses VAD.
@@ -1495,22 +1554,31 @@ class GeminiLiveAgent:
                         logger.warning(
                             "receive_loop: session closed after %d turns", turn
                         )
+                        self.session_error = self.session_error or (
+                            f"Gemini Live session closed by the server after {turn} turns"
+                        )
                         break
 
             except asyncio.CancelledError:
                 logger.debug("receive_loop: cancelled")
                 raise
-            except Exception:
+            except Exception as exc:
                 logger.exception("receive_loop error")
+                self.session_error = self.session_error or f"{type(exc).__name__}: {exc}"
             finally:
                 logger.info("receive_loop: exiting (completed %d turns)", turn)
 
+        # Whichever loop ends first ends the session: the send loop on the caller's
+        # end-of-stream, the receive loop when Gemini closes or errors. Waiting on the
+        # send loop alone left a dead session parked on audio_in.get().
         receive_task = asyncio.create_task(_receive_loop())
+        send_task = asyncio.create_task(_send_loop())
         try:
-            await _send_loop()
+            await asyncio.wait(
+                {send_task, receive_task}, return_when=asyncio.FIRST_COMPLETED
+            )
         finally:
-            receive_task.cancel()
-            try:
-                await receive_task
-            except asyncio.CancelledError:
-                pass
+            for task in (send_task, receive_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(send_task, receive_task, return_exceptions=True)

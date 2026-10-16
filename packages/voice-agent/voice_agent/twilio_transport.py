@@ -270,7 +270,12 @@ async def twilio_stream(websocket: WebSocket) -> None:
         except WebSocketDisconnect:
             logger.info("Twilio WebSocket disconnected")
         except Exception:
-            logger.exception("twilio→agent error")
+            if state.get("error"):
+                # We closed the stream ourselves after the session failed; reading
+                # from a closed socket raising here is expected, not a second fault.
+                logger.info("Twilio media stream closed after voice session failure")
+            else:
+                logger.exception("twilio→agent error")
         finally:
             # Grab the agent handle first, end the session, THEN read usage. _end_session
             # sends audio_stream_end and only afterwards cancels the receive loop, so
@@ -299,6 +304,14 @@ async def twilio_stream(websocket: WebSocket) -> None:
             ):
                 if response.state == TaskState.TASK_STATE_FAILED:
                     logger.error(f"A2A agent failed: {response.content}")
+                    # The voice session is gone; keeping the media stream open would
+                    # leave the callee listening to silence. Closing it ends the
+                    # <Connect>, and with no TwiML verb after it Twilio hangs up.
+                    state["error"] = response.content
+                    try:
+                        await websocket.close()
+                    except (WebSocketDisconnect, RuntimeError):
+                        pass
                     break
 
                 # Check for audio chunks
@@ -390,7 +403,9 @@ async def twilio_stream(websocket: WebSocket) -> None:
         call_sid = state.get("call_sid") or ""
         _fut = _CALL_FUTURES.pop(call_sid, None)
         if _fut and not _fut.done():
-            _fut.set_result({"transcript": transcript, "call_sid": call_sid})
+            _fut.set_result(
+                {"transcript": transcript, "call_sid": call_sid, "error": state.get("error")}
+            )
             logger.info("Resolved A2A future for call_sid=%s", call_sid)
 
         # Report usage and mark the session complete — concurrently. They are
