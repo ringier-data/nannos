@@ -258,10 +258,10 @@ def build_runtime_context(
     # task-scheduler sub-agent (#108), whose seed whitelists it (agent-creator's too). On
     # the orchestrator it only tempted the model to discover tools it cannot call — the
     # right move for anything outside its own whitelist is a `task` delegation.
-    # console_grep_mcp_tools IS here, for one job: a voice-agent call takes the exact names
-    # of the gateway tools the call may use (`mcp_tools`), and the orchestrator sees only
-    # a slice of the user's catalogue. The search runs on the same per-user gateway view
-    # the voice-agent checks names against.
+    # console_grep_mcp_tools is added below, only when voice-agent is delegable, for one job:
+    # a voice call takes the exact names of the gateway tools it may use (`mcp_tools`), and
+    # the orchestrator sees only a slice of the user's catalogue. Its non-`console` results
+    # come from the same per-user gateway view the voice-agent checks names against.
     allowed_orchestrator_tools = {
         "console_list_sub_agents",
         "console_update_sub_agent",
@@ -278,9 +278,10 @@ def build_runtime_context(
         # Web search (console-backend MCP tool). Auto-included so the orchestrator can ground
         # answers; sub-agents opt in via their MCP-tools whitelist.
         "console_web_search",
-        # Exact tool names for a voice-agent call's mcp_tools (see above).
-        "console_grep_mcp_tools",
     }
+    if "voice-agent" in subagent_registry:
+        # Exact tool names for a voice-agent call's mcp_tools (see above).
+        allowed_orchestrator_tools.add("console_grep_mcp_tools")
     orchestrator_auto_tools = {
         name for name in tool_registry.keys() if name.startswith("scheduler_") or name in allowed_orchestrator_tools
     }

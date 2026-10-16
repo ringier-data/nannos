@@ -602,10 +602,12 @@ class VoiceAgent(BaseAgent):
                 if not agent_config.get("fetch_failed"):
                     mcp_tools = agent_config.get("mcp_tools") or []
                     refuse_unknown_tools = False
-                yield AgentStreamResponse(
-                    state=TaskState.TASK_STATE_WORKING,
-                    content=f"Loaded sub-agent '{agent_config.get('name', sub_agent_id)}' config.",
+                loaded = (
+                    f"Could not load sub-agent {sub_agent_id} config; calling with the request's own settings."
+                    if agent_config.get("fetch_failed")
+                    else f"Loaded sub-agent '{agent_config.get('name', sub_agent_id)}' config."
                 )
+                yield AgentStreamResponse(state=TaskState.TASK_STATE_WORKING, content=loaded)
 
         # Tier 2 — explicit system_prompt in the message body.
         # Checked even when sub_agent_id was set, so the orchestrator's LLM
@@ -814,11 +816,15 @@ class VoiceAgent(BaseAgent):
                 content=f"Call not placed: the voice session failed to start ({reason}).",
             )
             return
+        dropped_note = ""
         if session and session["agent"].unknown_tools and not refuse_unknown_tools:
-            logger.warning(
-                "Persona tools not offered to this user, calling without them: %s",
-                sorted(session["agent"].unknown_tools),
+            dropped = sorted(session["agent"].unknown_tools)
+            logger.warning("Persona tools not offered to this user, calling without them: %s", dropped)
+            dropped_note = (
+                f"The persona's tools {', '.join(dropped)} are not available to this user; "
+                "the call ran without them."
             )
+            yield AgentStreamResponse(state=TaskState.TASK_STATE_WORKING, content=dropped_note)
         elif session and session["agent"].unknown_tools:
             # Guessed tool names: the call would connect but every tool call would fail
             # ("Unknown tool"). Refuse before dialling and hand back the real names.
@@ -836,7 +842,10 @@ class VoiceAgent(BaseAgent):
                     " Retry with exact names from that list, or without mcp_tools if the call needs no tools."
                 )
             else:
-                content += " This user has no similarly named tools; retry without them."
+                content += (
+                    " This user has no tools of that service — it is likely not connected. Tell the user "
+                    "instead of calling, or retry without mcp_tools only if the call needs no tools."
+                )
             yield AgentStreamResponse(state=TaskState.TASK_STATE_FAILED, content=content)
             return
         if session:
@@ -990,6 +999,8 @@ class VoiceAgent(BaseAgent):
             content = f"Call completed.\n\nTranscript:\n{lines}"
         else:
             content = "Call ended with no transcript — nothing either side said was transcribed."
+        if dropped_note:
+            content += f"\n\nNote: {dropped_note}"
         yield AgentStreamResponse(state=TaskState.TASK_STATE_COMPLETED, content=content)
 
     async def _create_outbound_voice_session(

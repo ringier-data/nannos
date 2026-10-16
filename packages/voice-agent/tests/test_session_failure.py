@@ -370,3 +370,65 @@ def test_call_trace_redacts_the_bearer_token():
     assert redacted["access_token"] == "<redacted>"
     assert redacted["phone_number"] == "+41790000000"
     assert _redact_call_inputs({"access_token": None})["access_token"] is None
+
+
+class TestRefusalAndPersonaNotes:
+    async def _call_with_prewarmed(self, unknown: dict, *, refuse: bool, result: dict | None = None):
+        voice = VoiceAgent()
+
+        async def _fake_prewarm(self, *, session_key, **_kwargs):
+            live = GeminiLiveAgent(session_id=session_key)
+            live.unknown_tools = unknown
+            live.session_ready = asyncio.get_running_loop().create_future()
+            live.session_ready.set_result(True)
+            self._active_sessions[session_key] = {
+                "agent": live,
+                "agent_task": asyncio.create_task(asyncio.Event().wait()),
+                "audio_in": asyncio.Queue(),
+            }
+
+        async def _resolve():
+            async with asyncio.timeout(5):
+                while "CA4" not in call_bridge._CALL_ANSWERED:
+                    await asyncio.sleep(0.01)
+            call_bridge._CALL_ANSWERED.pop("CA4").set_result(True)
+            call_bridge._CALL_FUTURES.pop("CA4").set_result(result)
+
+        with (
+            patch.dict("os.environ", {"PUBLIC_URL": "https://voice.example.com"}),
+            patch.object(VoiceAgent, "_prewarm_audio_session", _fake_prewarm),
+            patch.object(VoiceAgent, "_create_outbound_voice_session", AsyncMock(return_value=None)),
+            patch("voice_agent.a2a_agent.make_outbound_call", return_value="CA4"),
+        ):
+            resolver = asyncio.create_task(_resolve()) if result is not None else None
+            responses = [
+                r
+                async for r in voice._stream_phone_call(
+                    phone_number="+41790000000",
+                    system_prompt="hi",
+                    voice_name=None,
+                    mcp_tools=list(unknown),
+                    access_token="tok",
+                    context_messages=[],
+                    refuse_unknown_tools=refuse,
+                )
+            ]
+            if resolver is not None:
+                await resolver
+            else:
+                for session in list(voice._active_sessions.values()):
+                    session["agent_task"].cancel()
+        call_bridge._PENDING_CALLS.pop("CA4", None)
+        return responses
+
+    async def test_no_similar_tools_says_the_service_is_likely_not_connected(self):
+        responses = await self._call_with_prewarmed({"gmail_search_threads": []}, refuse=True)
+        assert responses[-1].state == TaskState.TASK_STATE_FAILED
+        assert "not connected" in responses[-1].content
+
+    async def test_dropped_persona_tools_are_reported_to_the_caller(self):
+        result = {"transcript": [{"role": "assistant", "text": "Ciao"}], "call_sid": "CA4", "error": None}
+        responses = await self._call_with_prewarmed({"gmail_search_threads": []}, refuse=False, result=result)
+        assert any("gmail_search_threads" in r.content for r in responses[:-1])
+        assert responses[-1].state == TaskState.TASK_STATE_COMPLETED
+        assert "gmail_search_threads" in responses[-1].content
