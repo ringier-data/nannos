@@ -87,6 +87,9 @@ spec:
         #   value: "alloych"
         # - name: GATANA_ORG_CAPACITY
         #   value: "10"
+        # Self-hosted Gatana only; unset, the client uses https://<GATANA_ORG_ID>.gatana.ai/api/v1
+        # - name: GATANA_BASE_URL
+        #   value: "https://gatana.example.com/api/v1"
         # GATANA_API_KEY should be in agent-runner-secrets
         envFrom:
         - secretRef:

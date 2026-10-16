@@ -186,7 +186,7 @@ startup order (namespaces `1-infra`, `2-deps`, `3-backend`, `4-agents`, `5-front
 |--------|---------|
 | `AWS_PROFILE`, `OIDC_ISSUER`, `MCP_GATEWAY_URL` | **Minimum** to boot the stack with cloud models + remote auth + tools |
 | `LANGSMITH_ORGANIZATION_ID`, `LANGSMITH_PROJECT_ID` | Tracing + usage links |
-| `GATANA_API_KEY`, `GATANA_ORG_ID`, `SANDBOX_PROVIDER`, `SANDBOX_POOL_CAPACITY`, `SANDBOX_WARM_TTL` | Sandbox-related tests |
+| `GATANA_API_KEY`, `GATANA_ORG_ID`, `GATANA_BASE_URL` (self-hosted Gatana; unset = `https://<org>.gatana.ai/api/v1`), `SANDBOX_PROVIDER`, `SANDBOX_POOL_CAPACITY`, `SANDBOX_WARM_TTL` | Sandbox-related tests |
 | `CODE_INTERPRETER_PTC=1` | In-process code-interpreter (PTC) |
 | `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY` | GitHub-backed skill registry |
 
