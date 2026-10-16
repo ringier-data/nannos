@@ -85,6 +85,7 @@ from agent_common.core.ptc_discovery import (
 from agent_common.core.ptc_signatures import render_tools_namespace
 from agent_common.middleware.continue_on_truncation import ContinueOnTruncationMiddleware
 from agent_common.middleware.premature_final_response import PrematureFinalResponseMiddleware
+from agent_common.middleware.turn_scoped_response import TurnScopedResponseMiddleware
 from agent_common.middleware.tool_retry import FailureHandlingToolRetryMiddleware
 from agent_common.middleware.conversation_context_tools_middleware import (
     ContextGatedTool,
@@ -1900,6 +1901,7 @@ def build_common_middleware_stack(
         GatewayAttributionMiddleware(),
         ContinueOnTruncationMiddleware(),
         PrematureFinalResponseMiddleware(),
+        TurnScopedResponseMiddleware(),
     ]
     # One loop-detection policy for the stack. It sits near the end of the stack
     # (below) and is also handed to the code interpreter so the PTC guard applies

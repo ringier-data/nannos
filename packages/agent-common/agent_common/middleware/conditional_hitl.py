@@ -133,22 +133,16 @@ def _client_action_tool_message(decision: dict[str, Any], tool_call: ToolCall) -
 def _answered(last_ai_msg: AIMessage, tool_messages: list[ToolMessage], *, end: bool = False) -> dict[str, Any]:
     """The state update for tool calls this middleware answered itself.
 
-    When every call of the turn has its ToolMessage here (an approved client_action
-    the browser already ran, a rejection, a corrective answer), nothing is left for
-    the tools node, and langchain's model→tools edge falls through to "a structured
-    response exists → end". The checkpoint can still hold an EARLIER turn's structured
-    response: langchain >= 1.3.15 clears it per model call only when the graph has a
-    ``response_format``, not with the schema bound as a plain tool. The run then ended
-    without the model ever reading the answers, and the stream replayed the stale reply.
-    Jumping back to the model explicitly is what the edge would do absent that state.
-
+    With every call answered here (an approved client_action the browser already ran, a
+    rejection, a corrective answer), langchain's model→tools edge goes back to the model
+    on its own: ``structured_response`` is per turn (``TurnScopedResponseMiddleware``).
     ``end`` ends the turn instead: the reply then says the call was not done
-    (``unanswered_turn_reply``), never the stale answer.
+    (``unanswered_turn_reply``).
     """
     update: dict[str, Any] = {"messages": [last_ai_msg, *tool_messages]}
     answered = {m.tool_call_id for m in tool_messages}
-    if tool_messages and all(call["id"] in answered for call in last_ai_msg.tool_calls):
-        update["jump_to"] = "end" if end else "model"
+    if end and tool_messages and all(call["id"] in answered for call in last_ai_msg.tool_calls):
+        update["jump_to"] = "end"
     return update
 
 

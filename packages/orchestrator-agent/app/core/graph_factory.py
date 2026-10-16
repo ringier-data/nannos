@@ -45,6 +45,7 @@ from agent_common.core.tool_risk_scorer import score_tool_risk
 from agent_common.middleware.conditional_hitl import ConditionalHumanInTheLoopMiddleware
 from agent_common.middleware.continue_on_truncation import ContinueOnTruncationMiddleware
 from agent_common.middleware.premature_final_response import PrematureFinalResponseMiddleware
+from agent_common.middleware.turn_scoped_response import TurnScopedResponseMiddleware
 from agent_common.middleware.conversation_context_tools_middleware import ConversationContextToolsMiddleware
 from agent_common.middleware.prompt_caching import LiteLLMPromptCachingMiddleware
 from agent_common.middleware.ptc_guard import PTC_CODE_INTERPRETER_TOOL_NAME
@@ -810,6 +811,8 @@ class GraphFactory:
             # the checkpointer see the cleaned message (prevents the model from
             # imitating its own text+tool-call pattern on later turns).
             FinalResponseTextStripMiddleware(),
+            # before_agent only, so its position is free: structured_response is per turn.
+            TurnScopedResponseMiddleware(),
         ]
         return middleware_stack
 

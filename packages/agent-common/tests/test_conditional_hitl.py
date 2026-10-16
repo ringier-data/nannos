@@ -927,7 +927,7 @@ class TestARefusedCallSentAgainAndAgain:
         turn = [HumanMessage(content="save it"), self._call("c1"), rejected]
 
         first = await self._after(monkeypatch, [*turn, self._call("c2")])
-        assert first["jump_to"] == "model"
+        assert "jump_to" not in first  # back to the model by langchain's own edge
         assert first["messages"][-1].content == _REFUSED_AGAIN
 
         again = ToolMessage(content=_REFUSED_AGAIN, tool_call_id="c2", status="error")
