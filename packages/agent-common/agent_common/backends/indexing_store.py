@@ -140,15 +140,12 @@ class IndexingStoreBackend(StoreBackend):
         self.documents_store: AsyncPostgresStore = store
         self._cost_logger = cost_logger
 
-    def delete(self, file_path: str) -> DeleteResult:
-        # The delete tool runs ``adelete`` in our (async) graphs, which also drops the index.
-        return super().delete(file_path)
-
     async def adelete(self, file_path: str) -> DeleteResult:
         """Delete a file or directory and its search index.
 
         Left to ``StoreBackend``, the file went but its index entry and chunks stayed, so
-        ``docstore_search`` kept returning a deleted memory. The delete is recursive, so
+        ``docstore_search`` kept returning a deleted memory. Only the async path does this:
+        the delete tool runs ``adelete`` in our graphs. The delete is recursive, so
         the files it removes are listed first, the way ``StoreBackend.adelete`` selects them.
         """
         base = file_path.rstrip("/")
