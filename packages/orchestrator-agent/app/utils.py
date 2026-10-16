@@ -253,12 +253,15 @@ def build_runtime_context(
     # Auto-include scheduler tools and console tools (always available from MCP)
     # These are essential for the orchestrator to delegate to task-scheduler sub-agent
     #
-    # Deliberately NOT here: console_list_mcp_servers / console_grep_mcp_tools. They date
-    # from when the orchestrator ran the scheduler itself and needed tool names for job
-    # configs; that moved into the task-scheduler sub-agent (#108), whose seed whitelists
-    # both listers (agent-creator's too). On the orchestrator they only tempted the model
-    # to discover tools it cannot call — the right move for anything outside its own
-    # whitelist is a `task` delegation, and it knows the sub-agents from the task enum.
+    # Deliberately NOT here: console_list_mcp_servers. It dates from when the orchestrator
+    # ran the scheduler itself and needed tool names for job configs; that moved into the
+    # task-scheduler sub-agent (#108), whose seed whitelists it (agent-creator's too). On
+    # the orchestrator it only tempted the model to discover tools it cannot call — the
+    # right move for anything outside its own whitelist is a `task` delegation.
+    # console_grep_mcp_tools IS here, for one job: a voice-agent call takes the exact names
+    # of the gateway tools the call may use (`mcp_tools`), and the orchestrator sees only
+    # a slice of the user's catalogue. The search runs on the same per-user gateway view
+    # the voice-agent checks names against.
     allowed_orchestrator_tools = {
         "console_list_sub_agents",
         "console_update_sub_agent",
@@ -275,6 +278,8 @@ def build_runtime_context(
         # Web search (console-backend MCP tool). Auto-included so the orchestrator can ground
         # answers; sub-agents opt in via their MCP-tools whitelist.
         "console_web_search",
+        # Exact tool names for a voice-agent call's mcp_tools (see above).
+        "console_grep_mcp_tools",
     }
     orchestrator_auto_tools = {
         name for name in tool_registry.keys() if name.startswith("scheduler_") or name in allowed_orchestrator_tools
