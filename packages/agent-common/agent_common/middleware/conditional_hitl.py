@@ -407,6 +407,26 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
 
     The ``aafter_model`` method is async-native and handles both modes.
     The sync ``after_model`` only handles static guards (no scoring).
+
+    **Why the hook is replaced, not wrapped.** LangChain's ``after_model`` is configured
+    per tool through ``interrupt_on`` (a ``when`` predicate, a ``description``, the
+    ``allowed_decisions``) and then calls ``interrupt()`` and reads ``["decisions"]``
+    itself. That cannot express what this middleware needs:
+
+    - deciding to ask is async (an LLM risk score per new tool), while ``when`` is sync;
+    - a third outcome besides "run" and "ask": answering a call without running it —
+      a call the user refused earlier this turn, an unresolvable tool name, a save held
+      back until its fill ran, a ``client_action`` the browser already executed. Through
+      ``when`` each of these would read "don't interrupt", and LangChain would RUN it;
+    - a resume that is not always ``{"decisions": [...]}``: typed words and
+      authorization answers, read by ``hitl_resume.decisions_from_resume`` (async);
+    - cards carrying ``_call_id``, ``_risk_metadata`` and generated summaries.
+
+    So both hooks are ours, and only the per-decision step is shared with LangChain, through
+    ``_process_decision`` (overridden below). The inherited ``wrap_tool_call`` is a no-op
+    here: it applies edits from ``hitl_edited_tool_calls``, a key only LangChain's own
+    ``after_model`` writes. ``tests/test_upstream_contract_pins.py`` pins the contract, so
+    a LangChain release that changes it fails there first.
     """
 
     @staticmethod
@@ -422,6 +442,10 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         ``after_model`` writes. Our ``after_model``/``aafter_model`` replace that hook, so
         with the inherited method an edit was silently dropped and the model's original
         arguments ran. Here the edited call goes into the message, as before.
+
+        An ``edit`` without an ``edited_action`` is the card's "Request changes": the user's
+        words, no new arguments. The call is not run and the words reach the model, which
+        sends a revised call (asked again); LangChain reads ``edited_action`` and raises.
 
         langchain >= 1.3.18 also wraps a reject reason as "User rejected the tool call for
         ... with reason: <msg>". Our reasons are already addressed to the model
