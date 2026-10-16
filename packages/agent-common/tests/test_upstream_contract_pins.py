@@ -141,3 +141,18 @@ async def test_an_interrupt_still_propagates():
 
     with pytest.raises(GraphInterrupt):
         await _retry_mw().awrap_tool_call(_ToolRequest(), handler)
+
+
+def test_offloaded_result_names_stay_short_for_long_tool_call_ids():
+    """Gemini ids from the gateway carry a multi-KB packed thought signature. An offload
+    path built from one overflowed the Postgres store's index (``ProgramLimitExceeded``);
+    deepagents >= 0.7 hashes any id over 128 bytes, which is all that prevents it now."""
+    from deepagents.backends.utils import sanitize_tool_call_id
+
+    long_id = "call_7acafe2be6f646eaa9562734ce9f__thought__" + "x" * 2700
+
+    name = sanitize_tool_call_id(long_id)
+
+    assert len(name.encode("utf-8")) <= 128
+    assert name == sanitize_tool_call_id(long_id)
+    assert name != sanitize_tool_call_id(long_id.replace("7acafe", "8bcafe"))
