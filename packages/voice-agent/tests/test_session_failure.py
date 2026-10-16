@@ -361,3 +361,12 @@ class TestPersonaUnknownTools:
 
         assert seen["mcp_tools"] == ["gmail_get_message"]
         assert seen["refuse_unknown_tools"] is True
+
+
+def test_call_trace_redacts_the_bearer_token():
+    from voice_agent.a2a_agent import _redact_call_inputs
+
+    redacted = _redact_call_inputs({"access_token": "eyJ.secret", "phone_number": "+41790000000", "mcp_tools": []})
+    assert redacted["access_token"] == "<redacted>"
+    assert redacted["phone_number"] == "+41790000000"
+    assert _redact_call_inputs({"access_token": None})["access_token"] is None

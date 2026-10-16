@@ -203,6 +203,11 @@ class VoiceCallRequest(BaseModel):
 JSON_SCHEMA = VoiceCallRequest.model_json_schema()
 
 
+def _redact_call_inputs(inputs: dict) -> dict:
+    """Trace inputs of a phone call without the caller's bearer token."""
+    return {key: ("<redacted>" if key == "access_token" and value else value) for key, value in inputs.items()}
+
+
 class VoiceAgent(BaseAgent):
     """A2A voice agent wrapping GeminiLiveAgent."""
 
@@ -706,7 +711,7 @@ class VoiceAgent(BaseAgent):
         )
         return result
 
-    @traceable(name="voice-phone-call", run_type="tool")
+    @traceable(name="voice-phone-call", run_type="tool", process_inputs=_redact_call_inputs)
     async def _stream_phone_call(
         self,
         *,
