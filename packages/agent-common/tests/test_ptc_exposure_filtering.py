@@ -364,7 +364,7 @@ class TestTheNamespaceIsRebuiltWithoutARiskScorer:
         request = _req(tools=[], state={"_quickjs_slot_id": "s-1"})
         assert not mw._ptc_tools_by_slot.get("s-1")
 
-        mw._ensure_ptc_namespace(request, "t-1")
+        mw._ensure_ptc_namespace(request)
 
         names = {t.name for t in mw._ptc_tools_by_slot["s-1"]}
         assert "github_get_me" in names, f"replayed eval would see an empty namespace; got {names}"
@@ -375,6 +375,6 @@ class TestTheNamespaceIsRebuiltWithoutARiskScorer:
         sentinel = (_tool("already_here"),)
         mw._ptc_tools_by_slot["s-2"] = sentinel
 
-        mw._ensure_ptc_namespace(_req(tools=[], state={"_quickjs_slot_id": "s-2"}), "t-2")
+        mw._ensure_ptc_namespace(_req(tools=[], state={"_quickjs_slot_id": "s-2"}))
 
         assert mw._ptc_tools_by_slot["s-2"] is sentinel

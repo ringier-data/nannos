@@ -527,7 +527,7 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
 
         return bool(condition(tool_call.get("args", {})))
 
-    @hook_config(can_jump_to=["model"])
+    @hook_config(can_jump_to=["end"])
     def after_model(self, state: AgentState[Any], runtime: Runtime[ContextT]) -> dict[str, Any] | None:
         """Sync handler: only processes static interrupt_on guards.
 
@@ -647,7 +647,7 @@ class ConditionalHumanInTheLoopMiddleware(HumanInTheLoopMiddleware[StateT, Conte
         scores = asyncio.gather(*(score(p) for p in pending), return_exceptions=True)
         return await await_with_keepalive(scores, source="tool-risk-scoring", on_slow=_say_why)
 
-    @hook_config(can_jump_to=["model", "end"])
+    @hook_config(can_jump_to=["end"])
     async def aafter_model(self, state: AgentState[Any], runtime: Runtime[ContextT]) -> dict[str, Any] | None:
         """Async handler: combines static guards + dynamic risk scoring.
 

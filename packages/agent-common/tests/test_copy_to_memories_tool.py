@@ -37,7 +37,7 @@ async def test_copy_file_success():
     assert "indexed for semantic search" in result
 
     # Verify backend calls
-    mock_backend.aread.assert_called_once_with("/temp/test.txt", offset=0)
+    mock_backend.aread.assert_called_once_with("/temp/test.txt", offset=0, limit=10**9)
     mock_backend.awrite.assert_called_once_with("/memories/test.txt", "Test content for large file")
 
 

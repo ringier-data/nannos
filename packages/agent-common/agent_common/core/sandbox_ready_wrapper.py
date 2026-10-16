@@ -27,6 +27,20 @@ _NOT_READY_PATTERNS = (
 )
 
 
+def _is_not_ready_text(text: str | None) -> bool:
+    """Whether sandbox output, a search error or an exception message means "not ready yet"."""
+    lowered = (text or "").lower()
+    return any(p in lowered for p in _NOT_READY_PATTERNS)
+
+
+def _raise_if_not_ready(text: str | None, source: str) -> None:
+    """Raise the retryable SandboxNotReadyError when ``text`` says the sandbox is not ready."""
+    if _is_not_ready_text(text):
+        detail = (text or "").strip()
+        logger.warning("Sandbox not ready (%s: %s), raising retryable error", source, detail[:100])
+        raise SandboxNotReadyError(f"Sandbox is not ready: {detail[:200]}")
+
+
 class SandboxNotReadyError(RuntimeError):
     """Raised when the sandbox hasn't finished initializing.
 
@@ -69,16 +83,7 @@ class ReadySandboxWrapper:
 
     def _check_not_ready(self, result: "ExecuteResponse") -> None:
         """Raise SandboxNotReadyError if the output indicates sandbox isn't ready."""
-        if not result.output:
-            return
-        output_lower = result.output.strip().lower()
-        for pattern in _NOT_READY_PATTERNS:
-            if pattern in output_lower:
-                logger.warning(
-                    "Sandbox not ready (output: %s), raising retryable error",
-                    result.output.strip()[:100],
-                )
-                raise SandboxNotReadyError(f"Sandbox is not ready: {result.output.strip()[:200]}")
+        _raise_if_not_ready(result.output, "output")
 
     # ``BaseSandbox.glob``/``grep`` run their shell commands through the *inner* backend's
     # own ``execute``, so the check above never sees them. Since deepagents 0.7.7 a
@@ -106,9 +111,7 @@ class ReadySandboxWrapper:
     def _check_result_not_ready(self, result: Any) -> Any:
         """Raise SandboxNotReadyError if a glob/grep result's error says the sandbox isn't ready."""
         error = getattr(result, "error", None)
-        if isinstance(error, str) and any(p in error.lower() for p in _NOT_READY_PATTERNS):
-            logger.warning("Sandbox not ready (search error: %s), raising retryable error", error.strip()[:100])
-            raise SandboxNotReadyError(f"Sandbox is not ready: {error.strip()[:200]}")
+        _raise_if_not_ready(error if isinstance(error, str) else None, "search error")
         return result
 
     def upload_files(self, files: list[tuple[str, bytes]]) -> list:
@@ -132,8 +135,7 @@ class ReadySandboxWrapper:
     @staticmethod
     def _is_not_ready_error(exc: Exception) -> bool:
         """Check if an exception indicates the sandbox isn't ready."""
-        msg = str(exc).lower()
-        return any(p in msg for p in _NOT_READY_PATTERNS)
+        return _is_not_ready_text(str(exc))
 
 
 # Register as a virtual subclass so isinstance() checks in FilesystemMiddleware

@@ -480,7 +480,7 @@ class RepeatedToolCallMiddleware(AgentMiddleware[LoopDetectionState, ContextT]):
             return None
         return {"tool_call_history": carried}
 
-    @hook_config(can_jump_to=["model", "end"])
+    @hook_config(can_jump_to=["end"])
     async def aafter_model(
         self,
         state: LoopDetectionState,

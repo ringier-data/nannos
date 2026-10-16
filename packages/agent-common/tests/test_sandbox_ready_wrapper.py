@@ -228,3 +228,11 @@ class TestSearchNotReady:
         assert _method_accepts_max_count(ReadySandboxWrapper, "grep")
         wrapper.grep("TODO", "/home", max_count=50)
         assert sandbox.grep_kwargs == {"max_count": 50}
+
+
+def test_a_sandbox_still_starting_is_retried():
+    """The wrapper raises it so the tool-retry middleware backs off and tries again."""
+    from agent_common.core.graph_utils import _should_retry_tool_error
+
+    assert _should_retry_tool_error(SandboxNotReadyError("Sandbox is not ready")) is True
+    assert _should_retry_tool_error(RuntimeError("boom")) is False

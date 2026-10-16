@@ -265,6 +265,7 @@ def _should_retry_tool_error(exc: Exception) -> bool:
     Only retries errors that may succeed on a subsequent attempt:
     - HTTP 5xx server errors (temporary server issues)
     - Network errors: connection failures, timeouts
+    - SandboxNotReadyError: the sandbox is still starting
 
     Does NOT retry (non-transient / deterministic):
     - GraphBubbleUp (LangGraph interrupt mechanism — must propagate)
@@ -287,7 +288,10 @@ def _should_retry_tool_error(exc: Exception) -> bool:
         # Network-level errors (ConnectError, TimeoutException, etc.) are transient
         return True
 
-    return False
+    # A sandbox still starting (ReadySandboxWrapper); with backoff it is ready within ~30s.
+    from agent_common.core.sandbox_ready_wrapper import SandboxNotReadyError
+
+    return isinstance(exc, SandboxNotReadyError)
 
 
 # Read-only filesystem tools: safe to expose via PTC ``eval``. They can never
@@ -1197,7 +1201,7 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
             raise TypeError(msg)
         return Command(update=merged, goto=result.goto, graph=result.graph, resume=result.resume)
 
-    async def _run_eval_with_guidance(self, request: Any, handler: Any, thread_id: Any) -> Any:
+    async def _run_eval_with_guidance(self, request: Any, handler: Any) -> Any:
         """Run ``eval`` with the top-level-``return`` retry, then annotate a ``not a function``.
 
         A ``TypeError: not a function`` on ``tools.<x>`` almost always means the model used
@@ -1210,7 +1214,7 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
         code = ((getattr(request, "tool_call", None) or {}).get("args") or {}).get("code")
         if not isinstance(code, str):
             return result
-        exposed = self._ptc_tools_by_slot.get(_quickjs_slot_of(getattr(request, "state", None)) or "") or ()
+        exposed = self._ptc_tools_for(request)
         hint = _not_a_function_hint(code, (t.name for t in exposed if isinstance(t, BaseTool)))
         if not hint:
             return result
@@ -1321,16 +1325,20 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
             # turn came back with "tools.X is not a function" and the agent duly
             # reported that its tools do not exist. The rebuild has nothing to do with
             # HITL, so it does not belong on the HITL path.
-            self._ensure_ptc_namespace(request, thread_id)
+            self._ensure_ptc_namespace(request)
             try:
                 if not self._ptc_enabled or self._ptc_risk_scorer is None:
-                    result = await self._run_eval_with_guidance(request, handler, thread_id)
+                    result = await self._run_eval_with_guidance(request, handler)
                     return self._with_tool_call_history(result, turn)
                 return await self._run_guarded_eval(request, handler, thread_id, turn)
             finally:
                 end_ptc_turn(thread_id)
 
-    def _ensure_ptc_namespace(self, request: Any, thread_id: Any) -> None:
+    def _ptc_tools_for(self, request: Any) -> tuple:
+        """The ``tools.*`` installed in this request's REPL slot (empty when none)."""
+        return self._ptc_tools_by_slot.get(_quickjs_slot_of(getattr(request, "state", None)) or "") or ()
+
+    def _ensure_ptc_namespace(self, request: Any) -> None:
         """Make sure this thread's ``tools.*`` bridges exist before ``eval`` runs.
 
         Idempotent: on the normal path the model-call hook has already filled the
@@ -1363,7 +1371,7 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
             # actually let through are announced below, once their decisions are known.
             replay = ask_round > 0 or resume_will_return()
             with tool_status_suppressed(replay):
-                result = await self._run_eval_with_guidance(request, handler, thread_id)
+                result = await self._run_eval_with_guidance(request, handler)
             pending = take_ptc_pending(thread_id)
             if not pending:
                 return self._with_tool_call_history(result, turn)
@@ -1380,7 +1388,7 @@ class _PTCToleranceCodeInterpreterMiddleware(CodeInterpreterMiddleware):
             # Best-effort: on failure the client shows raw args.
             from agent_common.core.tool_call_summarizer import attach_summaries
 
-            ptc_tools = self._ptc_tools_by_slot.get(_quickjs_slot_of(getattr(request, "state", None)) or "") or ()
+            ptc_tools = self._ptc_tools_for(request)
             descriptions = {t.name: t.description or "" for t in ptc_tools}
             await attach_summaries(
                 hitl_request["action_requests"],

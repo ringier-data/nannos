@@ -461,15 +461,20 @@ def create_model(
         use_responses_api=False,
         **optional,
     )
-    # No context window from langchain-openai's built-in profiles: they are keyed by model
-    # name, and ours are gateway aliases (``gpt-6-sol`` gets OpenAI's 1.05M; the Azure
+    # No large context window from langchain-openai's built-in profiles: they are keyed by
+    # model name, and ours are gateway aliases (``gpt-6-sol`` gets OpenAI's 1.05M; the Azure
     # deployment takes 922k). deepagents sizes summarization from it (0.85 × window, keep
-    # 10%), so that alias alone would compact at ~890k tokens, not the 170k every other
-    # alias uses — each long-conversation call then costing ~5×. Without it all aliases
-    # share the fixed defaults; an oversized request is still recovered on the gateway's 400.
-    if model.profile and "max_input_tokens" in model.profile:
+    # 10%), so that alias alone would compact at ~890k tokens, not the fixed 170k the others
+    # use — each long-conversation call then costing ~5×. A window below that default is
+    # kept: it makes a small-context model (128k) compact before it overflows.
+    window = (model.profile or {}).get("max_input_tokens")
+    if isinstance(window, int) and window > _SUMMARIZATION_DEFAULT_TRIGGER_TOKENS:
         model.profile = {k: v for k, v in model.profile.items() if k != "max_input_tokens"}
     return model
+
+
+#: deepagents' summarization trigger for a model with no context window in its profile.
+_SUMMARIZATION_DEFAULT_TRIGGER_TOKENS = 170_000
 
 
 class EmbeddingModelNotConfigured(RuntimeError):

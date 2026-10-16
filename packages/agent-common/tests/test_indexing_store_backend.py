@@ -588,3 +588,56 @@ class TestBackendOpsBoundKeys:
         with patch.object(StoreBackend, "ls", return_value=MagicMock()) as parent_ls:
             backend.ls(_OFFLOAD_PATH)
         assert _BOUNDED_PATH in parent_ls.call_args.args
+
+
+class TestDeleteDropsTheIndex:
+    """deepagents 0.7's recursive ``delete``: a deleted memory must not stay searchable."""
+
+    _DOCS = ("user-xyz", "documents")
+
+    async def _backend_with(self, paths: list[str]):
+        from langgraph.store.memory import InMemoryStore
+
+        store = InMemoryStore()
+        backend = IndexingStoreBackend(store=store, namespace_factory=lambda _rt: ("user-xyz", "filesystem"))
+        with patch.object(IndexingStoreBackend, "_index_content", AsyncMock()):
+            for path in paths:
+                assert (await backend.awrite(path, f"content of {path}")).error is None
+        for path in paths:  # what _index_content stores: an entry plus its chunks
+            key = bounded_storage_key(path)
+            chunks = [f"{key}#chunk_{i}" for i in range(2)]
+            await store.aput(self._DOCS, key, {"file_path": key, "chunk_keys": chunks})
+            for chunk in chunks:
+                await store.aput(self._DOCS, chunk, {"text": "x"})
+        return backend, store
+
+    async def _index_keys(self, store) -> set[str]:
+        return {item.key for item in await store.asearch(self._DOCS, limit=1000)}
+
+    async def test_a_deleted_file_loses_its_index_and_chunks(self):
+        backend, store = await self._backend_with(["/memories/a.md", "/memories/b.md"])
+
+        with patch("agent_common.backends.indexing_store.get_config", return_value=_make_config()):
+            result = await backend.adelete("/memories/a.md")
+
+        assert result.error is None
+        assert await self._index_keys(store) == {"/memories/b.md", "/memories/b.md#chunk_0", "/memories/b.md#chunk_1"}
+        assert (await backend.aread("/memories/a.md")).error
+
+    async def test_deleting_a_directory_drops_every_file_index_under_it(self):
+        backend, store = await self._backend_with(["/memories/notes/x.md", "/memories/notes/y.md", "/memories/z.md"])
+
+        with patch("agent_common.backends.indexing_store.get_config", return_value=_make_config()):
+            result = await backend.adelete("/memories/notes")
+
+        assert result.error is None
+        assert await self._index_keys(store) == {"/memories/z.md", "/memories/z.md#chunk_0", "/memories/z.md#chunk_1"}
+
+    async def test_a_long_offloaded_path_is_found_by_its_bounded_key(self):
+        backend, store = await self._backend_with([_OFFLOAD_PATH])
+
+        with patch("agent_common.backends.indexing_store.get_config", return_value=_make_config()):
+            result = await backend.adelete(_OFFLOAD_PATH)
+
+        assert result.error is None
+        assert (await backend.aread(_BOUNDED_PATH)).error

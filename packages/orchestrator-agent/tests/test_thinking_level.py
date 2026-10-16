@@ -159,3 +159,14 @@ def test_a_gateway_alias_carries_no_built_in_context_window():
 
     assert "max_input_tokens" not in (model.profile or {})
     assert compute_summarization_defaults(model)["trigger"] == ("tokens", 170000)
+
+
+@patch.dict(os.environ, _GW_ENV)
+def test_a_small_built_in_context_window_is_kept():
+    """Below the 170k default the window still matters: a 128k model compacts before it overflows."""
+    from deepagents.middleware.summarization import compute_summarization_defaults
+
+    model = create_model("gpt-4o")
+
+    assert (model.profile or {}).get("max_input_tokens") == 128000
+    assert compute_summarization_defaults(model)["trigger"] == ("fraction", 0.85)

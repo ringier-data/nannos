@@ -28,7 +28,15 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from deepagents.backends.protocol import EditResult, GlobResult, GrepResult, LsResult, ReadResult, WriteResult
+from deepagents.backends.protocol import (
+    DeleteResult,
+    EditResult,
+    GlobResult,
+    GrepResult,
+    LsResult,
+    ReadResult,
+    WriteResult,
+)
 from deepagents.backends.store import StoreBackend
 from langgraph.config import get_config
 from langgraph.store.postgres.aio import AsyncPostgresStore
@@ -115,6 +123,30 @@ def bounded_storage_key(file_path: str) -> str:
     keep = _MAX_STORAGE_KEY_BYTES - _KEY_HASH_LEN - 1
     truncated = encoded[:keep].decode("utf-8", "ignore")
     return f"{truncated}_{digest}"
+
+
+def _documents_namespace(file_path: str, metadata: dict[str, Any], user_id: str | None) -> tuple[str, ...] | None:
+    """Where a file's index entry and chunks live; ``None`` (logged) when the run lacks the scope.
+
+    - /large_tool_results/ and /attachments/: (conversation_id, "tool_results") - conversation-scoped
+    - /channel_memories/: (assistant_id, "documents") - channel-scoped
+    - anything else (/memories/): (user_id, "documents") - user-scoped
+    """
+    if file_path.startswith(("/large_tool_results/", "/attachments/")):
+        conversation_id = metadata.get("conversation_id")
+        if not conversation_id:
+            logger.error(f"Cannot scope the index of {file_path}: conversation_id missing from metadata.")
+            return None
+        return (conversation_id, "tool_results")
+    if file_path.startswith("/channel_memories/"):
+        assistant_id = metadata.get("assistant_id")
+        if not assistant_id:
+            logger.error(f"Cannot scope the index of channel file {file_path}: assistant_id missing from metadata.")
+            return None
+        return (assistant_id, "documents")
+    if not user_id:
+        return None
+    return (user_id, "documents")
 
 
 class IndexingStoreBackend(StoreBackend):
@@ -218,6 +250,39 @@ class IndexingStoreBackend(StoreBackend):
 
     def glob(self, pattern: str, path: str = "/") -> GlobResult:
         return super().glob(pattern, bounded_storage_key(path))
+
+    def delete(self, file_path: str) -> DeleteResult:
+        # The delete tool runs ``adelete`` in our (async) graphs, which also drops the index.
+        return super().delete(bounded_storage_key(file_path))
+
+    async def adelete(self, file_path: str) -> DeleteResult:
+        """Delete a file or directory and its search index.
+
+        Left to ``StoreBackend``, the file went but its index entry and chunks stayed, so
+        ``docstore_search`` kept returning a deleted memory. The delete is recursive, so
+        the files it removes are listed first, the way ``StoreBackend.adelete`` selects them.
+        """
+        file_path = bounded_storage_key(file_path)
+        base = file_path.rstrip("/")
+        items = await self._asearch_store_paginated(self._get_store(), self._get_namespace())
+        removed = [key for item in items if (key := str(item.key)) == base or key.startswith(base + "/")]
+        result = await super().adelete(file_path)
+        if not result.error:
+            await asyncio.gather(*(self._drop_index(key) for key in removed))
+        return result
+
+    async def _drop_index(self, file_path: str) -> None:
+        """Remove a file's index entry and its chunks, if it was indexed."""
+        metadata = get_config().get("metadata", {})
+        namespace = _documents_namespace(file_path, metadata, metadata.get("user_id"))
+        if namespace is None:
+            return
+        entry = await self.documents_store.aget(namespace=namespace, key=file_path)
+        if entry is None:
+            return
+        keys = [*entry.value.get("chunk_keys", []), file_path]
+        await asyncio.gather(*(self.documents_store.adelete(namespace=namespace, key=key) for key in keys))
+        logger.info(f"Dropped the search index of deleted '{file_path}' ({len(keys) - 1} chunks)")
 
     async def awrite(self, file_path: str, content: str) -> WriteResult:
         """Write file and automatically index content.
@@ -360,35 +425,9 @@ class IndexingStoreBackend(StoreBackend):
             # ``tool_results`` chunk namespace so the search finds them.
             is_attachment = file_path.startswith("/attachments/")
 
-            # Determine namespace based on file path:
-            # - /large_tool_results/ and /attachments/: (conversation_id, "tool_results") - conversation-scoped
-            # - /memories/: (user_id, "documents") - user-scoped
-            # - /channel_memories/: (assistant_id, "documents") - channel-scoped
-            if is_large_tool_result or is_attachment:
-                conversation_id_ns = metadata_dict.get("conversation_id")
-                if not conversation_id_ns:
-                    logger.error(
-                        f"Cannot index {file_path}: conversation_id missing from metadata. "
-                        f"Conversation-scoped files require conversation context for proper scoping."
-                    )
-                    return
-                namespace = (conversation_id_ns, "tool_results")
-                logger.debug(f"Using conversation-scoped namespace for {file_path}: {namespace}")
-            elif file_path.startswith("/channel_memories/"):
-                # Channel files: assistant-scoped namespace
-                assistant_id = metadata_dict.get("assistant_id")
-                if not assistant_id:
-                    logger.error(
-                        f"Cannot index channel file {file_path}: assistant_id missing from metadata. "
-                        f"Channel files require assistant context for proper scoping."
-                    )
-                    return
-                namespace = (assistant_id, "documents")
-                logger.debug(f"Using channel-scoped namespace for channel file: {namespace}")
-            else:
-                # User files (/memories/): user-scoped namespace
-                namespace = (user_id, "documents")
-                logger.debug(f"Using user-scoped namespace for personal file: {namespace}")
+            namespace = _documents_namespace(file_path, metadata_dict, user_id)
+            if namespace is None:
+                return
 
             # Content-hash caching: skip re-indexing when content is unchanged,
             # re-vectorise when it differs. This makes both eager (awrite) and

@@ -9,7 +9,7 @@ When implementing new features or refactoring existing code, consider if these i
 - Python library consumed by all agent services (orchestrator, agent-runner, voice-agent)
 - LangGraph for agent execution graphs
 - Pydantic v2 for data validation
-- deepagents SDK (v0.5.7+) for graph building primitives
+- deepagents SDK (0.7.x) for graph building primitives
 - pytest with pytest-asyncio for testing
 
 ## Python Environment

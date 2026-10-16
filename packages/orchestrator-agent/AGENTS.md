@@ -8,7 +8,7 @@ When implementing new features or refactoring existing code, consider if these i
 
 - FastAPI + A2A protocol for agent communication
 - LangGraph for orchestration state machine
-- deepagents SDK (v0.5.7+) for graph primitives and sub-agent dispatch
+- deepagents SDK (0.7.x) for graph primitives and sub-agent dispatch
 - PostgreSQL + optional S3 for checkpoints
 - PostgreSQL + pgvector for document store (semantic indexing); the same database backs the A2A task store (`app/core/task_store.py`, in-memory fallback when Postgres is not configured)
 - Pydantic v2 for data validation
@@ -392,10 +392,11 @@ Learned the hard way; each cost real debugging time.
 - **Assertions must be turn-scoped.** The checkpointer accumulates history, so an
   unscoped read happily passes on a delegation from two turns ago. The helpers default
   to the current turn.
-- **Never read `structured_response` for the answer.** It is a persisted channel: after a
-  turn that ends without a `FinalResponseSchema` call it still holds an earlier turn's
-  answer (nannos#358). The answer is this turn's call; use `final_response()`, which
-  shares the production resolver `current_turn_final_response`.
+- **Read the answer from this turn's messages, not `structured_response`.** The channel is
+  per turn (`TurnScopedResponseMiddleware` clears it when a turn starts), but it is only
+  set on the forced-tool path; with the schema bound as a plain tool the answer exists
+  only as the `FinalResponseSchema` call. Use `final_response()`, which shares the
+  production resolver `current_turn_final_response`.
 - **`include_subagent_output=true` means `message` is EMPTY** by design — the
   sub-agent's output is appended downstream. `final_text()` reproduces that; reading
   `message` alone reports an empty answer for a turn that answered at length.

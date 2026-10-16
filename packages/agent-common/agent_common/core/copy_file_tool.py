@@ -55,17 +55,22 @@ def _validate_path(path: str) -> str:
     return path
 
 
+#: Lines per ``aread`` call: enough for any file in one read.
+_WHOLE_FILE_LINES = 10**9
+
+
 class _CopyReadError(Exception):
     """A source that cannot be copied, with a message for the model."""
 
 
 async def _read_whole_text(backend: BackendProtocol, path: str) -> str:
-    """The whole text of ``path``. ``aread`` returns a ``ReadResult`` (not a string) and
-    one window of lines at a time, so follow ``next_offset`` to the end."""
+    """The whole text of ``path``. ``aread`` returns a ``ReadResult`` (not a string) one window
+    of lines at a time; ask for all of it at once (a store-backed read fetches the whole
+    document per call) and follow ``next_offset`` should a backend still page."""
     parts: list[str] = []
     offset = 0
     while True:
-        result = await backend.aread(path, offset=offset)
+        result = await backend.aread(path, offset=offset, limit=_WHOLE_FILE_LINES)
         if result.error:
             raise _CopyReadError(f"Could not read source file '{path}': {result.error}")
         file_data = result.file_data or {}
