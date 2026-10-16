@@ -1992,7 +1992,7 @@ wheels = [
 
 [[package]]
 name = "ringier-a2a-sdk"
-version = "1.7.1"
+version = "1.7.2"
 source = { editable = "../ringier-a2a-sdk" }
 dependencies = [
     { name = "a2a-sdk" },
@@ -2354,7 +2354,7 @@ wheels = [
 
 [[package]]
 name = "voice-agent"
-version = "1.2.7"
+version = "1.2.8"
 source = { editable = "." }
 dependencies = [
     { name = "a2a-sdk", extra = ["http-server"] },
