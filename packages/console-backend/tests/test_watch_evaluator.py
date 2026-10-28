@@ -164,8 +164,20 @@ class TestFailuresAreNotQuietOutcomes:
         _gateway(monkeypatch, {"output": "campaign 4821 not found"}, is_error=True)
         outcome = await WatchEvaluator().evaluate(AsyncMock(), _job(), "tok")
         assert outcome.condition_met is False
-        assert "reported an error" in (outcome.error or "")
-        assert outcome.check_result == {"output": "campaign 4821 not found"}
+        assert "campaign 4821 not found" in (outcome.error or "")
+        # The error payload must not become the next poll's `prev`.
+        assert outcome.check_result is None
+
+    @pytest.mark.asyncio
+    async def test_a_cel_failure_keeps_the_response_so_a_null_prev_heals(self, monkeypatch):
+        # `result != prev` throws while `prev` is null (a watch's first poll). Storing the
+        # response is what lets the second poll evaluate.
+        _gateway(monkeypatch, {"items": [1]})
+        outcome = await WatchEvaluator().evaluate(
+            AsyncMock(), _job(cel_expr="result != prev", last_check_result=None), "tok"
+        )
+        assert "CEL condition" in (outcome.error or "")
+        assert outcome.check_result == {"items": [1]}
 
     @pytest.mark.asyncio
     async def test_a_conditionless_watch_is_an_error_not_a_silent_no(self, monkeypatch):

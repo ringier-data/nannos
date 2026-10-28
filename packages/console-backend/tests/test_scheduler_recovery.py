@@ -100,6 +100,36 @@ class TestRetryMarkerSurvivesOtherCompletions:
         assert await job_retry_at(pg_session, job_id) is not None
 
 
+class TestCheckResultSurvivesAFailedCheck:
+    """A check that returned no response (a tool error) leaves the watch's `prev` alone."""
+
+    @pytest.mark.asyncio
+    async def test_a_completion_without_a_response_keeps_the_stored_one(self, pg_session: AsyncSession):
+        repo = ScheduledJobRepository()
+        job_id = await seed_job(pg_session, "prev")
+        await pg_session.commit()
+
+        async def _prev():
+            r = await pg_session.execute(
+                text("SELECT last_check_result FROM scheduled_job_subscriptions WHERE id = :id"), {"id": job_id}
+            )
+            return r.scalar_one()
+
+        later = datetime.now(timezone.utc) + timedelta(hours=1)
+        await repo.complete_job(
+            db=pg_session,
+            subscription_id=job_id,
+            status=JobRunStatus.CONDITION_NOT_MET,
+            next_run_at=later,
+            last_check_result={"items": [1]},
+        )
+        await repo.complete_job(
+            db=pg_session, subscription_id=job_id, status=JobRunStatus.FAILED, next_run_at=later, last_check_result=None
+        )
+        await pg_session.commit()
+        assert await _prev() == {"items": [1]}
+
+
 class TestRetryClaiming:
     """retry_at is the claim loop's second wake-up reason."""
 
