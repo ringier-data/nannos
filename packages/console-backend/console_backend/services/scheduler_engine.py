@@ -870,11 +870,7 @@ class SchedulerEngine:
                                 status=JobRunStatus.FAILED,
                                 error_message=watch_outcome.error,
                                 delivered=False,
-                                # `prev` stays the last result a condition was judged on. A
-                                # tool's error payload as `prev` breaks the next poll's diff, and
-                                # a result whose condition never evaluated would hide its new
-                                # items behind the poll after it.
-                                last_check_result=None,
+                                last_check_result=watch_outcome.check_result,
                                 condition_evaluation=watch_outcome.evaluation,
                                 trigger=trigger,
                             )

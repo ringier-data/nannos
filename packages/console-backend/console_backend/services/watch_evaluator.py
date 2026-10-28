@@ -92,7 +92,8 @@ class WatchOutcome:
 
     condition_met: bool
     #: The tool response, kept whether or not the condition held: it is shown on the job
-    #: and seeds the next evaluation.
+    #: and seeds the next evaluation. None when the tool returned none, or reported an
+    #: error — the stored response then stays.
     check_result: dict[str, Any] | None = None
     #: Set when the check could not be performed at all — an unreachable gateway, a tool
     #: that no longer exists. Distinct from "condition not met", which is a normal outcome.
@@ -251,10 +252,11 @@ class WatchEvaluator:
 
         if call.is_error:
             # The tool ran and reported its own failure. The payload usually says why, so
-            # keep it on the run for whoever debugs the job.
+            # keep it on the run for whoever debugs the job — in the error, not as
+            # `check_result`: that becomes the next poll's `prev`, and an error payload there
+            # breaks every condition that diffs against the previous response.
             return WatchOutcome(
                 condition_met=False,
-                check_result=check_result,
                 error=f"'{job.check_tool}' reported an error: {json.dumps(check_result, default=str)[:500]}",
             )
 
