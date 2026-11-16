@@ -1145,6 +1145,31 @@ class TestWatchEvaluatedBeforeDispatch:
         dispatch.assert_not_called()
         kwargs = repo.complete_run.call_args[1]
         assert kwargs["status"] == JobRunStatus.CONDITION_NOT_MET
+        # A judged poll becomes the next poll's `prev`.
+        assert repo.complete_job.call_args[1]["last_check_result"] == {"status": "OK"}
+
+    @pytest.mark.asyncio
+    async def test_a_cel_failure_still_stores_the_response(self):
+        # A condition that failed because of `prev` (`result != prev` while it is null) can
+        # only heal if the response it failed on becomes the next poll's `prev`.
+        repo = AsyncMock(spec=ScheduledJobRepository)
+        repo.create_run.return_value = 7
+        engine = _make_engine(repo=repo)
+
+        with patch.object(
+            engine._watch_evaluator,
+            "evaluate",
+            AsyncMock(
+                return_value=WatchOutcome(
+                    condition_met=False, check_result={"items": [1]}, error="CEL condition 'result != prev' failed"
+                )
+            ),
+        ):
+            with patch("console_backend.services.scheduler_engine.dispatch_streaming"):
+                await engine._dispatch_job(self._watch_job())
+
+        assert repo.complete_run.call_args[1]["status"] == JobRunStatus.FAILED
+        assert repo.complete_job.call_args[1]["last_check_result"] == {"items": [1]}
 
     @pytest.mark.asyncio
     async def test_a_check_failure_is_a_failed_run_not_a_quiet_one(self):
