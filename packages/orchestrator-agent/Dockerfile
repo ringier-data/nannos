@@ -32,7 +32,8 @@ LABEL org.opencontainers.image.source=https://github.com/ringier-data/nannos
 ARG WORKDIR
 
 # Install postgresql-client (required by migrate.sh for psql)
-RUN apt-get update && apt-get install -y --no-install-recommends postgresql-client && rm -rf /var/lib/apt/lists/*
+RUN echo 'Acquire::Retries "5"; Acquire::http::Timeout "30";' > /etc/apt/apt.conf.d/80-retries && \
+    apt-get update && apt-get install -y --no-install-recommends postgresql-client && rm -rf /var/lib/apt/lists/*
 
 # Copy rambler binary for running migrations
 COPY --from=rambler-source /rambler /usr/local/bin/rambler

@@ -28,7 +28,8 @@ ENV PYTHONDONTWRITEBYTECODE=1
 # libreoffice-impress-nogui: soffice --headless PPTX→ODP/PDF without X11 deps
 # libjemalloc2: reduces RSS fragmentation from repeated soffice child process
 #   allocations; soffice allocates and frees ~700 MB of image data per conversion
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN echo 'Acquire::Retries "5"; Acquire::http::Timeout "30";' > /etc/apt/apt.conf.d/80-retries && \
+    apt-get update && apt-get install -y --no-install-recommends \
     libreoffice-impress-nogui \
     libjemalloc2 \
     && rm -rf /var/lib/apt/lists/*
